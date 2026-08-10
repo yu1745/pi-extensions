@@ -225,7 +225,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
     promptGuidelines: [
       "Use web_search when you need up-to-date information not available in your training data.",
       "Use web_search when the user asks to look something up online, check current prices, find documentation, or verify facts.",
-      "For Chinese content, use location 'cn'. For English/international content, use location 'us'.",
+      "web_search: For Chinese content, use location 'cn'. For English/international content, use location 'us'.",
     ],
     parameters: Type.Object({
       query: Type.String({

@@ -7,6 +7,9 @@
  *   无法判断是卡住了还是健康推进。
  *
  * 本工具的思路：
+ *   0. 一条 bash-live 调用 = 一个长命令：不要用 &&/; 拼接多条长命令，
+ *      每个长步骤单独执行一次 bash-live（各自独立进度/退出码/日志）；
+ *      快速的非流式步骤用内建 bash 串行即可。
  *   1. 命令【原样执行，禁止模型写管道】；完整输出【始终流式】捕获：
  *      - 实时写入日志文件（全量，永不丢失）
  *      - 节流推送 partial 给 TUI —— 人实时看到滚动输出（与内建 bash 相同，
@@ -47,7 +50,7 @@ const LINE_DISPLAY_CAP = 8 * 1024; // 单行显示截断（防超长单行刷爆
 const bashLiveSchema = Type.Object({
 	command: Type.String({
 		description:
-			"要执行的完整命令（原样执行、完整流式输出）。【不要在命令本体执行任何过滤】：本体里不要写 | tail/head/grep 之类的管道——那会破坏实时可见性；所有过滤一律加到 filter 参数（后面的命令片段）里。gradle 建议加 --console=plain。",
+			"要执行的完整命令（原样执行、完整流式输出）。gradle 建议加 --console=plain。",
 	}),
 	filter: Type.Optional(
 		Type.String({
@@ -413,11 +416,12 @@ export default function (pi: ExtensionAPI) {
 		name: "bash-live",
 		label: "bash-live",
 		description:
-			"Execute long-running / large-output commands (builds like gradle/maven/npm, tests, installs, downloads, servers) with REAL-TIME streaming output. The command runs as-is: NEVER run any filter inside the command body — no `| tail -n 10`, `| head`, `| grep` pipes within the command itself (that destroys live visibility; humans can't tell a stall from healthy progress). All filtering goes into the filter parameter: a bash-style fragment whose semantics are `full output | filter`, supporting cascading pipes (any bash fragment), e.g. filter=\"tail -n 10\", filter=\"head -n 100 | tail -n 10\" (last 10 of the first 100 lines), filter=\"grep -E 'BUILD (SUCCESS|FAILED)' | head -n 20\". The fragment runs against the finished log only, so live streaming is never affected. Omit filter for a default tail -n 30. Live output is always visible in the TUI (expand with ctrl+o) and fully logged to ~/.pi/agent/state/bash-live-logs/. Optional timeout=N kills the process tree at N seconds (omit for unbounded, e.g. long builds). For gradle add --console=plain for stable text output.",
-		promptSnippet: "bash-live: long-running/large-output commands (live streaming; filter fragment instead of pipes)",
+			"Execute long-running / large-output commands (builds like gradle/maven/npm, tests, installs, downloads, servers) with REAL-TIME streaming output. The command runs as-is: full output is streamed live to the TUI (expand with ctrl+o) and written in full to a log file under ~/.pi/agent/state/bash-live-logs/. The filter parameter is a bash-style fragment (e.g. \"tail -n 10\", \"head -n 100 | tail -n 10\", \"grep -E 'BUILD (SUCCESS|FAILED)' | head -n 20\") applied to the finished log only, selecting what is returned to the model; omit it for a default tail -n 30. Optional timeout=N kills the process tree at N seconds (omit for unbounded, e.g. long builds). For gradle add --console=plain for stable text output.",
+		promptSnippet: "long-running/large-output commands (live streaming; filter fragment instead of pipes)",
 		promptGuidelines: [
 			"Any command that may run long or produce lots of output (builds, tests, installs, downloads, servers, migrations) MUST use the bash-live tool instead of bash.",
-			"NEVER run any filter inside the command body: no `| tail -n 10`, `| head`, `| grep` pipes within the command itself — they buffer output and hide live progress. All filtering goes into the filter parameter (a fragment applied to the finished log only, never affecting live streaming).",
+			"bash-live: NEVER run any filter inside the command body: no `| tail -n 10`, `| head`, `| grep` pipes within the command itself — they buffer output and hide live progress. All filtering goes into the filter parameter (a fragment applied to the finished log only, never affecting live streaming).",
+			"bash-live: one call = ONE long-running command — do not chain multiple long commands together with `&&`/`;`; run each long step as its own separate bash-live call (independent progress, exit code, and log). Chain quick non-streaming steps in plain bash instead.",
 		],
 		parameters: bashLiveSchema,
 		execute: bashLiveExecute,
