@@ -81,10 +81,10 @@ const SPAWN_PARAMS = Type.Object({
 			"Self-contained task brief. The subagent has no access to this conversation, so include: background and context, the exact goal, scope and boundaries (what to touch and what NOT to touch), constraints, cwd, and precisely what to return in its final message (e.g. file paths with line ranges, findings, or a changed-files list).",
 	}),
 	mode: Type.Union(
-		[Type.Literal("shallow"), Type.Literal("deep"), Type.Literal("task")],
+		[Type.Literal("shallow"), Type.Literal("task")],
 		{
 			description:
-				"shallow | deep | task — `shallow`: narrow, bounded recon; `deep`: broad surveys / triage / compare-rank; `task`: general work that may edit files and run commands.",
+				"shallow | task — `shallow`: read-only recon that answers a specific codebase question with evidence and stops; `task`: general work that may edit files and run commands.",
 		},
 	),
 	cwd: Type.Optional(
@@ -117,7 +117,7 @@ const WAIT_PARAMS = Type.Object({
 const SPAWN_DESCRIPTION = [
 	"Launch a subagent in the background and return immediately with a task id. The subagent keeps working while you continue with other work.",
 	"Completion: you receive a notification message when it finishes; use wait_subagent to collect the full result, or read the log file for details.",
-	"Modes: `shallow`/`deep` are read-only recon; `task` may edit files and run commands and must return a changed-files manifest.",
+	"Modes: `shallow` is read-only recon; `task` may edit files and run commands and must return a changed-files manifest.",
 ].join("\n");
 
 const WAIT_DESCRIPTION = [
@@ -130,9 +130,9 @@ export function registerSubagentTool(pi: ExtensionAPI) {
 		name: TOOL_NAME,
 		label: TOOL_LABEL,
 		description:
-			"Run an isolated subagent that works autonomously in its own context and reports back when done. Its output is reliable and can be trusted for integration. Modes: `shallow`/`deep` are read-only recon; `task` may edit files and run commands and must return a changed-files manifest.",
+			"Run an isolated subagent that works autonomously in its own context and reports back when done. Its output is reliable and can be trusted for integration. Modes: `shallow` is read-only recon; `task` may edit files and run commands and must return a changed-files manifest.",
 		promptSnippet:
-			"Run an isolated subagent: prefer delegating bounded sidecar tasks; `shallow`/`deep` read-only recon, `task` can edit files.",
+			"Run an isolated subagent: prefer delegating bounded sidecar tasks; `shallow` read-only recon, `task` can edit files.",
 		promptGuidelines: [],
 		parameters: SubagentParams,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -143,7 +143,7 @@ export function registerSubagentTool(pi: ExtensionAPI) {
 			};
 			const mode = getMode(input.mode);
 			if (!mode)
-				throw new Error('subagent requires mode: "shallow", "deep", or "task"');
+				throw new Error('subagent requires mode: "shallow" or "task"');
 			const details = await runSubagent(
 				mode,
 				input.task,
@@ -215,7 +215,7 @@ export function registerSubagentTool(pi: ExtensionAPI) {
 			const mode = getMode(input.mode);
 			if (!mode)
 				throw new Error(
-					'spawn_subagent requires mode: "shallow", "deep", or "task"',
+					'spawn_subagent requires mode: "shallow" or "task"',
 				);
 			const notify = input.notify !== false;
 			const started = startSubagent(

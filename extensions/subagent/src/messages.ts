@@ -6,7 +6,7 @@ export function sleep(ms: number): Promise<void> {
 }
 
 export function getMode(value: unknown): SubagentMode | null {
-	if (value === "shallow" || value === "deep" || value === "task") return value;
+	if (value === "shallow" || value === "task") return value;
 	return null;
 }
 

@@ -1,7 +1,7 @@
 import type { Message, ModelThinkingLevel } from "@earendil-works/pi-ai";
 
 export type ThinkingLevel = ModelThinkingLevel;
-export type SubagentMode = "shallow" | "deep" | "task";
+export type SubagentMode = "shallow" | "task";
 
 export interface SubagentModeConfig {
 	thinking?: ThinkingLevel;
@@ -11,7 +11,6 @@ export interface ExtensionConfig {
 	/** Append subagent usage guidance to the parent agent's system prompt each turn. Default: true. */
 	injectUsageGuidance?: boolean;
 	shallow?: SubagentModeConfig;
-	deep?: SubagentModeConfig;
 	task?: SubagentModeConfig;
 }
 

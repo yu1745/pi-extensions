@@ -41,7 +41,6 @@ function readPackageConfig(): Record<
 
 	return {
 		shallow: normalizeConfig(parsed?.shallow, DEFAULT_CONFIG.shallow),
-		deep: normalizeConfig(parsed?.deep, DEFAULT_CONFIG.deep),
 		task: normalizeConfig(parsed?.task, DEFAULT_CONFIG.task),
 	};
 }
@@ -76,7 +75,6 @@ export function readConfig(): Record<
 
 	return {
 		shallow: normalizeConfig(parsed.shallow, DEFAULT_CONFIG.shallow),
-		deep: normalizeConfig(parsed.deep, DEFAULT_CONFIG.deep),
 		task: normalizeConfig(parsed.task, DEFAULT_CONFIG.task),
 	};
 }

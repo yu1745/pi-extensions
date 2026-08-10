@@ -45,12 +45,13 @@ You have subagent tools and should delegate aggressively instead of doing everyt
 
 Delegate concrete, bounded sidecar work — recon, surveys, isolated implementations, experiments — instead of consuming many of your own turns on it. Keep urgent critical-path work local; never delegate work that needs live back-and-forth (the subagent cannot reply to follow-ups).
 
-Mode choice: \`shallow\` = narrow bounded recon (key files, entry points, hotspots); \`deep\` = broad surveys, triage, compare/rank; \`task\` = general work that may read, write, edit, and run commands (must return a changed-files manifest).
+Mode choice: \`shallow\` = read-only recon (answer a specific codebase question with file/line evidence and stop); \`task\` = general work that may read, write, edit, and run commands (must return a changed-files manifest).
 
-Write self-contained task briefs: background and context, exact goal, scope and boundaries (what to touch and what NOT to touch), constraints, cwd, and precisely what to return in the final message. Subagent output is reliable — trust it for integration.`;
+Trust subagent results. Do not re-verify a subagent's findings by re-reading the same files yourself — you may still inspect code for your own context when you genuinely need it, but do not redo the subagent's investigation. Re-running a subagent's search yourself wastes turns and undermines delegation.
+
+Write self-contained task briefs: background and context, exact goal, scope and boundaries (what to touch and what NOT to touch), constraints, cwd, and precisely what to return in the final message.`;
 
 export const SHALLOW_PROMPT_PATH = path.join(ROOT_DIR, "shallow.prompt.md");
-export const DEEP_PROMPT_PATH = path.join(ROOT_DIR, "deep.prompt.md");
 export const TASK_PROMPT_PATH = path.join(ROOT_DIR, "task.prompt.md");
 
 export const DEFAULT_CONFIG: Record<
@@ -58,9 +59,6 @@ export const DEFAULT_CONFIG: Record<
 	Required<SubagentModeConfig>
 > = {
 	shallow: {
-		thinking: "low",
-	},
-	deep: {
 		thinking: "low",
 	},
 	task: {
@@ -71,16 +69,10 @@ export const DEFAULT_CONFIG: Record<
 export const MODE_SPECS = {
 	shallow: {
 		label: "Shallow",
-		shortDescription: "Tight, bounded scan. Find key files and stop early.",
-		promptPath: SHALLOW_PROMPT_PATH,
-		systemPreamble: "Stay strictly in discovery mode.",
-	},
-	deep: {
-		label: "Deep",
 		shortDescription:
-			"Broad scan. Good for surveys, triage, and compare/rank work.",
-		promptPath: DEEP_PROMPT_PATH,
-		systemPreamble: "Stay strictly in discovery mode.",
+			"Read-only recon. Answer a specific codebase question with concrete evidence and stop.",
+		promptPath: SHALLOW_PROMPT_PATH,
+		systemPreamble: "Stay strictly in discovery mode. Read-only.",
 	},
 	task: {
 		label: "Task",
@@ -114,10 +106,10 @@ export function getConfigPath(): string {
 }
 
 export const SubagentModeSchema = StringEnum(
-	["shallow", "deep", "task"] as const,
+	["shallow", "task"] as const,
 	{
 		description:
-			"shallow | deep | task — `shallow`: narrow, bounded recon; `deep`: broad surveys / triage / compare-rank; `task`: general work that may edit files and run commands.",
+			"shallow | task — `shallow`: read-only recon that answers a specific codebase question with evidence and stops; `task`: general work that may edit files and run commands.",
 	},
 ) as any;
 
