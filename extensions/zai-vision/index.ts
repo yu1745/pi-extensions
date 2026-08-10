@@ -44,7 +44,7 @@ import {
 	UI_DIFF_CHECK_PROMPT,
 	GENERAL_IMAGE_ANALYSIS_PROMPT,
 	UI_TO_ARTIFACT_PROMPTS,
-} from "./prompts";
+} from "./prompts.js";
 
 // ─── Config ────────────────────────────────────────────────────────────────────
 

@@ -1,7 +1,7 @@
 {
 	"name": "@yu1745/pi-extensions",
 	"version": "0.1.0",
-	"description": "Monorepo of yu1745's pi extensions: Z.AI web search / vision / ZRead MCP bridges, provider quota footers, and UX tweaks.",
+	"description": "Monorepo of yu1745's pi extensions: subagents, web search/reader, vision, ZRead MCP, bash-live, provider quota footers, and UX tweaks.",
 	"type": "module",
 	"license": "MIT",
 	"author": "yu1745",
@@ -12,7 +12,9 @@
 		"@earendil-works/pi-coding-agent": "0.84.1",
 		"@earendil-works/pi-tui": "0.84.1",
 		"@types/node": "^25.9.1",
-		"typebox": "1.1.38"
+		"playwright": "^1.62.1",
+		"typebox": "1.1.38",
+		"typescript": "^6.0.3"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",
@@ -22,6 +24,7 @@
 	},
 	"pi": {
 		"extensions": [
+			"extensions/bash-live.ts",
 			"extensions/clear-new-alias.ts",
 			"extensions/cny-footer.ts",
 			"extensions/ds-balance.ts",
@@ -30,7 +33,9 @@
 			"extensions/minimax-quota.ts",
 			"extensions/openai-codex-fast.ts",
 			"extensions/openai-codex-quota.ts",
+			"extensions/subagent/index.ts",
 			"extensions/tokenspeed.ts",
+			"extensions/web-reader-spa/index.ts",
 			"extensions/working-bell.ts",
 			"extensions/web-search/index.ts",
 			"extensions/zai-vision/index.ts",
@@ -44,7 +49,11 @@
 		"zai",
 		"web-search",
 		"vision",
-		"zread-mcp"
+		"zread-mcp",
+		"subagent",
+		"web-reader-spa",
+		"bash-live",
+		"playwright"
 	],
 	"repository": {
 		"type": "git",

@@ -21,7 +21,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { StreamableHttpClient } from "./mcp";
+import { StreamableHttpClient } from "./mcp.js";
 
 // ─── Config ────────────────────────────────────────────────────────────────────
 
@@ -211,7 +211,7 @@ export default function (pi: ExtensionAPI) {
 					`provider: ${PROVIDER}  (key: ${maskKey(key)})`,
 					`tools (${tools.length}):`,
 					...tools.map(
-						(t) => `  • ${t.name} — ${(t.description ?? "").slice(0, 72)}`,
+						(t: any) => `  • ${t.name} — ${(t.description ?? "").slice(0, 72)}`,
 					),
 				];
 				ctx.ui.notify(lines.join("\n"), "info");
