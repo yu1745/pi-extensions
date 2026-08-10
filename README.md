@@ -10,6 +10,9 @@ pi install git:github.com/yu1745/pi-extensions
 
 | Extension | Path | What it does |
 |---|---|---|
+| `subagent` / `spawn_subagent` / `wait_subagent` | `extensions/subagent/` | Isolated subagents: sync delegation plus **non-blocking background runs** — `spawn_subagent` returns immediately, subagents keep working while the agent continues; `alt+left/right` fullscreen view (Codex-style), `esc` stops, `q` closes, completion notifications, `wait_subagent` collects results |
+| `bash-live` | `extensions/bash-live.ts` | Long-running commands with real-time streaming output |
+| `web_reader_spa` | `extensions/web-reader-spa/` | SPA-aware, anti-WAF web reader (Playwright + stealth + ARIA extraction) |
 | `web_search` / `web_reader` | `extensions/web-search/` | Z.AI Web Search Prime + Web Reader via MCP (Streamable HTTP) |
 | ZAI Vision tools (8) | `extensions/zai-vision/` | UI→code / OCR / error diagnosis / diagram / data-viz / diff-check / image / video analysis via GLM-4.6V |
 | `zread_*` | `extensions/zread-mcp/` | ZRead remote MCP (public GitHub exploration) as native pi tools |
@@ -23,6 +26,8 @@ pi install git:github.com/yu1745/pi-extensions
 | `inject-resume` | `extensions/inject-resume.ts` | Inject-resume-on-exit (pi side, Linux/bash) |
 | `cny-footer` | `extensions/cny-footer.ts` | Footer with session cost in RMB |
 | `clear-new-alias` | `extensions/clear-new-alias.ts` | Clears the new-version alias notice |
+
+> **16 extensions, one package.** Previously separate repos (`pi-subagent`, `pi-web-reader-spa`, `pi-bash-live`) are merged here — uninstall the standalone packages before installing this one to avoid duplicate tool registration.
 
 ## API keys
 
