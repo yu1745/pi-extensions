@@ -191,6 +191,11 @@ function parseSSE(text: string): unknown {
 const MAX_OUTPUT_BYTES = 50_000;
 const MAX_OUTPUT_CHARS = 80_000;
 
+const DEFAULT_READER_MAX_CHARS = 50_000;
+
+/**
+ * Truncate search output by bytes (results are naturally compact).
+ */
 function truncateOutput(text: string): string {
   if (text.length <= MAX_OUTPUT_CHARS && Buffer.byteLength(text, "utf8") <= MAX_OUTPUT_BYTES) {
     return text;
@@ -207,6 +212,33 @@ function truncateOutput(text: string): string {
   return (
     truncated +
     `\n\n[Output truncated: ${byteLen} bytes of ${Buffer.byteLength(text, "utf8")} bytes]`
+  );
+}
+
+/**
+ * Truncate web_reader output to a caller-specified character budget.
+ * Counts by code points (never splits surrogate pairs, so CJK/emoji stay
+ * intact) and appends a hint telling the model it can re-call with a
+ * larger maxChars to fetch the remaining content.
+ */
+function truncateReaderOutput(text: string, maxChars: number): string {
+  const total = [...text].length; // code point count
+  if (total <= maxChars) return text;
+  let truncated = "";
+  let count = 0;
+  for (const ch of text) {
+    if (count >= maxChars) break;
+    truncated += ch;
+    count++;
+  }
+  return (
+    truncated +
+    `\n\n[Content truncated: showing ${maxChars} of ${total} characters. ` +
+    `The rest is not included. To read the remaining content, call ` +
+    `web_reader again with a larger maxChars (e.g. maxChars=${Math.min(
+      Math.max(maxChars * 2, 100_000),
+      1_000_000,
+    )}).]`
   );
 }
 
@@ -328,16 +360,25 @@ export default function webSearchExtension(pi: ExtensionAPI) {
     name: "web_reader",
     label: "Web Reader",
     description:
-      "Fetch and convert a URL to markdown/text for LLM consumption. Extracts the main content from web pages, removing navigation, ads, and boilerplate.",
+      "Fetch and convert a URL to markdown/text for LLM consumption. Extracts the main content from web pages, removing navigation, ads, and boilerplate. Long pages are truncated to maxChars (default 50000) — if the content you need was cut off, call again with a larger maxChars to fetch more.",
     promptSnippet: "Fetch and read the content of a web page URL",
     promptGuidelines: [
       "Use web_reader when you need to read the full content of a specific URL or web page.",
       "Use web_reader after web_search to get detailed content from search results.",
+      "Long pages are truncated by default (50000 chars). If important content is missing, re-call web_reader with a larger maxChars.",
     ],
     parameters: Type.Object({
       url: Type.String({ description: "The URL to fetch and read" }),
       format: Type.Optional(
         Type.Union([Type.Literal("markdown"), Type.Literal("text")]),
+      ),
+      maxChars: Type.Optional(
+        Type.Integer({
+          description:
+            "Maximum number of characters to return (default 50000). If the page is longer, the output is truncated with a notice — call again with a larger value to read the rest.",
+          minimum: 1000,
+          maximum: 1_000_000,
+        }),
       ),
     }),
 
@@ -403,7 +444,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
         outputText = JSON.stringify(result.data, null, 2);
       }
 
-      outputText = truncateOutput(outputText);
+      outputText = truncateReaderOutput(outputText, params.maxChars ?? DEFAULT_READER_MAX_CHARS);
 
       return {
         content: [{ type: "text", text: outputText }],
