@@ -117,14 +117,12 @@ const WAIT_PARAMS = Type.Object({
 const SPAWN_DESCRIPTION = [
 	"Launch a subagent in the background and return immediately with a task id. The subagent keeps working while you continue with other work.",
 	"Completion: you receive a notification message when it finishes; use wait_subagent to collect the full result, or read the log file for details.",
-	"When to use: delegate concrete, bounded sidecar tasks — recon, surveys, isolated implementations — that would otherwise consume many of your own turns. Launch several subagents in parallel in a single message when their tasks are independent.",
-	"When NOT to use: urgent critical-path work whose result your very next step depends on — do that locally instead.",
 	"Modes: `shallow`/`deep` are read-only recon; `task` may edit files and run commands and must return a changed-files manifest.",
 ].join("\n");
 
 const WAIT_DESCRIPTION = [
 	"Wait for a background subagent (from spawn_subagent) to finish and return its full result. If still running after timeout_ms, returns its current status so you can continue other work and wait again later.",
-	"Call sparingly: prefer continuing non-overlapping work while the subagent runs; only wait when the result blocks your very next step.",
+	"Omit taskId to collect the most recent background subagent. If it times out, do other work and wait again later.",
 ].join("\n");
 
 export function registerSubagentTool(pi: ExtensionAPI) {
@@ -132,17 +130,10 @@ export function registerSubagentTool(pi: ExtensionAPI) {
 		name: TOOL_NAME,
 		label: TOOL_LABEL,
 		description:
-			"Run an isolated subagent that works autonomously in its own context and reports back when done. Its output is reliable and can be trusted for integration.\n\nWhen to use: delegate concrete, bounded sidecar tasks — recon, surveys, isolated implementations — that would otherwise consume many of your own turns. Prefer delegating whenever a subtask is well-scoped and self-contained. Call multiple subagents in parallel within a single message when their tasks are independent, to maximize throughput.\n\nWhen NOT to use: urgent critical-path work whose result your very next step depends on — do that locally instead. Do not delegate work that needs live back-and-forth; the subagent cannot reply to follow-ups.\n\n`shallow`/`deep` are read-only recon; `task` may edit files and run commands and must return a changed-files manifest.",
+			"Run an isolated subagent that works autonomously in its own context and reports back when done. Its output is reliable and can be trusted for integration. Modes: `shallow`/`deep` are read-only recon; `task` may edit files and run commands and must return a changed-files manifest.",
 		promptSnippet:
 			"Run an isolated subagent: prefer delegating bounded sidecar tasks; `shallow`/`deep` read-only recon, `task` can edit files.",
-		promptGuidelines: [
-			"subagent: Prefer delegating concrete, bounded sidecar tasks — recon, surveys, isolated implementations — over doing them inline; keep urgent critical-path work local.",
-			"subagent: You may call subagent several times in parallel within a single message when the subtasks are independent.",
-			"subagent: Subagent output is reliable and can be trusted for integration.",
-			"subagent: No inherited context; include background, exact goal, scope, constraints, cwd, and desired output in the task.",
-			"subagent: Use `shallow` for narrow, bounded recon — key files / entry points / hotspots; `deep` for broad surveys, triage, compare/rank.",
-			"subagent: Use `task` for general work that may read, write, edit, and run commands; it must return a changed-files manifest.",
-		],
+		promptGuidelines: [],
 		parameters: SubagentParams,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const input = params as {
@@ -212,12 +203,7 @@ export function registerSubagentTool(pi: ExtensionAPI) {
 		description: SPAWN_DESCRIPTION,
 		promptSnippet:
 			"Launch background subagents that keep working while you continue; they notify on completion and results are collected with wait_subagent",
-		promptGuidelines: [
-			"spawn_subagent: Prefer launching background subagents for independent sidecar work instead of blocking on it; keep critical-path work local.",
-			"spawn_subagent: Launch several in parallel within a single message when the subtasks are independent.",
-			"spawn_subagent: Returns immediately with a task id; a notification arrives when the subagent finishes.",
-			"spawn_subagent: Collect results with wait_subagent only when you need them for your next step — otherwise continue working.",
-		],
+		promptGuidelines: [],
 		parameters: SPAWN_PARAMS,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const input = params as {
@@ -312,11 +298,7 @@ export function registerSubagentTool(pi: ExtensionAPI) {
 		description: WAIT_DESCRIPTION,
 		promptSnippet:
 			"Collect the result of a background subagent; call sparingly — continue working while subagents run",
-		promptGuidelines: [
-			"wait_subagent: Only wait when the result blocks your very next step; otherwise continue non-overlapping work and let the completion notification tell you when it is done.",
-			"wait_subagent: Omit taskId to collect the most recent background subagent.",
-			"wait_subagent: If it times out, do other work and wait again later.",
-		],
+		promptGuidelines: [],
 		parameters: WAIT_PARAMS,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const input = params as { taskId?: string; timeoutMs?: number };
