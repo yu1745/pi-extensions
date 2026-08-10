@@ -31,6 +31,24 @@ export const DONE_MESSAGE_TYPE = "subagent-done";
 
 export const STATUS_BAR_KEY = "subagents";
 
+/**
+ * Appended to the parent agent's system prompt on every turn (before_agent_start)
+ * when injectUsageGuidance is enabled (default). Tool descriptions are easy for
+ * models to ignore; a system-prompt policy drives actual delegation behavior.
+ */
+export const USAGE_GUIDANCE = `### Subagent delegation policy
+
+You have subagent tools and should delegate aggressively instead of doing everything inline:
+- \`spawn_subagent\` — background, returns immediately; collect the result later with \`wait_subagent\`. Prefer this whenever you can continue other work in parallel; launch several in parallel within a single message when the subtasks are independent.
+- \`subagent\` — blocking; use when you need the result before you can proceed.
+- \`wait_subagent\` — collect a finished background subagent's full result; call sparingly, only when the result blocks your very next step.
+
+Delegate concrete, bounded sidecar work — recon, surveys, isolated implementations, experiments — instead of consuming many of your own turns on it. Keep urgent critical-path work local; never delegate work that needs live back-and-forth (the subagent cannot reply to follow-ups).
+
+Mode choice: \`shallow\` = narrow bounded recon (key files, entry points, hotspots); \`deep\` = broad surveys, triage, compare/rank; \`task\` = general work that may read, write, edit, and run commands (must return a changed-files manifest).
+
+Write self-contained task briefs: background and context, exact goal, scope and boundaries (what to touch and what NOT to touch), constraints, cwd, and precisely what to return in the final message. Subagent output is reliable — trust it for integration.`;
+
 export const SHALLOW_PROMPT_PATH = path.join(ROOT_DIR, "shallow.prompt.md");
 export const DEEP_PROMPT_PATH = path.join(ROOT_DIR, "deep.prompt.md");
 export const TASK_PROMPT_PATH = path.join(ROOT_DIR, "task.prompt.md");

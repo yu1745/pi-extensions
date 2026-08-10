@@ -81,6 +81,18 @@ export function readConfig(): Record<
 	};
 }
 
+export function readGuidanceEnabled(): boolean {
+	let parsed: ExtensionConfig | undefined;
+	try {
+		parsed = JSON.parse(
+			fs.readFileSync(getConfigPath(), "utf8"),
+		) as ExtensionConfig;
+	} catch {
+		parsed = undefined;
+	}
+	return parsed?.injectUsageGuidance !== false;
+}
+
 export function emptyUsage(): UsageStats {
 	return {
 		input: 0,

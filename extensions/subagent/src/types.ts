@@ -8,6 +8,8 @@ export interface SubagentModeConfig {
 }
 
 export interface ExtensionConfig {
+	/** Append subagent usage guidance to the parent agent's system prompt each turn. Default: true. */
+	injectUsageGuidance?: boolean;
 	shallow?: SubagentModeConfig;
 	deep?: SubagentModeConfig;
 	task?: SubagentModeConfig;
