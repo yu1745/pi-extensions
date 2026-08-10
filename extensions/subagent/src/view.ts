@@ -5,7 +5,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
-import { Markdown, matchesKey } from "@earendil-works/pi-tui";
+import { Markdown, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import {
 	NEXT_AGENT_SHORTCUT,
 	PANEL_TOGGLE_SHORTCUT,
@@ -42,14 +42,15 @@ function elapsed(state: SubagentRunState): string {
 }
 
 function truncate(text: string, width: number): string {
-	if (text.length <= width) return text;
-	return `${text.slice(0, Math.max(1, width - 1))}…`;
+	// Visible-width aware: CJK chars are 2 columns wide, so text.length is not
+	// a safe measure. truncateToWidth keeps ANSI codes intact and adds "…".
+	return truncateToWidth(text, Math.max(1, width), "…");
 }
 
 function firstLine(text: string): string {
 	const trimmed = text.trim();
 	const line = trimmed.split("\n")[0] ?? "";
-	return line.length > 120 ? `${line.slice(0, 119)}…` : line;
+	return truncateToWidth(line, 120, "…");
 }
 
 function formatToolResult(msg: any): string {
@@ -232,9 +233,12 @@ class SubagentView implements Component {
 			const header = `${selected.taskId} [${selected.mode}] · ${selected.cwd} · ${elapsed(selected)} · ${formatUsage(selected.usage)}`;
 			lines.push(truncate(theme.fg("muted", header), innerWidth));
 			lines.push(
-				theme.fg(
-					"dim",
-					`model ${selected.model} · task: ${firstLine(selected.task)}`,
+				truncate(
+					theme.fg(
+						"dim",
+						`model ${selected.model} · task: ${firstLine(selected.task)}`,
+					),
+					innerWidth,
 				),
 			);
 			lines.push(theme.fg("dim", "─".repeat(innerWidth)));
