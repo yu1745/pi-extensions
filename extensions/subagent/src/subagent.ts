@@ -203,10 +203,11 @@ export function startSubagent(
 		});
 	};
 
-	const proc = spawn("pi", args, {
+	const isWin = process.platform === "win32";
+	const proc = spawn(isWin ? "pi.cmd" : "pi", args, {
 		cwd,
-		shell: false,
-		detached: process.platform !== "win32",
+		shell: isWin,
+		detached: !isWin,
 		stdio: ["pipe", "pipe", "pipe"],
 		env: { ...process.env, [CHILD_ENV]: "1" },
 	});
