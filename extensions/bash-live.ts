@@ -26,6 +26,7 @@
  */
 
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
@@ -154,6 +155,19 @@ function buildEnv(ctx: ExtensionContext | undefined): NodeJS.ProcessEnv {
 
 function killProcessGroup(pid: number, sig: NodeJS.Signals = "SIGTERM"): void {
 	if (!pid) return;
+	if (process.platform === "win32") {
+		// Windows 无进程组/信号：taskkill /T 杀整棵树（/F 幂等，两段式调用无妨）
+		try {
+			spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], {
+				stdio: "ignore",
+				windowsHide: true,
+				timeout: 5_000,
+			});
+		} catch {
+			/* ignore */
+		}
+		return;
+	}
 	try {
 		process.kill(-pid, sig);
 	} catch {
@@ -164,6 +178,36 @@ function killProcessGroup(pid: number, sig: NodeJS.Signals = "SIGTERM"): void {
 	} catch {
 		/* ignore */
 	}
+}
+
+/**
+ * 用 pi 解析的 shell（getShellConfig，跨平台）同步执行一段 bash 脚本。
+ * 适配 WSL legacy bash 的 stdin 传参模式（commandTransport === "stdin"）。
+ */
+function runShellSync(
+	script: string,
+	timeoutMs = 30_000,
+): { error?: Error; status: number | null; stdout: string; stderr: string } {
+	const { shell, args, commandTransport } = getShellConfig();
+	const fromStdin = commandTransport === "stdin";
+	const r = fromStdin
+		? spawnSync(shell, args, {
+				input: script,
+				encoding: "utf8",
+				timeout: timeoutMs,
+				maxBuffer: 64 * 1024 * 1024,
+			})
+		: spawnSync(shell, [...args, script], {
+				encoding: "utf8",
+				timeout: timeoutMs,
+				maxBuffer: 64 * 1024 * 1024,
+			});
+	return {
+		error: r.error ?? undefined,
+		status: r.status,
+		stdout: (r.stdout ?? "") as string,
+		stderr: (r.stderr ?? "") as string,
+	};
 }
 
 /** 基于日志文件的最终过滤：grep/grepV [+grepContext] → headLines/tailLines */
@@ -188,12 +232,8 @@ function filterOutput(
 		// 安全传值：日志内容只通过 stdin 重定向进入片段（内容中的引号/$/反引号均为数据，
 		// 不经过 shell 解析）；只有 filter 片段本身与日志路径（shq 引用）会被拼进 shell。
 		// 关键：重定向必须放在管道【最前】（< file cmd | cmd2），放在后面会绑定到最后一个命令。
-		// 用 bash 而非 sh：dash 不支持 `set -o pipefail`。
-		const r = spawnSync("bash", ["-c", `set -o pipefail; < ${shq(logFile)} ${filter}`], {
-			encoding: "utf8",
-			timeout: 30_000,
-			maxBuffer: 64 * 1024 * 1024,
-		});
+		// 用 bash 而非 sh：dash 不支持 `set -o pipefail`。shell 由 getShellConfig 解析（Windows 上自动找 Git Bash）。
+		const r = runShellSync(`set -o pipefail; < ${shq(logFile)} ${filter}`);
 		const stdout = (r.stdout ?? "") as string;
 		const stderr = (r.stderr ?? "") as string;
 		if (r.error) {
@@ -207,7 +247,7 @@ function filterOutput(
 		}
 	} else {
 		filterDesc = "tail -n 30 (default)";
-		const r = spawnSync("tail", ["-n", "30", logFile], { encoding: "utf8", timeout: 30_000, maxBuffer: 64 * 1024 * 1024 });
+		const r = runShellSync(`tail -n 30 ${shq(logFile)}`);
 		result = (r.stdout ?? "") as string;
 	}
 
@@ -219,7 +259,7 @@ function filterOutput(
 }
 
 function countLines(logFile: string): number {
-	const r = spawnSync("wc", ["-l", logFile], { encoding: "utf8", timeout: 10_000 });
+	const r = runShellSync(`wc -l < ${shq(logFile)}`, 10_000);
 	if (r.error || r.status !== 0) {
 		try {
 			const data = readFileSync(logFile, "utf8");
@@ -244,14 +284,19 @@ async function bashLiveExecute(
 
 	const logFile = newLogPath();
 	const startedAt = Date.now();
-	const shell = process.env.SHELL || "/bin/bash";
-	const child = spawn(shell, ["-c", command], {
+	const { shell, args: shellArgs, commandTransport } = getShellConfig();
+	const commandFromStdin = commandTransport === "stdin";
+	const child = spawn(shell, commandFromStdin ? shellArgs : [...shellArgs, command], {
 		cwd,
 		detached: process.platform !== "win32",
-		stdio: ["ignore", "pipe", "pipe"],
+		stdio: [commandFromStdin ? "pipe" : "ignore", "pipe", "pipe"],
 		env: buildEnv(ctx),
 		windowsHide: true,
 	});
+	if (commandFromStdin) {
+		child.stdin?.on("error", () => {});
+		child.stdin?.end(command);
+	}
 
 	const splitter = new LineSplitter();
 	const displayTail: string[] = []; // TUI 实时显示的滚动窗口
