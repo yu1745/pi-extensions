@@ -139,11 +139,11 @@ function pickerLine(
 				: run.status === "completed"
 					? theme.fg("success", "✓")
 					: theme.fg("error", "✗");
-		const marker = selected ? theme.fg("accent", "▶") : " ";
-		const label = `${marker} ${index + 1}:${run.taskId} [${run.mode}] ${icon}`;
-		parts.push(selected ? theme.fg("accent", label) : label);
+		const label = `${index + 1}:${run.taskId} [${run.mode}] ${icon}`;
+		// 选中项整体负片（反显），替代原先的小三角标记
+		parts.push(selected ? theme.inverse(` ${label} `) : label);
 	});
-	const line = parts.join("  ");
+	const line = parts.join(theme.fg("dim", " │ "));
 	return truncate(line, width);
 }
 
@@ -196,19 +196,17 @@ class SubagentView implements Component {
 		const innerWidth = Math.max(20, width - 4);
 
 		const lines: string[] = [];
-		const title = theme.fg("toolTitle", theme.bold("Subagents"));
-		const status =
-			running > 0
-				? theme.fg("warning", `● ${running} running`)
-				: theme.fg("dim", "idle");
-		lines.push(`${title}  ${status}`);
+		// 顶部全宽反显标题条：view 替换的是底部编辑器容器，这一条正好卡在
+		// 与上方 pi 主屏幕的交界处，形成明显横向分界
+		const runningText = running > 0 ? `● ${running} running` : "idle";
+		lines.push(theme.inverse(` Subagents  ${runningText} `.padEnd(width)));
 		lines.push(
 			theme.fg(
 				"dim",
 				`${PREV_AGENT_SHORTCUT}/${NEXT_AGENT_SHORTCUT} switch · esc/q close · updates live`,
 			),
 		);
-		lines.push(theme.fg("dim", "─".repeat(innerWidth)));
+		lines.push(theme.fg("borderAccent", "═".repeat(innerWidth)));
 
 		if (runs.length === 0) {
 			lines.push(
@@ -306,8 +304,9 @@ function openView(ctx: ExtensionContext): void {
 				closeView = () => done(null);
 				return component;
 			},
-			// No `overlay: true` — this is a fullscreen view that replaces the main
-			// screen (Codex-style), not a floating panel.
+			// No `overlay: true` — the custom view replaces the bottom editor
+			// container (not the whole screen), so the inverted title bar doubles
+			// as the horizontal boundary against the chat area above.
 		)
 		.then(() => {
 			view = null;
