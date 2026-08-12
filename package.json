@@ -1,7 +1,7 @@
 {
 	"name": "@yu1745/pi-extensions",
 	"version": "0.1.0",
-	"description": "Monorepo of yu1745's pi extensions: subagents, web search/reader, vision, ZRead MCP, bash-live, provider quota footers, and UX tweaks.",
+	"description": "Monorepo of yu1745's pi extensions: web search/reader, vision, ZRead MCP, bash-live, provider quota footers, and UX tweaks.",
 	"type": "module",
 	"license": "MIT",
 	"author": "yu1745",
@@ -32,7 +32,6 @@
 			"extensions/inject-resume.ts",
 			"extensions/openai-codex-fast.ts",
 			"extensions/quota-footer.ts",
-			"extensions/subagent/index.ts",
 			"extensions/tokenspeed.ts",
 			"extensions/web-reader-spa/index.ts",
 			"extensions/working-bell.ts",
@@ -49,7 +48,6 @@
 		"web-search",
 		"vision",
 		"zread-mcp",
-		"subagent",
 		"web-reader-spa",
 		"bash-live",
 		"playwright"
