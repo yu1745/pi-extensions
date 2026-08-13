@@ -39,6 +39,7 @@ import { Type, type Static } from "typebox";
 // ---------------------------------------------------------------------------
 
 const LOG_DIR = join(homedir(), ".pi", "agent", "state", "bash-live-logs");
+const DEFAULT_TIMEOUT_SECS = 300; // 未显式传 timeout 时的默认硬超时（5 分钟）
 const TAIL_DISPLAY_LINES = 1000; // TUI 实时显示的滚动窗口行数
 const TAIL_DISPLAY_BYTES = 256 * 1024; // TUI 实时显示的滚动窗口字节上限（UTF-8 安全截断）
 const MAX_RETURN_BYTES = 100 * 1024; // 返回给模型的结果字节上限
@@ -60,7 +61,7 @@ const bashLiveSchema = Type.Object({
 		}),
 	),
 	timeout: Type.Optional(
-		Type.Number({ description: "硬超时秒数，到点终止整个进程树（不传 = 不限时，适合长构建）" }),
+		Type.Number({ description: "硬超时秒数，到点终止整个进程树（不传 = 默认 300 秒 / 5 分钟；长构建请显式传更大值）" }),
 	),
 });
 
@@ -348,6 +349,7 @@ async function bashLiveExecute(
 	const progressTimer = setInterval(pushProgress, 1000);
 	let childDone = false;
 	let killedBy: "timeout" | "abort" | null = null;
+	const timeoutSec = params.timeout ?? DEFAULT_TIMEOUT_SECS;
 	const outcome = await new Promise<{ exitCode: number | null }>((resolve, reject) => {
 		let settled = false;
 		const finish = (v: { exitCode: number | null }) => {
@@ -375,7 +377,7 @@ async function bashLiveExecute(
 			// 进程已完全退出、pipe 已 drain → 此刻组装错误能带上完整已输出
 			if (killedBy === "timeout") {
 				const { text } = filterOutput(logFile, params);
-				fail(new Error(`Command timed out after ${params.timeout} seconds\n\n${text}\n\n完整输出: ${logFile}`));
+				fail(new Error(`Command timed out after ${timeoutSec} seconds\n\n${text}\n\n完整输出: ${logFile}`));
 				return;
 			}
 			if (killedBy === "abort") {
@@ -396,15 +398,15 @@ async function bashLiveExecute(
 			else signal.addEventListener("abort", onAbort, { once: true });
 		}
 
-		if (params.timeout !== undefined) {
-			const ms = params.timeout * 1000;
+		{
+			const ms = timeoutSec * 1000;
 			setTimeout(() => {
 				if (settled) return;
 				killedBy = "timeout";
 				killProcessGroup(child.pid ?? 0, "SIGTERM");
 				setTimeout(() => killProcessGroup(child.pid ?? 0, "SIGKILL"), 2000);
 				// 兜底：SIGKILL 后仍无 close 则强制失败
-				setTimeout(() => fail(new Error(`Command timed out after ${params.timeout} seconds`)), 5000);
+				setTimeout(() => fail(new Error(`Command timed out after ${timeoutSec} seconds`)), 5000);
 			}, ms);
 		}
 	});
@@ -461,7 +463,7 @@ export default function (pi: ExtensionAPI) {
 		name: "bash-live",
 		label: "bash-live",
 		description:
-			"Execute long-running / large-output commands (builds like gradle/maven/npm, tests, installs, downloads, servers) with REAL-TIME streaming output. The command runs as-is: full output is streamed live to the TUI (expand with ctrl+o) and written in full to a log file under ~/.pi/agent/state/bash-live-logs/. The filter parameter is a bash-style fragment (e.g. \"tail -n 10\", \"head -n 100 | tail -n 10\", \"grep -E 'BUILD (SUCCESS|FAILED)' | head -n 20\") applied to the finished log only, selecting what is returned to the model; omit it for a default tail -n 30. Optional timeout=N kills the process tree at N seconds (omit for unbounded, e.g. long builds). For gradle add --console=plain for stable text output.",
+			"Execute long-running / large-output commands (builds like gradle/maven/npm, tests, installs, downloads, servers) with REAL-TIME streaming output. The command runs as-is: full output is streamed live to the TUI (expand with ctrl+o) and written in full to a log file under ~/.pi/agent/state/bash-live-logs/. The filter parameter is a bash-style fragment (e.g. \"tail -n 10\", \"head -n 100 | tail -n 10\", \"grep -E 'BUILD (SUCCESS|FAILED)' | head -n 20\") applied to the finished log only, selecting what is returned to the model; omit it for a default tail -n 30. Optional timeout=N kills the process tree at N seconds (default 300s/5min if omitted; pass a larger N for long builds). For gradle add --console=plain for stable text output.",
 		promptSnippet: "long-running/large-output commands (live streaming; filter fragment instead of pipes)",
 		promptGuidelines: [
 			"Any command that may run long or produce lots of output (builds, tests, installs, downloads, servers, migrations) MUST use the bash-live tool instead of bash.",
