@@ -48,6 +48,8 @@ type Phase = "thinking" | "answering" | null;
 interface PhaseWindow {
 	/** Sliding window of [timestampMs, cumulativeTokens]. */
 	samples: Array<[number, number]>;
+	/** Sliding window of [timestampMs, cumulativeChars] for the char fallback. */
+	charSamples: Array<[number, number]>;
 	/** First-seen timestamp for this phase, in ms. */
 	startTime: number | null;
 	/** Cumulative chars seen in this phase's deltas. */
@@ -69,6 +71,7 @@ interface PhaseWindow {
 function newPhaseWindow(): PhaseWindow {
 	return {
 		samples: [],
+		charSamples: [],
 		startTime: null,
 		chars: 0,
 		lastTokens: 0,
@@ -140,11 +143,19 @@ export default function (pi: ExtensionAPI) {
 	function recordPhaseSample(pw: PhaseWindow, ts: number) {
 		if (pw.startTime === null) pw.startTime = ts;
 
+		const cutoff = ts - WINDOW_MS;
+
 		// Push the usage-derived token count.
 		pw.samples.push([ts, pw.lastTokens]);
-		const cutoff = ts - WINDOW_MS;
 		while (pw.samples.length > 2 && pw.samples[0][0] < cutoff) {
 			pw.samples.shift();
+		}
+
+		// Push the char count in lockstep so the fallback can use the same
+		// rolling window instead of the phase's total elapsed time.
+		pw.charSamples.push([ts, pw.chars]);
+		while (pw.charSamples.length > 2 && pw.charSamples[0][0] < cutoff) {
+			pw.charSamples.shift();
 		}
 
 		// Primary path: rate over the window from advancing usage tokens.
@@ -161,15 +172,20 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		// Fallback: estimate from characters when usage isn't streaming yet.
-		// We re-derive the whole-window token estimate from chars so that the
-		// speed reflects only what was received inside the window.
-		if (pw.chars > 0) {
-			const elapsed = ts - (pw.startTime ?? ts);
-			if (elapsed >= MIN_WINDOW_MS) {
-				const estTokens = pw.chars / CHARS_PER_TOKEN;
-				pw.currentSpeed = (estTokens / elapsed) * 1000;
-				return;
+		// Fallback: estimate from the chars received inside the same rolling
+		// window. Measuring the *delta* of chars (not chars-since-phase-start)
+		// means a pause in streaming leaves the last speed in place instead of
+		// decaying toward zero while time keeps advancing.
+		if (pw.charSamples.length >= 2) {
+			const [t0, c0] = pw.charSamples[0];
+			const [t1, c1] = pw.charSamples[pw.charSamples.length - 1];
+			const dt = t1 - t0;
+			if (dt >= MIN_WINDOW_MS) {
+				const dc = c1 - c0;
+				if (dc > 0) {
+					pw.currentSpeed = ((dc / CHARS_PER_TOKEN) / dt) * 1000;
+					return;
+				}
 			}
 		}
 
@@ -239,11 +255,17 @@ export default function (pi: ExtensionAPI) {
 		const ev = event.assistantMessageEvent;
 		const now = Date.now();
 
-		// Track which phase we're in from delta events.
+		// Track which phase we're in from delta events. Tool-call arguments are
+		// real (non-reasoning) output tokens, so they belong to the answering
+		// phase's char estimate; ignoring them used to make the readout decay
+		// during every tool call.
 		if (ev.type === "thinking_delta") {
 			tracker.phase = "thinking";
 			tracker.thinking.chars += ev.delta?.length ?? 0;
 		} else if (ev.type === "text_delta") {
+			tracker.phase = "answering";
+			tracker.answering.chars += ev.delta?.length ?? 0;
+		} else if (ev.type === "toolcall_delta") {
 			tracker.phase = "answering";
 			tracker.answering.chars += ev.delta?.length ?? 0;
 		}
