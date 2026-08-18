@@ -52,7 +52,7 @@ const LINE_DISPLAY_CAP = 8 * 1024; // 单行显示截断（防超长单行刷爆
 const bashLiveSchema = Type.Object({
 	command: Type.String({
 		description:
-			"要执行的完整命令（原样执行、完整流式输出）。gradle 建议加 --console=plain。",
+			"⚠️ DO NOT pipe this command. NEVER write `| tail`, `| head`, `| grep`, `| rg`, `| sed`, `| awk`, `| wc -l` (or any filter pipe) inside the `command` field — pipes buffer stdout and silently destroy the live streaming. ALL filtering (tail/head/grep/rg/...) MUST go into the `filter` parameter below; that is the only correct way. Command runs as-is, full output is streamed live. For gradle, add `--console=plain`.",
 	}),
 	filter: Type.Optional(
 		Type.String({
@@ -467,7 +467,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "long-running/large-output commands (live streaming; filter fragment instead of pipes)",
 		promptGuidelines: [
 			"Any command that may run long or produce lots of output (builds, tests, installs, downloads, servers, migrations) MUST use the bash-live tool instead of bash.",
-			"bash-live: NEVER run any filter inside the command body: no `| tail -n 10`, `| head`, `| grep` pipes within the command itself — they buffer output and hide live progress. All filtering goes into the filter parameter (a fragment applied to the finished log only, never affecting live streaming).",
+			"bash-live hard rule: NEVER pipe the `command` field. No `| tail`, `| head`, `| grep`, `| rg`, `| sed`, `| awk`, `| wc -l`, or any filter pipe — they buffer stdout and silently destroy the live streaming. EVERY filter (tail/head/grep/...) MUST go into the `filter` parameter; that is the only correct way. Read this rule carefully every turn before calling bash-live.",
 			"bash-live: one call = ONE long-running command — do not chain multiple long commands together with `&&`/`;`; run each long step as its own separate bash-live call (independent progress, exit code, and log). Chain quick non-streaming steps in plain bash instead.",
 		],
 		parameters: bashLiveSchema,
