@@ -1,7 +1,7 @@
 {
 	"name": "@yu1745/pi-extensions",
 	"version": "0.1.0",
-	"description": "Monorepo of yu1745's pi extensions: web search/reader, vision, ZRead MCP, bash-live, provider quota footers, and UX tweaks.",
+	"description": "Monorepo of yu1745's pi extensions: web search/reader, vision, bash-live, provider quota footers, and UX tweaks.",
 	"type": "module",
 	"license": "MIT",
 	"author": "yu1745",
@@ -36,8 +36,7 @@
 			"extensions/web-reader-spa/index.ts",
 			"extensions/working-bell.ts",
 			"extensions/web-search/index.ts",
-			"extensions/zai-vision/index.ts",
-			"extensions/zread-mcp/index.ts"
+			"extensions/zai-vision/index.ts"
 		]
 	},
 	"keywords": [
@@ -47,7 +46,6 @@
 		"zai",
 		"web-search",
 		"vision",
-		"zread-mcp",
 		"web-reader-spa",
 		"bash-live",
 		"playwright"

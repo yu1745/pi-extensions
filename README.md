@@ -14,7 +14,7 @@ pi install git:github.com/yu1745/pi-extensions
 | `web_reader_spa` | `extensions/web-reader-spa/` | SPA-aware, anti-WAF web reader (Playwright + stealth + ARIA extraction) |
 | `web_search` / `web_reader` | `extensions/web-search/` | Z.AI Web Search Prime + Web Reader via MCP (Streamable HTTP) |
 | ZAI Vision tools (8) | `extensions/zai-vision/` | UI→code / OCR / error diagnosis / diagram / data-viz / diff-check / image / video analysis via GLM-4.6V |
-| `zread_*` | `extensions/zread-mcp/` | ZRead remote MCP (public GitHub exploration) as native pi tools |
+
 | `quota` | `extensions/quota-footer.ts` | Unified usage monitor in the footer: DeepSeek balance, GLM / MiniMax / Codex quota (one widget, switch-dispatched) |
 | `openai-codex-fast` | `extensions/openai-codex-fast.ts` | `/fast` toggles `service_tier=priority` on Codex requests |
 | `tokenspeed` | `extensions/tokenspeed.ts` | Model output speed (tokens/sec) status line |
@@ -23,16 +23,16 @@ pi install git:github.com/yu1745/pi-extensions
 | `cny-footer` | `extensions/cny-footer.ts` | Footer with session cost in RMB |
 | `clear-new-alias` | `extensions/clear-new-alias.ts` | Clears the new-version alias notice |
 
-> **15 extensions, one package.** Previously separate repos (`pi-web-reader-spa`, `pi-bash-live`) are merged here — uninstall the standalone packages before installing this one to avoid duplicate tool registration.
+> **14 extensions, one package.** Previously separate repos (`pi-web-reader-spa`, `pi-bash-live`) are merged here — uninstall the standalone packages before installing this one to avoid duplicate tool registration.
 >
 > pi-smart-compact is provided separately by the fork `git:github.com/yu1745/pi-smart-compact` (upstream + `allowUnverifiedApply`).>
 > The `subagent` extension was **removed** in favor of [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents) (install with `pi install npm:@tintinweb/pi-subagents`).
 
 ## API keys
 
-No keys are hardcoded. Z.AI-backed tools (`web-search`, `zai-vision`, `zread-mcp`) resolve the key in this order:
+No keys are hardcoded. Z.AI-backed tools (`web-search`, `zai-vision`) resolve the key in this order:
 
-1. env var (`Z_AI_MCP_API_KEY`, `Z_AI_VISION_API_KEY`, `ZREAD_MCP_URL` …)
+1. env var (`Z_AI_MCP_API_KEY`, `Z_AI_VISION_API_KEY` …)
 2. pi's configured auth for the `zai-coding-cn` provider (via `modelRegistry.getProviderAuth` — independent of the session's current provider)
 3. error with a hint to run `/login zai-coding-cn`
 
