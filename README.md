@@ -10,7 +10,6 @@ pi install git:github.com/yu1745/pi-extensions
 
 | Extension | Path | What it does |
 |---|---|---|
-| `bash-live` | `extensions/bash-live.ts` | Long-running commands with real-time streaming output |
 | `web_reader_spa` | `extensions/web-reader-spa/` | SPA-aware, anti-WAF web reader (Playwright + stealth + ARIA extraction) |
 | `web_search` / `web_reader` | `extensions/web-search/` | Z.AI Web Search Prime + Web Reader via MCP (Streamable HTTP) |
 | ZAI Vision tools (8) | `extensions/zai-vision/` | UI→code / OCR / error diagnosis / diagram / data-viz / diff-check / image / video analysis via GLM-4.6V |
@@ -23,7 +22,7 @@ pi install git:github.com/yu1745/pi-extensions
 | `cny-footer` | `extensions/cny-footer.ts` | Footer with session cost in RMB |
 | `clear-new-alias` | `extensions/clear-new-alias.ts` | Clears the new-version alias notice |
 
-> **14 extensions, one package.** Previously separate repos (`pi-web-reader-spa`, `pi-bash-live`) are merged here — uninstall the standalone packages before installing this one to avoid duplicate tool registration.
+> **13 extensions, one package.** Previously separate repos (`pi-web-reader-spa`) are merged here — uninstall the standalone packages before installing this one to avoid duplicate tool registration.
 >
 > pi-smart-compact is provided separately by the fork `git:github.com/yu1745/pi-smart-compact` (upstream + `allowUnverifiedApply`).>
 > The `subagent` extension was **removed** in favor of [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents) (install with `pi install npm:@tintinweb/pi-subagents`).

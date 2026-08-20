@@ -1,7 +1,7 @@
 {
 	"name": "@yu1745/pi-extensions",
 	"version": "0.1.0",
-	"description": "Monorepo of yu1745's pi extensions: web search/reader, vision, bash-live, provider quota footers, and UX tweaks.",
+	"description": "Monorepo of yu1745's pi extensions: web search/reader, vision, provider quota footers, and UX tweaks.",
 	"type": "module",
 	"license": "MIT",
 	"author": "yu1745",
@@ -26,8 +26,7 @@
 	},
 	"pi": {
 		"extensions": [
-			"extensions/bash-live.ts",
-			"extensions/clear-new-alias.ts",
+				"extensions/clear-new-alias.ts",
 			"extensions/cny-footer.ts",
 			"extensions/inject-resume.ts",
 			"extensions/openai-codex-fast.ts",
@@ -47,7 +46,6 @@
 		"web-search",
 		"vision",
 		"web-reader-spa",
-		"bash-live",
 		"playwright"
 	],
 	"repository": {
