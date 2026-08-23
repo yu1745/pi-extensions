@@ -26,7 +26,8 @@
 	},
 	"pi": {
 		"extensions": [
-				"extensions/clear-new-alias.ts",
+			"extensions/clear-new-alias.ts",
+			"extensions/compact-threshold.ts",
 			"extensions/cny-footer.ts",
 			"extensions/inject-resume.ts",
 			"extensions/openai-codex-fast.ts",
