@@ -31,7 +31,7 @@
 			"extensions/cny-footer.ts",
 			"extensions/inject-resume.ts",
 			"extensions/openai-codex-fast.ts",
-			"extensions/codex-sol-exploration-effort.ts",
+			"extensions/exploration-model-map.ts",
 			"extensions/quota-footer.ts",
 			"extensions/tokenspeed.ts",
 			"extensions/web-reader-spa/index.ts",
