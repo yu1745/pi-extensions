@@ -33,6 +33,7 @@
 			"extensions/openai-codex-fast.ts",
 			"extensions/exploration-model-map.ts",
 			"extensions/quota-footer.ts",
+			"extensions/siliconflow.ts",
 			"extensions/tokenspeed.ts",
 			"extensions/web-reader-spa/index.ts",
 			"extensions/working-bell.ts",
