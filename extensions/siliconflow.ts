@@ -14,6 +14,9 @@ import { get as httpsGet } from "node:https";
 
 const PROVIDER_ID = "siliconflow";
 const BASE_URL = "https://api.siliconflow.cn/v1";
+const PRICING_URL = "https://www.siliconflow.cn/pricing";
+// Pricing page lists RMB per million tokens; pi cost fields use USD.
+const RMB_TO_USD = 1 / 6.8;
 
 interface SiliconFlowModelEntry {
 	id: string;
@@ -52,22 +55,38 @@ function shortName(id: string): string {
 	return id.replace(/^(deepseek-ai|Qwen|THUDM|moonshotai|meta-llama|mistralai|ZhipuAI|01-ai|inclusionAI|zai-org|MiniMaxAI|tencent|ByteDance-Seed|stepfun-ai|meituan-longcat|nex-agi|Pro)\//, "");
 }
 
-function fetchJson(url: string, apiKey: string, timeoutMs = 10000): Promise<{ data?: SiliconFlowModelEntry[] }> {
+function fetchText(url: string, headers: Record<string, string> = {}, timeoutMs = 10000): Promise<string> {
 	return new Promise((resolve, reject) => {
-		const req = httpsGet(url, { headers: { Authorization: `Bearer ${apiKey}` } }, (res) => {
+		const req = httpsGet(url, { headers }, (res) => {
 			const chunks: Buffer[] = [];
 			res.on("data", (c: Buffer) => chunks.push(c));
-			res.on("end", () => {
-				try {
-					resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-				} catch (e) {
-					reject(e);
-				}
-			});
+			res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
 		});
 		req.setTimeout(timeoutMs, () => req.destroy(new Error("timeout")));
 		req.on("error", reject);
 	});
+}
+
+// Scrape the chat-model pricing table from the SSR pricing page.
+// Each row: <a href=".../models?target=<id>">Name</a> followed by ¥ prices
+// (input, output, cache) within the same row. Returns RMB per M tokens.
+function parsePricing(html: string): Map<string, { input: number; output: number; cacheRead: number }> {
+	const chatStart = html.indexOf("\u5bf9\u8bdd\u6a21\u578b"); // 对话模型
+	const chatEnd = html.indexOf("\u751f\u56fe\u6a21\u578b"); // 生图模型
+	if (chatStart < 0 || chatEnd < 0 || chatEnd <= chatStart) return new Map();
+	const chatHtml = html.slice(chatStart, chatEnd);
+	const out = new Map<string, { input: number; output: number; cacheRead: number }>();
+	const rowRe = /target=([A-Za-z0-9%._-]+)"[^>]*>([^<]*)<\/a>/g;
+	let m: RegExpExecArray | null;
+	while ((m = rowRe.exec(chatHtml))) {
+		const id = decodeURIComponent(m[1]);
+		const rest = chatHtml.slice(m.index, m.index + 2500);
+		const prices = [...rest.matchAll(/\u00a5\s*([\d.]+)/g)].map((x) => Number(x[1]));
+		if (prices.length >= 2 && !out.has(id)) {
+			out.set(id, { input: prices[0], output: prices[1], cacheRead: prices[2] ?? 0 });
+		}
+	}
+	return out;
 }
 
 export default async function (pi: ExtensionAPI): Promise<void> {
@@ -94,19 +113,35 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	let models: ProviderModelConfig[] = [];
 	if (apiKey) {
 		try {
-			const payload = await fetchJson(`${BASE_URL}/models?sub_type=chat`, apiKey);
-			models = (payload.data ?? []).filter(isChatModel).map((m) => ({
-				id: m.id,
-				name: shortName(m.id),
-				...modelMeta(m.id),
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				compat: {
-					supportsDeveloperRole: false,
-					supportsReasoningEffort: false,
-					maxTokensField: "max_tokens",
-					thinkingFormat: "deepseek",
-				},
-			}));
+			const [modelsPayload, pricingHtml] = await Promise.all([
+				fetchText(`${BASE_URL}/models?sub_type=chat`, { Authorization: `Bearer ${apiKey}` })
+					.then((t) => JSON.parse(t) as { data?: SiliconFlowModelEntry[] }),
+				fetchText(PRICING_URL).catch(() => ""),
+			]);
+			const pricing = parsePricing(pricingHtml);
+			models = (modelsPayload.data ?? []).filter(isChatModel).map((m) => {
+				const p = pricing.get(m.id);
+				const cost = p
+					? {
+						input: +(p.input * RMB_TO_USD).toFixed(4),
+						output: +(p.output * RMB_TO_USD).toFixed(4),
+						cacheRead: +(p.cacheRead * RMB_TO_USD).toFixed(4),
+						cacheWrite: 0,
+					}
+					: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+				return {
+					id: m.id,
+					name: shortName(m.id),
+					...modelMeta(m.id),
+					cost,
+					compat: {
+						supportsDeveloperRole: false,
+						supportsReasoningEffort: false,
+						maxTokensField: "max_tokens",
+						thinkingFormat: "deepseek",
+					},
+				};
+			});
 		} catch {
 			// Network failure → empty list this launch; pi still starts.
 		}
