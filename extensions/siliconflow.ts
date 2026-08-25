@@ -53,26 +53,6 @@ function shortName(id: string): string {
 	return id.replace(/^(deepseek-ai|Qwen|THUDM|moonshotai|meta-llama|mistralai|ZhipuAI|01-ai|inclusionAI)\//, "");
 }
 
-// Seed catalog: available before the first successful network refresh
-// (pi creates some runtimes with allowNetwork: false, e.g. --list-models).
-const SEED_MODELS: Model<"openai-completions">[] = [
-	"deepseek-ai/DeepSeek-V3.2",
-	"deepseek-ai/DeepSeek-R1",
-	"Qwen/Qwen3-Coder-30B-A3B-Instruct",
-	"Qwen/Qwen3-32B",
-	"zai-org/GLM-5.2",
-	"moonshotai/Kimi-K2.7-Code",
-	"MiniMaxAI/MiniMax-M2.5",
-].map((id) => ({
-	id,
-	name: shortName(id),
-	api: "openai-completions" as const,
-	provider: PROVIDER_ID,
-	baseUrl: BASE_URL,
-	...modelMeta(id),
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-}));
-
 async function fetchModels(apiKey: string, signal: AbortSignal): Promise<Model<"openai-completions">[]> {
 	const res = await fetch(`${BASE_URL}/models?sub_type=chat`, {
 		headers: { Authorization: `Bearer ${apiKey}` },
@@ -97,15 +77,15 @@ export default function (pi: ExtensionAPI): void {
 		baseUrl: BASE_URL,
 		apiKey: "$SILICONFLOW_API_KEY",
 		api: "openai-completions",
-		models: [...SEED_MODELS],
+		models: [],
 
 		// Native refresh channel: pi calls this on its freshness schedule
 		// (and on /model open when stale). The catalog persists across
 		// sessions, so models stay available offline between checks.
 		async refreshModels(context: RefreshModelsContext): Promise<ProviderModelConfig[]> {
-			// Offline (e.g. --list-models) → keep persisted catalog, or the seed.
+			// Offline (e.g. --list-models) → keep persisted catalog.
 			if (!context.allowNetwork || context.signal.aborted) {
-				return context.stored?.models?.length ? [...context.stored.models] : SEED_MODELS;
+				return context.stored?.models ? [...context.stored.models] : [];
 			}
 
 			let apiKey = process.env.SILICONFLOW_API_KEY;
@@ -113,23 +93,23 @@ export default function (pi: ExtensionAPI): void {
 				const cred = context.credential as { type?: string; key?: string };
 				if (cred.type === "api_key" && cred.key) apiKey = cred.key;
 			}
-			if (!apiKey) return context.stored?.models ? [...context.stored.models] : SEED_MODELS;
+			if (!apiKey) return context.stored?.models ? [...context.stored.models] : [];
 
 			try {
 				const models = await fetchModels(apiKey, context.signal);
 
-			await context.publish({
-				persist: {
-					models,
-					lastModified: Date.now(),
-					checkedAt: Date.now(),
-				},
-			});
+				await context.publish({
+					persist: {
+						models,
+						lastModified: Date.now(),
+						checkedAt: Date.now(),
+					},
+				});
 
-			return models;
+				return models;
 			} catch {
-				// Network failure → keep whatever is cached/seeded.
-				return context.stored?.models ? [...context.stored.models] : SEED_MODELS;
+				// Network failure → keep whatever is cached.
+				return context.stored?.models ? [...context.stored.models] : [];
 			}
 		},
 	});
