@@ -1,16 +1,16 @@
 // siliconflow.ts — SiliconFlow (硅基流动) model provider for pi.
 //
-// Registers the `siliconflow` provider with native dynamic model refresh:
-// refreshModels() fetches GET /v1/models and publishes the catalog through
-// context.publish({ persist }), so pi caches it across sessions, re-checks
-// on its normal freshness schedule, and lists models in /model, /login,
-// --list-models, and --model matching — just like a built-in provider.
+// Registers the `siliconflow` provider with dynamic model discovery:
+// the async extension factory fetches GET /v1/models before startup
+// continues (documented pi behavior), so models appear in /model,
+// /login, --list-models, and --model matching on every launch.
 //
 // SiliconFlow is OpenAI Chat Completions compatible (api: "openai-completions").
 // Auth: env var SILICONFLOW_API_KEY, or a key stored via /login siliconflow.
+// Without a key the extension is a no-op; pi starts normally.
 
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
-import type { Model, RefreshModelsContext } from "@earendil-works/pi-ai";
+import { get as httpsGet } from "node:https";
 
 const PROVIDER_ID = "siliconflow";
 const BASE_URL = "https://api.siliconflow.cn/v1";
@@ -37,12 +37,11 @@ function modelMeta(id: string): Pick<ProviderModelConfig, "contextWindow" | "max
 	if (/qwen/i.test(lower)) return { reasoning, input, contextWindow: 131072, maxTokens: 16384 };
 	if (/glm/i.test(lower)) return { reasoning, input, contextWindow: 128000, maxTokens: 16384 };
 	if (/kimi|moonshot/i.test(lower)) return { reasoning, input, contextWindow: 131072, maxTokens: 16384 };
-	if (/gpt-4o|claude|gemini/i.test(lower)) return { reasoning, input, contextWindow: 128000, maxTokens: 16384 };
 	return { reasoning, input, contextWindow: 32768, maxTokens: 8192 };
 }
 
 // Keep chat/instruct models only; drop embeddings, rerankers, TTS, image/video generation.
-const EXCLUDE_PATTERN = /(embed|bge-|rerank|gte-|speech|tts|voice|whisper|fun-audio|cosyvoice|sensevoice|stable-diffusion|flux|kolors|hunyuan-video|cogvideo|video|sd3|hidream|wan2)/i;
+const EXCLUDE_PATTERN = /(embed|bge-|rerank|gte-|speech|tts|voice|whisper|fun-audio|cosyvoice|sensevoice|stable-diffusion|flux|kolors|hunyuan-video|cogvideo|video|sd3|hidream|wan2|paddleocr|captioner|mt-)/i;
 
 function isChatModel(m: SiliconFlowModelEntry): boolean {
 	if (m.object && m.object !== "model") return false;
@@ -50,67 +49,74 @@ function isChatModel(m: SiliconFlowModelEntry): boolean {
 }
 
 function shortName(id: string): string {
-	return id.replace(/^(deepseek-ai|Qwen|THUDM|moonshotai|meta-llama|mistralai|ZhipuAI|01-ai|inclusionAI)\//, "");
+	return id.replace(/^(deepseek-ai|Qwen|THUDM|moonshotai|meta-llama|mistralai|ZhipuAI|01-ai|inclusionAI|zai-org|MiniMaxAI|tencent|ByteDance-Seed|stepfun-ai|meituan-longcat|nex-agi|Pro)\//, "");
 }
 
-async function fetchModels(apiKey: string, signal: AbortSignal): Promise<Model<"openai-completions">[]> {
-	const res = await fetch(`${BASE_URL}/models?sub_type=chat`, {
-		headers: { Authorization: `Bearer ${apiKey}` },
-		signal,
+function fetchJson(url: string, apiKey: string, timeoutMs = 10000): Promise<{ data?: SiliconFlowModelEntry[] }> {
+	return new Promise((resolve, reject) => {
+		const req = httpsGet(url, { headers: { Authorization: `Bearer ${apiKey}` } }, (res) => {
+			const chunks: Buffer[] = [];
+			res.on("data", (c: Buffer) => chunks.push(c));
+			res.on("end", () => {
+				try {
+					resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+				} catch (e) {
+					reject(e);
+				}
+			});
+		});
+		req.setTimeout(timeoutMs, () => req.destroy(new Error("timeout")));
+		req.on("error", reject);
 	});
-	if (!res.ok) throw new Error(`SiliconFlow /v1/models returned ${res.status}`);
-	const payload = (await res.json()) as { data?: SiliconFlowModelEntry[] };
-	return (payload.data ?? []).filter(isChatModel).map((m) => ({
-		id: m.id,
-		name: shortName(m.id),
-		api: "openai-completions" as const,
-		provider: PROVIDER_ID,
-		baseUrl: BASE_URL,
-		...modelMeta(m.id),
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, tiers: [] },
-	}));
 }
 
-export default function (pi: ExtensionAPI): void {
+export default async function (pi: ExtensionAPI): Promise<void> {
+	let apiKey = process.env.SILICONFLOW_API_KEY;
+
+	// Fall back to a key stored via /login siliconflow (read auth.json directly,
+	// ExtensionAPI does not expose the registry).
+	if (!apiKey) {
+		try {
+			const { readFileSync } = await import("node:fs");
+			const { join } = await import("node:path");
+			const os = await import("node:os");
+			const authPath = join(os.homedir(), ".pi", "agent", "auth.json");
+			const auth = JSON.parse(readFileSync(authPath, "utf8")) as Record<string, { type?: string; key?: string }>;
+			const cred = auth[PROVIDER_ID];
+			if (cred?.key) apiKey = cred.key;
+		} catch {
+			// no stored auth — fine
+		}
+	}
+
+	// Register the provider shell even without models, so /login siliconflow
+	// works and users can store a key first. Discovery happens next launch.
+	let models: ProviderModelConfig[] = [];
+	if (apiKey) {
+		try {
+			const payload = await fetchJson(`${BASE_URL}/models?sub_type=chat`, apiKey);
+			models = (payload.data ?? []).filter(isChatModel).map((m) => ({
+				id: m.id,
+				name: shortName(m.id),
+				...modelMeta(m.id),
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				compat: {
+					supportsDeveloperRole: false,
+					supportsReasoningEffort: false,
+					maxTokensField: "max_tokens",
+					thinkingFormat: "deepseek",
+				},
+			}));
+		} catch {
+			// Network failure → empty list this launch; pi still starts.
+		}
+	}
+
 	pi.registerProvider(PROVIDER_ID, {
 		name: "SiliconFlow",
 		baseUrl: BASE_URL,
 		apiKey: "$SILICONFLOW_API_KEY",
 		api: "openai-completions",
-		models: [],
-
-		// Native refresh channel: pi calls this on its freshness schedule
-		// (and on /model open when stale). The catalog persists across
-		// sessions, so models stay available offline between checks.
-		async refreshModels(context: RefreshModelsContext): Promise<ProviderModelConfig[]> {
-			// Offline (e.g. --list-models) → keep persisted catalog.
-			if (!context.allowNetwork || context.signal.aborted) {
-				return context.stored?.models ? [...context.stored.models] : [];
-			}
-
-			let apiKey = process.env.SILICONFLOW_API_KEY;
-			if (!apiKey && context.credential) {
-				const cred = context.credential as { type?: string; key?: string };
-				if (cred.type === "api_key" && cred.key) apiKey = cred.key;
-			}
-			if (!apiKey) return context.stored?.models ? [...context.stored.models] : [];
-
-			try {
-				const models = await fetchModels(apiKey, context.signal);
-
-				await context.publish({
-					persist: {
-						models,
-						lastModified: Date.now(),
-						checkedAt: Date.now(),
-					},
-				});
-
-				return models;
-			} catch {
-				// Network failure → keep whatever is cached.
-				return context.stored?.models ? [...context.stored.models] : [];
-			}
-		},
+		models,
 	});
 }
