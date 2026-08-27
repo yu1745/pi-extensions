@@ -107,6 +107,9 @@ function resolveThinkingLevels(modelRegistry: Registry, targetModel: string): st
 	return THINKING_LEVELS.filter((level) => target.thinkingLevelMap?.[level] != null);
 }
 
+/** Highest thinking level allowed for general-purpose subagents. */
+const GP_MAX_LEVEL = "medium" as const;
+
 /** Build the instruction injected into the system prompt for one subagent type. */
 function buildInstruction(
 	subagentType: string,
@@ -114,7 +117,12 @@ function buildInstruction(
 	levels: string[] | null,
 	freeThinking: boolean,
 ): string {
-	const levelList = levels ? levels.join(", ") : null;
+	// For general-purpose, drop levels above medium (high, xhigh, max).
+	if (freeThinking && levels) {
+		const cap = THINKING_LEVELS.indexOf(GP_MAX_LEVEL);
+		levels = levels.filter((l) => THINKING_LEVELS.indexOf(l as (typeof THINKING_LEVELS)[number]) <= cap);
+	}
+	const levelList = levels && levels.length > 0 ? levels.join(", ") : null;
 	return (
 		(freeThinking
 			? `When calling the Agent tool with \`subagent_type\` set to \`${subagentType}\`, set \`model\` to \`${targetModel}\` `
