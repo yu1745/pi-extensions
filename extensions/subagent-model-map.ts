@@ -1,4 +1,4 @@
-// exploration-model-map: route subagents to per-main-model target models,
+// subagent-model-map: route subagents to per-main-model target models,
 // configured in settings.json:
 //
 //   "explorationModelMap": {
@@ -26,7 +26,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const MARKER = "[exploration-model-map]";
+const MARKER = "[subagent-model-map]";
 const SETTINGS_KEYS = ["explorationModelMap", "generalPurposeModelMap"] as const;
 const SUBAGENT_TYPES: Record<(typeof SETTINGS_KEYS)[number], string> = {
 	explorationModelMap: "Explore",
@@ -108,7 +108,7 @@ function resolveThinkingLevels(modelRegistry: Registry, targetModel: string): st
 }
 
 /** Highest thinking level allowed for general-purpose subagents. */
-const GP_MAX_LEVEL = "medium" as const;
+const GP_MAX_LEVEL = "high" as const;
 
 /** Build the instruction injected into the system prompt for one subagent type. */
 function buildInstruction(
@@ -117,7 +117,7 @@ function buildInstruction(
 	levels: string[] | null,
 	freeThinking: boolean,
 ): string {
-	// For general-purpose, drop levels above medium (high, xhigh, max).
+	// For general-purpose, drop levels above high (xhigh, max).
 	if (freeThinking && levels) {
 		const cap = THINKING_LEVELS.indexOf(GP_MAX_LEVEL);
 		levels = levels.filter((l) => THINKING_LEVELS.indexOf(l as (typeof THINKING_LEVELS)[number]) <= cap);

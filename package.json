@@ -32,7 +32,7 @@
 			"extensions/cny-footer.ts",
 			"extensions/inject-resume.ts",
 			"extensions/openai-codex-fast.ts",
-			"extensions/exploration-model-map.ts",
+			"extensions/subagent-model-map.ts",
 			"extensions/quota-footer.ts",
 			"extensions/siliconflow.ts",
 			"extensions/tokenspeed.ts",
