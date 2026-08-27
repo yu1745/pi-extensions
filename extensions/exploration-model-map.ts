@@ -12,9 +12,10 @@
 // matches a key, an instruction is injected into the system prompt telling the
 // model to dispatch the corresponding subagent type (Explore via
 // explorationModelMap, general-purpose via generalPurposeModelMap) with the
-// mapped model and an explicit thinking level: Explore gets low/medium,
-// general-purpose chooses freely based on task difficulty. When no rule
-// matches, nothing is injected for that subagent type.
+// mapped model and an explicit thinking level. The target model's supported
+// thinking levels are resolved from the model registry's thinkingLevelMap and
+// injected as the allowed values; if the target model cannot be found or has
+// no thinkingLevelMap, nothing is injected for that subagent type.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
@@ -65,8 +66,38 @@ function readModelMap(key: string): Record<string, string> {
 	return result;
 }
 
+/** Canonical pi thinking level order. */
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+type LevelMap = Partial<Record<(typeof THINKING_LEVELS)[number], string | null>>;
+type Registry = { find(provider: string, modelId: string): { thinkingLevelMap?: LevelMap } | undefined };
+
+/**
+ * Resolve the thinking levels supported by `targetModel` from its
+ * thinkingLevelMap (non-null entries, in canonical order). Returns null when
+ * the model is unknown or has no thinkingLevelMap.
+ */
+function resolveThinkingLevels(modelRegistry: Registry, targetModel: string): string[] | null {
+	const slash = targetModel.indexOf("/");
+	if (slash <= 0) return null;
+	let target: ReturnType<Registry["find"]>;
+	try {
+		target = modelRegistry.find(targetModel.slice(0, slash), targetModel.slice(slash + 1));
+	} catch {
+		return null;
+	}
+	if (!target?.thinkingLevelMap) return null;
+	return THINKING_LEVELS.filter((level) => target.thinkingLevelMap?.[level] != null);
+}
+
 /** Build the instruction injected into the system prompt for one subagent type. */
-function buildInstruction(subagentType: string, targetModel: string, freeThinking: boolean): string {
+function buildInstruction(
+	subagentType: string,
+	targetModel: string,
+	levels: string[],
+	freeThinking: boolean,
+): string {
+	const levelList = levels.join(", ");
 	return (
 		(freeThinking
 			? `When calling the Agent tool with \`subagent_type\` set to \`${subagentType}\`, set \`model\` to \`${targetModel}\` `
@@ -74,8 +105,8 @@ function buildInstruction(subagentType: string, targetModel: string, freeThinkin
 				`\`model\` set to \`${targetModel}\` `) +
 		`(the full model name; a bare shorthand is only a fuzzy fallback), ` +
 		(freeThinking
-			? `and \`thinking\` to the level appropriate for the task's difficulty. `
-			: `and \`thinking\` set explicitly to either \`low\` or \`medium\`, choosing the lower level unless the task ` +
+			? `and \`thinking\` to one of ${levelList}, choosing the level appropriate for the task's difficulty. `
+			: `and \`thinking\` set explicitly to one of ${levelList}, preferring the lower levels unless the task ` +
 				`requires more reasoning. `) +
 		`Do not omit these parameters.`
 	);
@@ -91,11 +122,13 @@ export default function (pi: ExtensionAPI) {
 		for (const key of SETTINGS_KEYS) {
 			const targetModel = readModelMap(key)[active];
 			// No matching rule for the active model: skip this subagent type.
-			if (targetModel) {
-				instructions.push(
-					buildInstruction(SUBAGENT_TYPES[key], targetModel, key === "generalPurposeModelMap"),
-				);
-			}
+			if (!targetModel) continue;
+			// Unknown target model or no thinkingLevelMap: skip this subagent type.
+			const levels = resolveThinkingLevels(ctx.modelRegistry, targetModel);
+			if (!levels || levels.length === 0) continue;
+			instructions.push(
+				buildInstruction(SUBAGENT_TYPES[key], targetModel, levels, key === "generalPurposeModelMap"),
+			);
 		}
 		if (instructions.length === 0) return;
 
