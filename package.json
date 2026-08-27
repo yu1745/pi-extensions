@@ -9,6 +9,7 @@
 		"extensions"
 	],
 	"dependencies": {
+		"linkedom": "^0.18.13",
 		"playwright": "^1.62.1"
 	},
 	"devDependencies": {
@@ -49,6 +50,7 @@
 		"web-search",
 		"vision",
 		"web-reader-spa",
+		"web-reader-local",
 		"playwright"
 	],
 	"repository": {

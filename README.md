@@ -11,7 +11,6 @@ pi install git:github.com/yu1745/pi-extensions
 | Extension | Path | What it does |
 |---|---|---|
 | `web_reader_spa` | `extensions/web-reader-spa/` | SPA-aware, anti-WAF web reader (Playwright + stealth + ARIA extraction) |
-| `web_search` / `web_reader` | `extensions/web-search/` | Z.AI Web Search Prime + Web Reader via MCP (Streamable HTTP) |
 | ZAI Vision tools (8) | `extensions/zai-vision/` | UI→code / OCR / error diagnosis / diagram / data-viz / diff-check / image / video analysis via GLM-4.6V |
 
 | `quota` | `extensions/quota-footer.ts` | Unified usage monitor in the footer: DeepSeek balance, GLM / MiniMax / Codex quota (one widget, switch-dispatched) |
@@ -23,7 +22,16 @@ pi install git:github.com/yu1745/pi-extensions
 | `cny-footer` | `extensions/cny-footer.ts` | Footer with session cost in RMB |
 | `clear-new-alias` | `extensions/clear-new-alias.ts` | Clears the new-version alias notice |
 
-> **14 extensions, one package.** Previously separate repos (`pi-web-reader-spa`) are merged here — uninstall the standalone packages before installing this one to avoid duplicate tool registration.
+<details>
+<summary><strong>Shadowed</strong> (code in repo, not activated)</summary>
+
+| Extension | Path | What it does |
+|---|---|---|
+| `web_reader_local` | `shadowed/web-reader-local/` | Local HTML→Markdown reader — no API key needed, Readability-inspired content extraction. See [`shadowed/README.md`](shadowed/README.md) for the re-enable steps. |
+
+</details>
+
+> **15 extensions, one package.** Previously separate repos (`pi-web-reader-spa`) are merged here — uninstall the standalone packages before installing this one to avoid duplicate tool registration.
 >
 > pi-smart-compact is provided separately by the fork `git:github.com/yu1745/pi-smart-compact` (upstream + `allowUnverifiedApply`).>
 > The `subagent` extension was **removed** in favor of [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents) (install with `pi install npm:@tintinweb/pi-subagents`).
