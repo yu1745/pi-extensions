@@ -14,8 +14,9 @@
 // explorationModelMap, general-purpose via generalPurposeModelMap) with the
 // mapped model and an explicit thinking level. The target model's supported
 // thinking levels are resolved from the model registry's thinkingLevelMap and
-// injected as the allowed values; if the target model cannot be found or has
-// no thinkingLevelMap, nothing is injected for that subagent type.
+// injected as the allowed values; without a thinkingLevelMap the instruction
+// is still injected but without a level list. If the target model cannot be
+// found in the registry, nothing is injected for that subagent type.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
@@ -74,19 +75,20 @@ type Registry = { find(provider: string, modelId: string): { thinkingLevelMap?: 
 
 /**
  * Resolve the thinking levels supported by `targetModel` from its
- * thinkingLevelMap (non-null entries, in canonical order). Returns null when
- * the model is unknown or has no thinkingLevelMap.
+ * thinkingLevelMap (non-null entries, in canonical order). Returns undefined
+ * when the model is unknown, null when it has no thinkingLevelMap.
  */
-function resolveThinkingLevels(modelRegistry: Registry, targetModel: string): string[] | null {
+function resolveThinkingLevels(modelRegistry: Registry, targetModel: string): string[] | null | undefined {
 	const slash = targetModel.indexOf("/");
 	if (slash <= 0) return null;
 	let target: ReturnType<Registry["find"]>;
 	try {
 		target = modelRegistry.find(targetModel.slice(0, slash), targetModel.slice(slash + 1));
 	} catch {
-		return null;
+		return undefined;
 	}
-	if (!target?.thinkingLevelMap) return null;
+	if (!target) return undefined;
+	if (!target.thinkingLevelMap) return null;
 	return THINKING_LEVELS.filter((level) => target.thinkingLevelMap?.[level] != null);
 }
 
@@ -94,10 +96,10 @@ function resolveThinkingLevels(modelRegistry: Registry, targetModel: string): st
 function buildInstruction(
 	subagentType: string,
 	targetModel: string,
-	levels: string[],
+	levels: string[] | null,
 	freeThinking: boolean,
 ): string {
-	const levelList = levels.join(", ");
+	const levelList = levels ? levels.join(", ") : null;
 	return (
 		(freeThinking
 			? `When calling the Agent tool with \`subagent_type\` set to \`${subagentType}\`, set \`model\` to \`${targetModel}\` `
@@ -105,9 +107,14 @@ function buildInstruction(
 				`\`model\` set to \`${targetModel}\` `) +
 		`(the full model name; a bare shorthand is only a fuzzy fallback), ` +
 		(freeThinking
-			? `and \`thinking\` to one of ${levelList}, choosing the level appropriate for the task's difficulty. `
-			: `and \`thinking\` set explicitly to one of ${levelList}, preferring the lower levels unless the task ` +
-				`requires more reasoning. `) +
+			? levelList
+				? `and \`thinking\` to one of ${levelList}, choosing the level appropriate for the task's difficulty. `
+				: `and \`thinking\` to the level appropriate for the task's difficulty. `
+			: levelList
+				? `and \`thinking\` set explicitly to one of ${levelList}, preferring the lower levels unless the task ` +
+					`requires more reasoning. `
+				: `and \`thinking\` set explicitly to either \`low\` or \`medium\`, choosing the lower level unless the task ` +
+					`requires more reasoning. `) +
 		`Do not omit these parameters.`
 	);
 }
@@ -123,9 +130,10 @@ export default function (pi: ExtensionAPI) {
 			const targetModel = readModelMap(key)[active];
 			// No matching rule for the active model: skip this subagent type.
 			if (!targetModel) continue;
-			// Unknown target model or no thinkingLevelMap: skip this subagent type.
+			// Unknown target model: skip this subagent type entirely.
 			const levels = resolveThinkingLevels(ctx.modelRegistry, targetModel);
-			if (!levels || levels.length === 0) continue;
+			if (levels === undefined) continue;
+			// No thinkingLevelMap (levels === null): inject without a level list.
 			instructions.push(
 				buildInstruction(SUBAGENT_TYPES[key], targetModel, levels, key === "generalPurposeModelMap"),
 			);
