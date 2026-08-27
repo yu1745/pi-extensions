@@ -2,24 +2,29 @@
 // configured in settings.json:
 //
 //   "explorationModelMap": {
-//     "openai-codex/gpt-5.6-sol": "openai-codex/gpt-5.6-luna"
+//     "openai-codex/gpt-5.6-sol": {
+//       "model": "openai-codex/gpt-5.6-luna",
+//       "thinkingLevels": ["low", "medium"]
+//     }
 //   },
 //   "generalPurposeModelMap": {
-//     "openai-codex/gpt-5.6-sol": "openai-codex/gpt-5.6-luna"
+//     "openai-codex/gpt-5.6-sol": {
+//       "model": "openai-codex/gpt-5.6-luna",
+//       "thinkingLevels": ["minimal", "low", "medium", "high"]
+//     }
 //   }
 //
-// Keys and values are full "provider/model-id" names. Both global
-// (~/.pi/agent/settings.json) and project (<cwd>/.pi/settings.json) settings
-// are read; per-key, project entries override global ones. When the active
-// model matches a key, an instruction is injected into the system prompt
-// telling the
-// model to dispatch the corresponding subagent type (Explore via
-// explorationModelMap, general-purpose via generalPurposeModelMap) with the
-// mapped model and an explicit thinking level. The target model's supported
-// thinking levels are resolved from the model registry's thinkingLevelMap and
-// injected as the allowed values; without a thinkingLevelMap the instruction
-// is still injected but without a level list. If the target model cannot be
-// found in the registry, nothing is injected for that subagent type.
+// The value may also be a plain "provider/model-id" string, in which case no
+// thinking level list is injected. Keys and values are full "provider/model-id"
+// names. Both global (~/.pi/agent/settings.json) and project
+// (<cwd>/.pi/settings.json) settings are read; per-key, project entries
+// override global ones. When the active model matches a key, an instruction
+// is injected into the system prompt telling the model to dispatch the
+// corresponding subagent type (Explore via explorationModelMap,
+// general-purpose via generalPurposeModelMap) with the mapped model. If
+// `thinkingLevels` is provided, it is injected as the allowed values;
+// otherwise Explore falls back to low/medium and general-purpose to choosing
+// freely by task difficulty.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
@@ -33,6 +38,12 @@ const SUBAGENT_TYPES: Record<(typeof SETTINGS_KEYS)[number], string> = {
 	generalPurposeModelMap: "general-purpose",
 };
 
+/** All valid pi thinking level names. */
+const VALID_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+/** Parsed mapping entry: target model plus optional allowed thinking levels. */
+type Target = { model: string; levels: string[] | null };
+
 /** Resolve the pi agent config directory (~/.pi/agent, honoring PI_CODING_AGENT_DIR). */
 function getAgentDir(): string {
 	const envDir = process.env.PI_CODING_AGENT_DIR;
@@ -40,8 +51,25 @@ function getAgentDir(): string {
 	return join(homedir(), ".pi", "agent");
 }
 
+/** Validate and normalize one mapping value. Returns undefined if invalid. */
+function parseTarget(value: unknown): Target | undefined {
+	// Plain string form: "provider/model-id", no level list.
+	if (typeof value === "string") {
+		return value.includes("/") ? { model: value, levels: null } : undefined;
+	}
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const obj = value as Record<string, unknown>;
+	const model = obj["model"];
+	if (typeof model !== "string" || !model.includes("/")) return undefined;
+	const levels = obj["thinkingLevels"];
+	if (levels === undefined) return { model, levels: null };
+	if (!Array.isArray(levels)) return undefined;
+	const valid = levels.filter((l): l is string => typeof l === "string" && VALID_LEVELS.has(l));
+	return { model, levels: valid.length > 0 ? valid : null };
+}
+
 /** Parse one settings file and extract the validated map under `key`. */
-function parseModelMap(raw: string, key: string): Record<string, string> {
+function parseModelMap(raw: string, key: string): Record<string, Target> {
 	let settings: Record<string, unknown>;
 	try {
 		settings = JSON.parse(raw);
@@ -50,12 +78,10 @@ function parseModelMap(raw: string, key: string): Record<string, string> {
 	}
 	const map = settings[key];
 	if (map === null || typeof map !== "object" || Array.isArray(map)) return {};
-	// Keep only "provider/model" -> "provider/model" string pairs.
-	const result: Record<string, string> = {};
+	const result: Record<string, Target> = {};
 	for (const [from, to] of Object.entries(map as Record<string, unknown>)) {
-		if (typeof to === "string" && from.includes("/") && to.includes("/")) {
-			result[from] = to;
-		}
+		const target = parseTarget(to);
+		if (target && from.includes("/")) result[from] = target;
 	}
 	return result;
 }
@@ -63,13 +89,12 @@ function parseModelMap(raw: string, key: string): Record<string, string> {
 /**
  * Read a model mapping by settings key from pi's settings files:
  * the global ~/.pi/agent/settings.json and the project <cwd>/.pi/settings.json.
- * Shape: { "provider/model-id": "provider/model-id", ... }
  * Per-key, project entries override global ones. Any read/parse/shape failure
  * safely degrades to skipping that file (no injection from it).
  */
-function readModelMap(key: string): Record<string, string> {
+function readModelMap(key: string): Record<string, Target> {
 	const files = [join(getAgentDir(), "settings.json"), join(process.cwd(), ".pi", "settings.json")];
-	const merged: Record<string, string> = {};
+	const merged: Record<string, Target> = {};
 	for (const file of files) {
 		let raw: string;
 		try {
@@ -82,59 +107,23 @@ function readModelMap(key: string): Record<string, string> {
 	return merged;
 }
 
-/** Canonical pi thinking level order. */
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-
-type LevelMap = Partial<Record<(typeof THINKING_LEVELS)[number], string | null>>;
-type Registry = { find(provider: string, modelId: string): { thinkingLevelMap?: LevelMap } | undefined };
-
-/**
- * Resolve the thinking levels supported by `targetModel` from its
- * thinkingLevelMap (non-null entries, in canonical order). Returns undefined
- * when the model is unknown, null when it has no thinkingLevelMap.
- */
-function resolveThinkingLevels(modelRegistry: Registry, targetModel: string): string[] | null | undefined {
-	const slash = targetModel.indexOf("/");
-	if (slash <= 0) return null;
-	let target: ReturnType<Registry["find"]>;
-	try {
-		target = modelRegistry.find(targetModel.slice(0, slash), targetModel.slice(slash + 1));
-	} catch {
-		return undefined;
-	}
-	if (!target) return undefined;
-	if (!target.thinkingLevelMap) return null;
-	return THINKING_LEVELS.filter((level) => target.thinkingLevelMap?.[level] != null);
-}
-
-/** Highest thinking level allowed for general-purpose subagents. */
-const GP_MAX_LEVEL = "high" as const;
-
 /** Build the instruction injected into the system prompt for one subagent type. */
-function buildInstruction(
-	subagentType: string,
-	targetModel: string,
-	levels: string[] | null,
-	freeThinking: boolean,
-): string {
-	// For general-purpose, drop levels above high (xhigh, max).
-	if (freeThinking && levels) {
-		const cap = THINKING_LEVELS.indexOf(GP_MAX_LEVEL);
-		levels = levels.filter((l) => THINKING_LEVELS.indexOf(l as (typeof THINKING_LEVELS)[number]) <= cap);
-	}
-	const levelList = levels && levels.length > 0 ? levels.join(", ") : null;
+function buildInstruction(subagentType: string, target: Target, freeThinking: boolean): string {
+	const levelList = target.levels ? target.levels.join(", ") : null;
 	return (
 		(freeThinking
-			? `When calling the Agent tool with \`subagent_type\` set to \`${subagentType}\`, set \`model\` to \`${targetModel}\` `
+			? `When calling the Agent tool with \`subagent_type\` set to \`${subagentType}\`, set \`model\` to \`${target.model}\` `
 			: `For codebase exploration or research, call the Agent tool with \`subagent_type\` set to \`${subagentType}\`, ` +
-				`\`model\` set to \`${targetModel}\` `) +
+				`\`model\` set to \`${target.model}\` `) +
 		`(the full model name; a bare shorthand is only a fuzzy fallback), ` +
 		(freeThinking
 			? levelList
 				? `and \`thinking\` to one of ${levelList}, choosing the level appropriate for the task's difficulty. `
 				: `and \`thinking\` to the level appropriate for the task's difficulty. `
-			: `and \`thinking\` set explicitly to either \`low\` or \`medium\`, choosing the lower level unless the task ` +
-				`requires more reasoning. `) +
+			: levelList
+				? `and \`thinking\` set explicitly to one of ${levelList}. `
+				: `and \`thinking\` set explicitly to either \`low\` or \`medium\`, choosing the lower level unless the task ` +
+					`requires more reasoning. `) +
 		`Do not omit these parameters.`
 	);
 }
@@ -147,16 +136,10 @@ export default function (pi: ExtensionAPI) {
 		const active = `${model.provider}/${model.id}`;
 		const instructions: string[] = [];
 		for (const key of SETTINGS_KEYS) {
-			const targetModel = readModelMap(key)[active];
+			const target = readModelMap(key)[active];
 			// No matching rule for the active model: skip this subagent type.
-			if (!targetModel) continue;
-			// Unknown target model: skip this subagent type entirely.
-			const levels = resolveThinkingLevels(ctx.modelRegistry, targetModel);
-			if (levels === undefined) continue;
-			// No thinkingLevelMap (levels === null): inject without a level list.
-			instructions.push(
-				buildInstruction(SUBAGENT_TYPES[key], targetModel, levels, key === "generalPurposeModelMap"),
-			);
+			if (!target) continue;
+			instructions.push(buildInstruction(SUBAGENT_TYPES[key], target, key === "generalPurposeModelMap"));
 		}
 		if (instructions.length === 0) return;
 
