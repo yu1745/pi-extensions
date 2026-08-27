@@ -110,11 +110,8 @@ function buildInstruction(
 			? levelList
 				? `and \`thinking\` to one of ${levelList}, choosing the level appropriate for the task's difficulty. `
 				: `and \`thinking\` to the level appropriate for the task's difficulty. `
-			: levelList
-				? `and \`thinking\` set explicitly to one of ${levelList}, preferring the lower levels unless the task ` +
-					`requires more reasoning. `
-				: `and \`thinking\` set explicitly to either \`low\` or \`medium\`, choosing the lower level unless the task ` +
-					`requires more reasoning. `) +
+			: `and \`thinking\` set explicitly to either \`low\` or \`medium\`, choosing the lower level unless the task ` +
+				`requires more reasoning. `) +
 		`Do not omit these parameters.`
 	);
 }
