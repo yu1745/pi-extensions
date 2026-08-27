@@ -8,8 +8,11 @@
 //     "openai-codex/gpt-5.6-sol": "openai-codex/gpt-5.6-luna"
 //   }
 //
-// Keys and values are full "provider/model-id" names. When the active model
-// matches a key, an instruction is injected into the system prompt telling the
+// Keys and values are full "provider/model-id" names. Both global
+// (~/.pi/agent/settings.json) and project (<cwd>/.pi/settings.json) settings
+// are read; per-key, project entries override global ones. When the active
+// model matches a key, an instruction is injected into the system prompt
+// telling the
 // model to dispatch the corresponding subagent type (Explore via
 // explorationModelMap, general-purpose via generalPurposeModelMap) with the
 // mapped model and an explicit thinking level. The target model's supported
@@ -37,18 +40,8 @@ function getAgentDir(): string {
 	return join(homedir(), ".pi", "agent");
 }
 
-/**
- * Read a model mapping from pi's settings.json by settings key.
- * Shape: { "provider/model-id": "provider/model-id", ... }
- * Any read/parse/shape failure safely degrades to an empty map (no injection).
- */
-function readModelMap(key: string): Record<string, string> {
-	let raw: string;
-	try {
-		raw = readFileSync(join(getAgentDir(), "settings.json"), "utf-8");
-	} catch {
-		return {};
-	}
+/** Parse one settings file and extract the validated map under `key`. */
+function parseModelMap(raw: string, key: string): Record<string, string> {
 	let settings: Record<string, unknown>;
 	try {
 		settings = JSON.parse(raw);
@@ -65,6 +58,28 @@ function readModelMap(key: string): Record<string, string> {
 		}
 	}
 	return result;
+}
+
+/**
+ * Read a model mapping by settings key from pi's settings files:
+ * the global ~/.pi/agent/settings.json and the project <cwd>/.pi/settings.json.
+ * Shape: { "provider/model-id": "provider/model-id", ... }
+ * Per-key, project entries override global ones. Any read/parse/shape failure
+ * safely degrades to skipping that file (no injection from it).
+ */
+function readModelMap(key: string): Record<string, string> {
+	const files = [join(getAgentDir(), "settings.json"), join(process.cwd(), ".pi", "settings.json")];
+	const merged: Record<string, string> = {};
+	for (const file of files) {
+		let raw: string;
+		try {
+			raw = readFileSync(file, "utf-8");
+		} catch {
+			continue;
+		}
+		Object.assign(merged, parseModelMap(raw, key));
+	}
+	return merged;
 }
 
 /** Canonical pi thinking level order. */
