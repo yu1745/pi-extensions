@@ -287,22 +287,21 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
     if (!effectiveSelector && p.autoSelector !== false) {
       try {
         const detected = await page.evaluate(() => {
+          // Priority candidates: broad content boundaries first (main / #main-content) to ensure
+          // both post body and top discussion comments are included, or specialized doc containers.
           const candidates = [
             "article.markdown",
             "main article",
-            "article",
-            "[role=\"article\"]",
             "[class*=\"prose-doc\"]",
             "[class*=\"markdown-body\"]",
             "[class*=\"doc-content\"]",
             ".prose",
-            "main [class*=\"content\"]",
-            "main [class*=\"doc\"]",
+            "#main-content",
             "main",
             "[role=\"main\"]",
+            "article",
             ".content-container",
             ".main-content",
-            "#main-content",
           ];
           for (const sel of candidates) {
             const el = document.querySelector(sel);
