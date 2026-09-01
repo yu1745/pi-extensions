@@ -38,8 +38,7 @@
 			"extensions/tokenspeed.ts",
 			"extensions/web-reader-spa/index.ts",
 			"extensions/working-bell.ts",
-			"extensions/web-search/index.ts",
-			"extensions/zai-vision/index.ts"
+			"extensions/web-search/index.ts"
 		]
 	},
 	"keywords": [

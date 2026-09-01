@@ -11,8 +11,6 @@ pi install git:github.com/yu1745/pi-extensions
 | Extension | Path | What it does |
 |---|---|---|
 | `web_reader_spa` | `extensions/web-reader-spa/` | SPA-aware, anti-WAF web reader (Playwright + stealth + ARIA extraction) |
-| ZAI Vision tools (8) | `extensions/zai-vision/` | UI→code / OCR / error diagnosis / diagram / data-viz / diff-check / image / video analysis via GLM-4.6V |
-
 | `quota` | `extensions/quota-footer.ts` | Unified usage monitor in the footer: DeepSeek balance, GLM / MiniMax / Codex quota (one widget, switch-dispatched) |
 | `siliconflow` | `extensions/siliconflow.ts` | SiliconFlow (硅基流动) provider with native dynamic model refresh (`refreshModels` + persisted catalog) |
 | `openai-codex-fast` | `extensions/openai-codex-fast.ts` | `/fast` toggles `service_tier=priority` on Codex requests |
@@ -38,7 +36,7 @@ pi install git:github.com/yu1745/pi-extensions
 
 ## API keys
 
-No keys are hardcoded. Z.AI-backed tools (`web-search`, `zai-vision`) resolve the key in this order:
+No keys are hardcoded. Z.AI-backed tools (`web-search`) resolve the key in this order:
 
 1. env var (`Z_AI_MCP_API_KEY`, `Z_AI_VISION_API_KEY` …)
 2. pi's configured auth for the `zai-coding-cn` provider (via `modelRegistry.getProviderAuth` — independent of the session's current provider)
