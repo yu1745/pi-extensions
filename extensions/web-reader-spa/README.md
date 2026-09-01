@@ -56,9 +56,10 @@ Run `/reload` inside pi (or restart) to load it.
 | `url` | string | — | URL to render (`http(s)://...`; protocol auto-added) |
 | `format` | `markdown`\|`text`\|`aria`\|`html` | `markdown` | output format (`aria` = raw playwright-cli-style YAML) |
 | `selector` | string | auto | CSS selector to extract only a subtree |
+| `autoSelector` | boolean | `true` | whether to auto-detect main content container (set `false` for full page) |
 | `waitUntil` | `load`\|`domcontentloaded`\|`networkidle` | `domcontentloaded` | goto wait strategy |
 | `waitSelector` | string | — | extra: wait for this CSS to appear |
-| `extraWaitMs` | number | — | extra fixed wait after network idle (lazy content) |
+| `extraWaitMs` | number | `400` | extra fixed wait after network idle (lazy content & SPA hydration) |
 | `timeoutMs` | number | `45000` | navigation timeout |
 | `screenshot` | boolean | `false` | capture a PNG (saved to the OS temp dir; the **path** is returned) |
 | `inlineImage` | boolean | `false` | also return the screenshot as an inline base64 image block (for multimodal models). Default off — feed the returned path to `analyze_image` instead |
@@ -121,10 +122,19 @@ A 100% real user profile + fingerprint is essentially indistinguishable from a h
 - **Extraction = `page.ariaSnapshot()`** (Playwright's ARIA accessibility snapshot, the
   same data `playwright-cli`/Playwright MCP use). The accessibility tree inherently skips
   `display:none`/`visibility:hidden`/`aria-hidden` nodes, so hover menus and "not
-  interested"-style clutter never leak in. The YAML is parsed in-Node and rendered to
-  Markdown (headings, links, lists, text). Long URLs (> `PI_WEBREADER_MAXURL`, typically
-  ads/trackers) are dropped to keep output lean. Pass `format: "aria"` for the raw
-  playwright-cli-style YAML.
+  interested"-style clutter never leak in.
+- **Smart content scoping (`autoSelector`)**: Automatically detects the main article / content
+  boundary (such as `article.markdown`, `main article`, `[class*="prose-doc"]`, etc.) to bypass
+  giant sidebar navigation trees on documentation sites.
+- **Markdown Tables with Span Semantics**: Converts ARIA tables into structured Markdown tables.
+  Merged cells are explicitly annotated with `[colspan=N]` / `[rowspan=N]`, with `»` marking
+  horizontal continuations and `«` marking vertical continuations so LLMs accurately understand
+  the table grid.
+- **Lazy loading & hydration**: Automatically performs a smooth micro-scroll and hydration wait
+  before extraction so dynamic client-side SPA feeds don't render empty.
+- The YAML is parsed in-Node and rendered to Markdown (headings, links, lists, tables, code, text).
+  Long URLs (> `PI_WEBREADER_MAXURL`, typically ads/trackers) are dropped to keep output lean.
+  Pass `format: "aria"` for the raw playwright-cli-style YAML.
 - Very large pages may be truncated by Playwright's internal snapshot node cap.
 
 ## How the agent uses it

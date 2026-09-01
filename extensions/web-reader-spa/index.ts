@@ -184,6 +184,7 @@ interface FetchParams {
   url: string;
   format: "markdown" | "text" | "aria" | "html";
   selector?: string;
+  autoSelector?: boolean;
   waitUntil: "load" | "domcontentloaded" | "networkidle";
   waitSelector?: string;
   extraWaitMs?: number;
@@ -223,16 +224,110 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
     }
     if (resp) status = resp.status();
 
+    // 1. Wait for network idle
     await page.waitForLoadState("networkidle", { timeout: Math.min(timeout, 12000) }).catch(() => {});
+    
+    // 2. Custom wait selector if provided
     if (p.waitSelector) await page.waitForSelector(p.waitSelector, { timeout }).catch(() => {});
-    if (p.extraWaitMs && p.extraWaitMs > 0) await page.waitForTimeout(p.extraWaitMs).catch(() => {});
+
+    // 3. Dynamic SPA hydration, lazy content auto-wait, & table span annotation
+    try {
+      await page.evaluate(async () => {
+        // Annotate table colspan/rowspan attributes with explicit semantic tags
+        try {
+          const tables = document.querySelectorAll("table");
+          for (const table of tables) {
+            const rows = table.querySelectorAll("tr");
+            for (const tr of rows) {
+              const cells = tr.querySelectorAll("th, td");
+              for (const cell of cells) {
+                const colSpan = cell.getAttribute("colspan")
+                  ? parseInt(cell.getAttribute("colspan")!, 10)
+                  : 1;
+                const rowSpan = cell.getAttribute("rowspan")
+                  ? parseInt(cell.getAttribute("rowspan")!, 10)
+                  : 1;
+                const badges: string[] = [];
+                if (colSpan > 1) badges.push(`colspan=${colSpan}`);
+                if (rowSpan > 1) badges.push(`rowspan=${rowSpan}`);
+                if (badges.length > 0) {
+                  const tag = `[${badges.join(", ")}] `;
+                  const textNode = document.createTextNode(tag);
+                  cell.insertBefore(textNode, cell.firstChild);
+                }
+              }
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+
+        // Trigger lazy loading by smooth gentle scrolling
+        const scrollH = document.body?.scrollHeight || 0;
+        if (scrollH > 1000) {
+          window.scrollTo(0, Math.min(scrollH, 2000));
+          await new Promise((r) => setTimeout(r, 100));
+          window.scrollTo(0, 0);
+        }
+      });
+    } catch {
+      /* ignore evaluate errors on unusual pages */
+    }
+
+    // 4. Extra wait (at least small pause for hydration if not specified)
+    const extraWait = p.extraWaitMs ?? 400;
+    if (extraWait > 0) await page.waitForTimeout(extraWait).catch(() => {});
 
     // Content extraction = Playwright ARIA accessibility snapshot (same source as
     // playwright-cli). Hidden/aria-hidden/hover-only nodes are excluded by design.
     let aria = "";
-    if (p.selector) {
+    let effectiveSelector = p.selector;
+
+    // Auto-detect main content container if selector is not explicitly provided
+    if (!effectiveSelector && p.autoSelector !== false) {
       try {
-        aria = await page.locator(p.selector).ariaSnapshot({ timeout });
+        const detected = await page.evaluate(() => {
+          const candidates = [
+            "article.markdown",
+            "main article",
+            "article",
+            "[role=\"article\"]",
+            "[class*=\"prose-doc\"]",
+            "[class*=\"markdown-body\"]",
+            "[class*=\"doc-content\"]",
+            ".prose",
+            "main [class*=\"content\"]",
+            "main [class*=\"doc\"]",
+            "main",
+            "[role=\"main\"]",
+            ".content-container",
+            ".main-content",
+            "#main-content",
+          ];
+          for (const sel of candidates) {
+            const el = document.querySelector(sel);
+            if (el) {
+              const text = (el.innerText || "").trim();
+              // Must have substantive content
+              if (text.length > 200) {
+                return sel;
+              }
+            }
+          }
+          return undefined;
+        });
+        if (detected) {
+          effectiveSelector = detected;
+          log("auto-detected main content selector:", effectiveSelector);
+        }
+      } catch (e) {
+        log("auto-detection threw (falling back to full page):", (e as Error).message);
+      }
+    }
+
+    if (effectiveSelector) {
+      try {
+        aria = await page.locator(effectiveSelector).first().ariaSnapshot({ timeout });
       } catch (e) {
         log("locator ariaSnapshot failed, falling back to full page:", (e as Error).message);
       }
@@ -266,7 +361,16 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
     }
 
     const title = await page.title().catch(() => "");
-    return { status, title, url: page.url(), aria, html, screenshot: screenshotB64, screenshotPath };
+    return {
+      status,
+      title,
+      url: page.url(),
+      aria,
+      html,
+      effectiveSelector,
+      screenshot: screenshotB64,
+      screenshotPath,
+    };
   } finally {
     if (signal) signal.removeEventListener("abort", onAbort);
     try {
@@ -297,28 +401,80 @@ interface AriaNode {
 function parseAria(yaml: string): AriaNode {
   const root: AriaNode = { role: "root", name: "", level: 0, children: [] };
   const stack: { indent: number; node: AriaNode }[] = [{ indent: -1, node: root }];
-  for (const raw of yaml.split("\n")) {
-    if (!raw.trim()) continue;
-    const m = raw.match(/^(\s*)- (.*)$/);
+  for (const line of yaml.split("\n")) {
+    if (!line.trim()) continue;
+    const m = line.match(/^(\s*)-\s+(.*)$/);
     if (!m) continue;
     const indent = m[1].length;
-    const rest = m[2];
+    let rest = m[2].trim();
 
     if (rest.startsWith("/url:")) {
       const parent = stack[stack.length - 1].node;
-      if (parent) parent.url = rest.slice(5).trim();
+      if (parent) {
+        let u = rest.slice(5).trim();
+        if (
+          (u.startsWith("\"") && u.endsWith("\"")) ||
+          (u.startsWith("'") && u.endsWith("'"))
+        ) {
+          u = u.slice(1, -1);
+        }
+        parent.url = u;
+      }
       continue;
     }
 
+    // Strip wrapping quotes and trailing colons that YAML emitters produce for lines with special chars
+    if (rest.endsWith(":")) rest = rest.slice(0, -1).trim();
+    if (
+      (rest.startsWith("'") && rest.endsWith("'")) ||
+      (rest.startsWith("\"") && rest.endsWith("\""))
+    ) {
+      rest = rest.slice(1, -1).trim();
+    }
+    if (rest.endsWith(":")) rest = rest.slice(0, -1).trim();
+
     let node: AriaNode;
     if (rest.startsWith("text:")) {
-      node = { role: "text", name: rest.slice(5).trim(), level: 0, children: [] };
+      let t = rest.slice(5).trim();
+      if (
+        (t.startsWith("\"") && t.endsWith("\"")) ||
+        (t.startsWith("'") && t.endsWith("'"))
+      ) {
+        t = t.slice(1, -1);
+      }
+      node = { role: "text", name: t, level: 0, children: [] };
+    } else if (rest.startsWith("code:")) {
+      let t = rest.slice(5).trim();
+      if (
+        (t.startsWith("\"") && t.endsWith("\"")) ||
+        (t.startsWith("'") && t.endsWith("'"))
+      ) {
+        t = t.slice(1, -1);
+      }
+      node = { role: "code", name: t, level: 0, children: [] };
     } else {
-      const nm = rest.match(/^([a-zA-Z]+)(?:\s+"((?:[^"\\]|\\.)*)")?(.*)$/);
-      const role = nm ? nm[1] : rest;
-      const name = nm && nm[2] != null ? nm[2] : "";
-      const lvlM = nm ? nm[3].match(/\[level=(\d+)\]/) : null;
-      node = { role, name, level: lvlM ? parseInt(lvlM[1], 10) : 0, children: [] };
+      const match = rest.match(/^([a-zA-Z0-9_-]+)(?:\s+"((?:[^"\\]|\\.)*)")?(.*)$/);
+      if (!match) {
+        node = { role: rest, name: "", level: 0, children: [] };
+      } else {
+        const role = match[1];
+        let name = match[2] != null ? match[2] : "";
+        const tail = match[3] || "";
+        const lvlM = tail.match(/\[level=(\d+)\]/);
+        const level = lvlM ? parseInt(lvlM[1], 10) : 0;
+        const colonIdx = tail.indexOf(":");
+        if (colonIdx !== -1) {
+          let inline = tail.slice(colonIdx + 1).trim();
+          if (
+            (inline.startsWith("\"") && inline.endsWith("\"")) ||
+            (inline.startsWith("'") && inline.endsWith("'"))
+          ) {
+            inline = inline.slice(1, -1);
+          }
+          if (inline) name = name ? `${name} ${inline}` : inline;
+        }
+        node = { role, name, level, children: [] };
+      }
     }
 
     while (stack.length > 1 && stack[stack.length - 1].indent >= indent) stack.pop();
@@ -331,16 +487,22 @@ function parseAria(yaml: string): AriaNode {
 const CONTAINER = new Set([
   "root", "generic", "main", "section", "article", "group", "region", "navigation",
   "banner", "contentinfo", "complementary", "figure", "figcaption", "form",
-  "application", "document", "presentation", "none", "toolbar",
+  "application", "document", "presentation", "none", "toolbar", "rowgroup",
 ]);
 const SKIP = new Set(["img", "graphic"]);
 
 function inlineText(node: AriaNode): string {
   let s = node.name || "";
   for (const c of node.children) {
-    if (c.role === "text") s += c.name;
-    else if (c.role === "link") s += c.name || inlineText(c);
-    else if (!SKIP.has(c.role) && !c.url) s += inlineText(c);
+    if (c.role === "text" || c.role === "code") {
+      s = s ? `${s} ${c.name}` : c.name;
+    } else if (c.role === "link") {
+      const t = c.name || inlineText(c);
+      s = s ? `${s} ${t}` : t;
+    } else if (!SKIP.has(c.role) && !c.url) {
+      const t = inlineText(c);
+      if (t) s = s ? `${s} ${t}` : t;
+    }
   }
   return s;
 }
@@ -348,6 +510,93 @@ function inlineText(node: AriaNode): string {
 function linkText(url: string | undefined, text: string): string {
   if (url && url.length > 0 && url.length <= MAX_URL) return `[${text}](${url})`;
   return text;
+}
+
+function renderTable(tableNode: AriaNode, out: string[]) {
+  const rows: AriaNode[] = [];
+  function collectRows(n: AriaNode) {
+    if (n.role === "row") {
+      rows.push(n);
+    } else {
+      for (const c of n.children) collectRows(c);
+    }
+  }
+  collectRows(tableNode);
+  if (rows.length === 0) return;
+
+  const rawRows: { text: string; colspan: number; rowspan: number }[][] = [];
+  for (const row of rows) {
+    const cells: { text: string; colspan: number; rowspan: number }[] = [];
+    for (const c of row.children) {
+      if (c.role === "cell" || c.role === "columnheader" || c.role === "rowheader") {
+        let cellText = (c.name || inlineText(c)).trim();
+        cellText = cellText.replace(/\|/g, "\\|").replace(/\n+/g, " ");
+
+        let colspan = 1;
+        let rowspan = 1;
+        const colM = cellText.match(/\[(?:.*?\b)?colspan=(\d+)(?:.*?)?\]/i);
+        if (colM) colspan = Math.max(1, parseInt(colM[1], 10));
+        const rowM = cellText.match(/\[(?:.*?\b)?rowspan=(\d+)(?:.*?)?\]/i);
+        if (rowM) rowspan = Math.max(1, parseInt(rowM[1], 10));
+
+        cells.push({ text: cellText, colspan, rowspan });
+      }
+    }
+    if (cells.length > 0) {
+      rawRows.push(cells);
+    }
+  }
+  if (rawRows.length === 0) return;
+
+  // Build a true 2D matrix accounting for spans
+  const grid: (string | undefined)[][] = [];
+  for (let r = 0; r < rawRows.length; r++) {
+    if (!grid[r]) grid[r] = [];
+    const row = rawRows[r];
+    let colIndex = 0;
+
+    for (const cell of row) {
+      while (grid[r][colIndex] !== undefined) {
+        colIndex++;
+      }
+
+      grid[r][colIndex] = cell.text;
+
+      // Fill spanned grid cells with merge continuation indicators
+      for (let dr = 0; dr < cell.rowspan; dr++) {
+        for (let dc = 0; dc < cell.colspan; dc++) {
+          if (dr === 0 && dc === 0) continue;
+          const tr = r + dr;
+          const tc = colIndex + dc;
+          if (!grid[tr]) grid[tr] = [];
+          // '»' denotes merged from left, '«' denotes merged from above
+          grid[tr][tc] = dr === 0 ? "»" : "«";
+        }
+      }
+
+      colIndex += cell.colspan;
+    }
+  }
+
+  let maxCols = 0;
+  for (const row of grid) {
+    if (row && row.length > maxCols) maxCols = row.length;
+  }
+  if (maxCols === 0) return;
+
+  out.push("\n\n");
+  for (let r = 0; r < grid.length; r++) {
+    const row = grid[r] || [];
+    const cellTexts: string[] = [];
+    for (let c = 0; c < maxCols; c++) {
+      cellTexts.push(row[c] !== undefined ? row[c]! : "");
+    }
+    out.push("| " + cellTexts.join(" | ") + " |\n");
+    if (r === 0) {
+      out.push("| " + cellTexts.map(() => "---").join(" | ") + " |\n");
+    }
+  }
+  out.push("\n");
 }
 
 function renderMarkdown(node: AriaNode, out: string[], listDepth: number) {
@@ -362,7 +611,7 @@ function renderMarkdown(node: AriaNode, out: string[], listDepth: number) {
         const txt = (n.name || inlineText(n)).trim();
         if (txt) out.push(linkText(n.url, txt) + " ");
         for (const c of n.children)
-          if (c.role !== "text" && !c.url && !SKIP.has(c.role))
+          if (c.role !== "text" && c.role !== "code" && !c.url && !SKIP.has(c.role))
             renderMarkdown({ role: "x", name: "", level: 0, children: [c] }, out, listDepth);
         break;
       }
@@ -376,8 +625,9 @@ function renderMarkdown(node: AriaNode, out: string[], listDepth: number) {
         const bodyParts: string[] = [];
         for (const c of n.children) {
           if (c.role === "list") nested.push(c);
-          else if (c.role === "text" && c.name.trim()) bodyParts.push(c.name.trim());
-          else {
+          else if ((c.role === "text" || c.role === "code") && c.name.trim()) {
+            bodyParts.push(c.role === "code" ? `\`${c.name.trim()}\`` : c.name.trim());
+          } else {
             const t = (c.name || inlineText(c)).trim();
             if (t) bodyParts.push(c.url ? linkText(c.url, t) : t);
           }
@@ -391,6 +641,20 @@ function renderMarkdown(node: AriaNode, out: string[], listDepth: number) {
       case "paragraph": {
         const body = inlineText(n).trim();
         if (body) out.push("\n" + body + "\n");
+        break;
+      }
+      case "table":
+        renderTable(n, out);
+        break;
+      case "code": {
+        const txt = n.name.trim();
+        if (txt) {
+          if (txt.includes("\n")) {
+            out.push("\n\n```\n" + txt + "\n```\n\n");
+          } else {
+            out.push("`" + txt + "` ");
+          }
+        }
         break;
       }
       case "text":
@@ -422,7 +686,8 @@ function renderText(node: AriaNode, out: string[]) {
     switch (n.role) {
       case "heading":
       case "paragraph":
-      case "text": {
+      case "text":
+      case "code": {
         const t = (n.name || inlineText(n)).trim();
         if (t) out.push(t + "\n");
         for (const c of n.children) renderText({ role: "x", name: "", level: 0, children: [c] }, out);
@@ -564,7 +829,12 @@ export default function (pi: ExtensionAPI) {
       format: Type.Optional(StringEnum(["markdown", "text", "aria", "html"] as const)),
       selector: Type.Optional(
         Type.String({
-          description: "Optional CSS selector: snapshot only that subtree (default: whole page).",
+          description: "Optional CSS selector: snapshot only that subtree (e.g. 'main', 'article', '.content'). By default, intelligent main content auto-detection is used.",
+        }),
+      ),
+      autoSelector: Type.Optional(
+        Type.Boolean({
+          description: "Whether to automatically detect main content container (defaults to true). Set false to snapshot whole page.",
         }),
       ),
       waitUntil: Type.Optional(StringEnum(["load", "domcontentloaded", "networkidle"] as const)),
@@ -572,7 +842,7 @@ export default function (pi: ExtensionAPI) {
         Type.String({ description: "Optional CSS selector to wait for before extracting." }),
       ),
       extraWaitMs: Type.Optional(
-        Type.Number({ description: "Extra fixed wait (ms) after network idle, for lazy content." }),
+        Type.Number({ description: "Extra fixed wait (ms) after network idle, for lazy content (default: 400ms)." }),
       ),
       timeoutMs: Type.Optional(Type.Number({ description: "Navigation timeout in ms (default 45000)." })),
       screenshot: Type.Optional(
@@ -645,13 +915,19 @@ export default function (pi: ExtensionAPI) {
         truncated = true;
       }
 
+      const hasSpans = body.includes("[colspan=") || body.includes("[rowspan=") || body.includes("»") || body.includes("«");
+      const spanLegend = hasSpans
+        ? "Note: Tables contain merged cells annotated with [colspan=N]/[rowspan=N], '»' (horizontal continuation), and '«' (vertical continuation).\n"
+        : "";
+
       const header =
         `URL: ${result.url}\n` +
         `Title: ${result.title}\n` +
         `HTTP: ${result.status ?? "?"}\n` +
-        `Browser: ${activeChannel}${viaCdp ? " (cdp)" : ""}${truncated ? "  [truncated]" : ""}` +
-        (result.screenshotPath ? `\nScreenshot: ${result.screenshotPath}` : "") +
-        `\n\n`;
+        `Browser: ${activeChannel}${viaCdp ? " (cdp)" : ""}${result.effectiveSelector ? `  [scope: ${result.effectiveSelector}]` : ""}${truncated ? "  [truncated]" : ""}\n` +
+        (result.screenshotPath ? `Screenshot: ${result.screenshotPath}\n` : "") +
+        spanLegend +
+        `\n`;
 
       const content: any[] = [
         { type: "text", text: header + body },
