@@ -791,11 +791,11 @@ export default function (pi: ExtensionAPI) {
   // render a JS/SPA page. Handles both Anthropic/Google ({name,description}) and
   // OpenAI ({function:{name,description}}) tool shapes.
   const WEBREADER_FALLBACK =
-    "\n\nIf this returns empty/garbled content, only a JS shell/skeleton (e.g. <div id=root>), a login/bot " +
-    "interstitial with no real content, OR the output is low-readability (e.g. a raw table dumped as rows of " +
-    "`| | |` with no readable text, huge base64 blobs, mostly metadata/boilerplate with no real body, or " +
-    "otherwise needs a human to clean up before it's usable), retry the SAME url with the `web_reader_spa` " +
-    "tool, which drives a real browser and returns clean Markdown.";
+    "\n\nIf this returns a network/connection error (e.g. timeout, connection reset, 403 Forbidden, 5xx, or SSL error), " +
+    "empty/garbled content, only a JS shell/skeleton (e.g. <div id=root>), a login/bot interstitial with no real content, " +
+    "OR the output is low-readability (e.g. a raw table dumped as rows of `| | |` with no readable text, huge base64 blobs, " +
+    "mostly metadata/boilerplate with no real body, or otherwise needs a human to clean up before it's usable), " +
+    "retry the SAME url with the `web_reader_spa` tool, which drives a real browser with anti-bot stealth patches and returns clean Markdown.";
   pi.on("before_provider_request", (event) => {
     const tools = (event.payload as { tools?: unknown })?.tools;
     if (!Array.isArray(tools)) return;
