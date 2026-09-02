@@ -9,6 +9,7 @@ export const PROVIDER_NAME = "Antigravity";
  * Public selectable model IDs → backend request model IDs by thinking effort.
  *
  * Catalog mirrors `agy models` (Antigravity CLI), which currently advertises:
+ * - Gemini 3.8 Flash (Low / Medium / High)
  * - Gemini 3.7 Flash (Low / Medium / High)
  * - Gemini 3.6 Flash (Low / Medium / High)
  * - Gemini 3.5 Flash (Low / Medium / High)
@@ -21,6 +22,17 @@ export const PROVIDER_NAME = "Antigravity";
  * advertised by the backend for each model.
  */
 export const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
+  "gemini-3.8-flash": {
+    off: "gemini-3.8-flash-low",
+    routing: {
+      minimal: "gemini-3.8-flash-low",
+      low: "gemini-3.8-flash-low",
+      medium: "gemini-3.8-flash-medium",
+      high: "gemini-3.8-flash-high",
+      xhigh: "gemini-3.8-flash-high",
+    },
+    defaultRequestId: "gemini-3.8-flash-low",
+  },
   "claude-opus-4-6": {
     routing: {
       minimal: "claude-opus-4-6-thinking",
@@ -106,6 +118,10 @@ export const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
  * Requesting more than these limits returns a 400 Bad Request from the API.
  */
 export const RUNTIME_MAX_OUTPUT_TOKENS: Record<string, number> = {
+  "gemini-3.8-flash": 65536,
+  "gemini-3.8-flash-low": 65536,
+  "gemini-3.8-flash-medium": 65536,
+  "gemini-3.8-flash-high": 65536,
   "gemini-3.7-flash": 65536,
   "gemini-3.7-flash-tiered": 65536,
   // Retain rollout-era IDs for compatibility with pinned runtime overrides.
@@ -193,6 +209,16 @@ const thinkingLevelMaps = {
 
 /** Same set as `agy models`, collapsed to public Pi model IDs. */
 export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
+  {
+    id: "gemini-3.8-flash",
+    name: "Gemini 3.8 Flash (Antigravity)",
+    reasoning: true,
+    thinkingLevelMap: thinkingLevelMaps.lowMediumHigh,
+    input: ["text", "image"],
+    cost: freeCost,
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  },
   {
     id: "gemini-3.7-flash",
     name: "Gemini 3.7 Flash (Antigravity)",
@@ -302,6 +328,15 @@ export function getAntigravityRequestModelId(modelId: string, effort: string | u
  * provide a fallback runtime model ID (e.g. Gemini 3.6 Flash) to maintain availability.
  */
 export function getFallbackRuntimeModel(runtimeModel: string, effort?: string): string | undefined {
+  if (runtimeModel === "gemini-3.8-flash-tiered") {
+    return getAntigravityRequestModelId("gemini-3.7-flash", effort);
+  }
+  if (runtimeModel.startsWith("gemini-3.8-flash-")) {
+    return runtimeModel.replace("gemini-3.8-flash-", "gemini-3.7-flash-");
+  }
+  if (runtimeModel === "gemini-3.8-flash") {
+    return "gemini-3.7-flash-low";
+  }
   if (runtimeModel === "gemini-3.7-flash-tiered") {
     return getAntigravityRequestModelId("gemini-3.6-flash", effort);
   }
@@ -340,7 +375,11 @@ export function getThinkingConfig(
   modelId: string,
   effort: string | undefined,
 ): ThinkingWire | undefined {
-  if (modelId === "gemini-3.7-flash" || modelId === "gemini-3.6-flash") {
+  if (
+    modelId === "gemini-3.8-flash" ||
+    modelId === "gemini-3.7-flash" ||
+    modelId === "gemini-3.6-flash"
+  ) {
     return { includeThoughts: true, thinkingLevel: googleLevel(effort) };
   }
   if (modelId === "gemini-3.5-flash") {
