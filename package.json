@@ -10,7 +10,8 @@
 	],
 	"dependencies": {
 		"linkedom": "^0.18.13",
-		"playwright": "^1.62.1"
+		"playwright": "^1.62.1",
+		"undici": "^8.10.1"
 	},
 	"devDependencies": {
 		"@earendil-works/pi-coding-agent": "0.84.1",
@@ -40,7 +41,8 @@
 			"extensions/web-reader-spa/index.ts",
 			"extensions/working-bell.ts",
 			"extensions/web-search/index.ts",
-			"extensions/filter-image-reader.ts"
+			"extensions/filter-image-reader.ts",
+			"extensions/antigravity/index.ts"
 		]
 	},
 	"keywords": [
