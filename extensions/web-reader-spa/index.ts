@@ -52,6 +52,10 @@ const LAUNCH_ARGS = [
   "--disable-blink-features=AutomationControlled",
   "--disable-features=IsolateOrigins,site-per-process,AutomationControlled",
   "--disable-infobars",
+  "--disable-gpu",
+  "--disable-dev-shm-usage",
+  "--no-first-run",
+  "--no-default-browser-check",
 ];
 
 function channelList(): string[] {
@@ -63,7 +67,8 @@ function channelList(): string[] {
       .filter(Boolean)
       .map((c) => (c.toLowerCase() === "chromium" ? "" : c));
   }
-  return ["chrome", "msedge", ""];
+  // Try fast headless chromium first, fall back to installed system channels
+  return ["", "msedge", "chrome"];
 }
 
 // ---- browser lifecycle ----------------------------------------------------
@@ -224,13 +229,17 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
     }
     if (resp) status = resp.status();
 
-    // 1. Wait for network idle
-    await page.waitForLoadState("networkidle", { timeout: Math.min(timeout, 12000) }).catch(() => {});
+    // 1. Wait for page load state (domcontentloaded is already fulfilled, wait briefly for load/settle)
+    if (p.waitUntil === "networkidle") {
+      await page.waitForLoadState("networkidle", { timeout: Math.min(timeout, 8000) }).catch(() => {});
+    } else {
+      await page.waitForLoadState("load", { timeout: Math.min(timeout, 3000) }).catch(() => {});
+    }
     
     // 2. Custom wait selector if provided
     if (p.waitSelector) await page.waitForSelector(p.waitSelector, { timeout }).catch(() => {});
 
-    // 3. Dynamic SPA hydration, lazy content auto-wait, & table span annotation
+    // 3. Dynamic SPA hydration, code block formatting, lazy content auto-wait, & table span annotation
     try {
       await page.evaluate(async () => {
         // Annotate table colspan/rowspan attributes with explicit semantic tags
@@ -255,6 +264,22 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
                   const textNode = document.createTextNode(tag);
                   cell.insertBefore(textNode, cell.firstChild);
                 }
+              }
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+
+        // Preserve newlines in multi-line <pre> / <code> blocks for ARIA snapshot
+        try {
+          const pres = document.querySelectorAll("pre, code");
+          for (const pre of pres) {
+            const walker = document.createTreeWalker(pre, NodeFilter.SHOW_TEXT);
+            let node;
+            while ((node = walker.nextNode())) {
+              if (node.nodeValue && node.nodeValue.includes("\n")) {
+                node.nodeValue = node.nodeValue.replace(/\n/g, " __PI_NL__ ");
               }
             }
           }
@@ -326,12 +351,13 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
 
     if (effectiveSelector) {
       try {
-        aria = await page.locator(effectiveSelector).first().ariaSnapshot({ timeout });
+        // Use shorter timeout (max 4000ms) for locator to avoid blocking on non-existent selectors
+        aria = await page.locator(effectiveSelector).first().ariaSnapshot({ timeout: Math.min(timeout, 4000) });
       } catch (e) {
         log("locator ariaSnapshot failed, falling back to full page:", (e as Error).message);
       }
     }
-    if (!aria || !aria.trim()) aria = await page.ariaSnapshot({ timeout });
+    if (!aria || !aria.trim()) aria = await page.ariaSnapshot({ timeout: Math.min(timeout, 10000) });
 
     let html: string | undefined;
     if (p.format === "html") {
@@ -646,10 +672,11 @@ function renderMarkdown(node: AriaNode, out: string[], listDepth: number) {
         renderTable(n, out);
         break;
       case "code": {
-        const txt = n.name.trim();
+        let txt = n.name.trim();
         if (txt) {
-          if (txt.includes("\n")) {
-            out.push("\n\n```\n" + txt + "\n```\n\n");
+          if (txt.includes("__PI_NL__") || txt.includes("\n")) {
+            const restored = txt.replace(/\s*__PI_NL__\s*/g, "\n").trim();
+            out.push("\n\n```\n" + restored + "\n```\n\n");
           } else {
             out.push("`" + txt + "` ");
           }
@@ -719,6 +746,7 @@ function ariaToMarkdown(yaml: string): string {
   renderMarkdown(parseAria(yaml), out, 0);
   return out
     .join("")
+    .replace(/\s*__PI_NL__\s*/g, "\n")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .replace(/ {2,}/g, " ")
@@ -728,7 +756,12 @@ function ariaToMarkdown(yaml: string): string {
 function ariaToText(yaml: string): string {
   const out: string[] = [];
   renderText(parseAria(yaml), out);
-  return out.join("").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  return out
+    .join("")
+    .replace(/\s*__PI_NL__\s*/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 // ---- browser-side: stealth init script (self-contained) -------------------
@@ -779,6 +812,10 @@ export default function (pi: ExtensionAPI) {
     } catch {
       /* ignore */
     }
+    // Eagerly pre-warm the browser in the background to eliminate cold-start latency
+    ensureBrowser().catch((e) => {
+      log("pre-warm browser failed:", (e as Error).message);
+    });
   });
 
   pi.on("session_shutdown", async () => {
