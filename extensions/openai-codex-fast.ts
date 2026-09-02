@@ -17,15 +17,37 @@ const DEFAULT_SERVICE_TIER = "default";
 const MAX_CONTEXT_WINDOW = 950_000;
 const GPT56_MODELS = new Set(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
 
-let fastModeEnabled = false;
-let contextWindowEnabled = false;
-let contextWindowValue = MAX_CONTEXT_WINDOW;
-let applyingContextWindow = false;
+// Shared state lives on globalThis so that in-process subagent sessions
+// (pi-subagents' createAgentSession, which re-imports this module with jiti
+// moduleCache:false) see the same /fast state as the main session, while
+// other pi processes on the machine remain unaffected.
+interface CodexFastState {
+	fastModeEnabled: boolean;
+	contextWindowEnabled: boolean;
+	contextWindowValue: number;
+}
+
+const GLOBAL_KEY = "__piCodexFastState";
+
+function getState(): CodexFastState {
+	const g = globalThis as Record<string, unknown>;
+	return (g[GLOBAL_KEY] as CodexFastState) ?? (g[GLOBAL_KEY] = {
+		fastModeEnabled: false,
+		contextWindowEnabled: false,
+		contextWindowValue: MAX_CONTEXT_WINDOW,
+	});
+}
+
+// Per-model original context windows can stay module-local: they describe the
+// model objects each session observed, and re-deriving them per session is safe.
 const originalContextWindows = new Map<string, number>();
 
 function isGpt56(ctx: ExtensionContext): boolean {
 	return ctx.model?.provider === TARGET_PROVIDER && GPT56_MODELS.has(ctx.model.id.toLowerCase());
 }
+
+const state = getState();
+let applyingContextWindow = false;
 
 function formatTokens(tokens: number): string {
 	if (tokens >= 1_000_000) {
@@ -49,24 +71,24 @@ function renderStatus(ctx: ExtensionContext): void {
 		ctx.ui.setStatus(STATUS_KEY, undefined);
 		return;
 	}
-	const parts: string[] = [fastModeEnabled ? "FAST" : "standard"];
-	if (isGpt56(ctx) && contextWindowEnabled) parts.push(`ctx ${formatTokens(contextWindowValue)}`);
-	const color: "warning" | "dim" = fastModeEnabled || contextWindowEnabled ? "warning" : "dim";
+	const parts: string[] = [state.fastModeEnabled ? "FAST" : "standard"];
+	if (isGpt56(ctx) && state.contextWindowEnabled) parts.push(`ctx ${formatTokens(state.contextWindowValue)}`);
+	const color: "warning" | "dim" = state.fastModeEnabled || state.contextWindowEnabled ? "warning" : "dim";
 	ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg(color, `Codex ${parts.join(" | ")}`));
 }
 
 function setFastMode(ctx: ExtensionContext, enabled: boolean): void {
-	fastModeEnabled = enabled;
+	state.fastModeEnabled = enabled;
 	renderStatus(ctx);
 }
 
-async function setContextWindow(ctx: ExtensionContext, enabled: boolean, pi: ExtensionAPI, requestedValue = contextWindowValue): Promise<void> {
+async function setContextWindow(ctx: ExtensionContext, enabled: boolean, pi: ExtensionAPI, requestedValue = state.contextWindowValue): Promise<void> {
 	if (!ctx.model || !isGpt56(ctx) || applyingContextWindow) return;
 	const model = ctx.model;
 	if (!originalContextWindows.has(model.id)) originalContextWindows.set(model.id, model.contextWindow);
-	contextWindowValue = Math.min(Math.max(1, Math.floor(requestedValue)), MAX_CONTEXT_WINDOW);
+	state.contextWindowValue = Math.min(Math.max(1, Math.floor(requestedValue)), MAX_CONTEXT_WINDOW);
 	const contextWindow = enabled
-		? contextWindowValue
+		? state.contextWindowValue
 		: (originalContextWindows.get(model.id) ?? model.contextWindow);
 	if (model.contextWindow !== contextWindow) {
 		applyingContextWindow = true;
@@ -76,7 +98,7 @@ async function setContextWindow(ctx: ExtensionContext, enabled: boolean, pi: Ext
 			applyingContextWindow = false;
 		}
 	}
-	contextWindowEnabled = enabled;
+	state.contextWindowEnabled = enabled;
 	renderStatus(ctx);
 }
 
@@ -84,7 +106,7 @@ export default function (pi: ExtensionAPI): void {
 	// Rewrite the provider payload immediately before sending. This is the same
 	// request field used by Codex's native /fast command.
 	pi.on("before_provider_request", (event, ctx) => {
-		if (!fastModeEnabled || ctx.model?.provider !== TARGET_PROVIDER) return;
+		if (!state.fastModeEnabled || ctx.model?.provider !== TARGET_PROVIDER) return;
 		if (!event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) return;
 		return {
 			...(event.payload as Record<string, unknown>),
@@ -93,21 +115,21 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		fastModeEnabled = false;
-		contextWindowEnabled = false;
-		contextWindowValue = MAX_CONTEXT_WINDOW;
+		// No reset here: in-process subagent sessions (pi-subagents) also fire
+		// session_start, and resetting would clear /fast for the main session.
+		// State is process-scoped via globalThis, so it dies with the process anyway.
 		originalContextWindows.clear();
 		renderStatus(ctx);
 	});
 
 	pi.on("model_select", async (_event, ctx) => {
 		if (ctx.model?.provider !== TARGET_PROVIDER) {
-			contextWindowEnabled = false;
+			state.contextWindowEnabled = false;
 			ctx.ui.setStatus(STATUS_KEY, undefined);
 			return;
 		}
-		if (!isGpt56(ctx)) contextWindowEnabled = false;
-		if (contextWindowEnabled && !applyingContextWindow) {
+		if (!isGpt56(ctx)) state.contextWindowEnabled = false;
+		if (state.contextWindowEnabled && !applyingContextWindow) {
 			await setContextWindow(ctx, true, pi);
 			return;
 		}
@@ -121,9 +143,9 @@ export default function (pi: ExtensionAPI): void {
 				ctx.ui.notify("/fast is only available for the openai-codex provider", "warning");
 				return;
 			}
-			setFastMode(ctx, !fastModeEnabled);
+			setFastMode(ctx, !state.fastModeEnabled);
 			ctx.ui.notify(
-				fastModeEnabled
+				state.fastModeEnabled
 					? "Codex Fast mode enabled (service_tier=priority)"
 					: `Codex Fast mode disabled (service_tier=${DEFAULT_SERVICE_TIER})`,
 				"info",
