@@ -14,8 +14,10 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 function weblog(message: string): void {
   try {
@@ -253,6 +255,26 @@ function truncateReaderOutput(text: string, maxChars: number): string {
 
 // ─── Extension ────────────────────────────────────────────────────────────────
 
+function isAntigravityGoogleSearchEnabled(): boolean {
+  if (process.env.PI_ANTIGRAVITY_GOOGLE_SEARCH !== undefined) {
+    return process.env.PI_ANTIGRAVITY_GOOGLE_SEARCH === "1";
+  }
+  try {
+    const settingsPaths = [
+      join(getAgentDir(), "settings.json"),
+      join(process.cwd(), ".pi", "settings.json"),
+    ];
+    for (const p of settingsPaths) {
+      if (!existsSync(p)) continue;
+      const data = JSON.parse(readFileSync(p, "utf-8"));
+      if (typeof data?.antigravityGoogleSearch === "boolean") {
+        return data.antigravityGoogleSearch;
+      }
+    }
+  } catch {}
+  return false;
+}
+
 export default function webSearchExtension(pi: ExtensionAPI) {
   // In-process handshake with the pi-antigravity fork: when its Google-grounding
   // web_search is active (fork loaded first, per pi's first-registration-wins
@@ -260,10 +282,11 @@ export default function webSearchExtension(pi: ExtensionAPI) {
   // web_search/web_reader — which also un-shadows pi's built-in web_reader /
   // web_reader_spa. Env PI_ANTIGRAVITY_GOOGLE_SEARCH=1 forces yield regardless of
   // load order; PI_ANTIGRAVITY_GOOGLE_SEARCH=0 keeps the Z.AI tools.
+  // Also check settings.json directly to be resilient against arbitrary extension load order.
   const g = globalThis as Record<string, unknown>;
   const yieldWebSearch =
     g.__PI_ANTIGRAVITY_GOOGLE_WEB__ === true ||
-    process.env.PI_ANTIGRAVITY_GOOGLE_SEARCH === "1";
+    isAntigravityGoogleSearchEnabled();
   weblog(
     yieldWebSearch
       ? "web_search yields to antigravity-fork (marker seen); registering Z.AI web_reader only"
