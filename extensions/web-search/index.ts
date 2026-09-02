@@ -15,6 +15,15 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { appendFileSync } from "node:fs";
+
+function weblog(message: string): void {
+  try {
+    appendFileSync("/tmp/pi-web-tools.log", `${new Date().toISOString()} [pi-extensions] ${message}\n`);
+  } catch {
+    // logging must never break the extension
+  }
+}
 
 // ─── Config ────────────────────────────────────────────────────────────────────
 
@@ -245,6 +254,22 @@ function truncateReaderOutput(text: string, maxChars: number): string {
 // ─── Extension ────────────────────────────────────────────────────────────────
 
 export default function webSearchExtension(pi: ExtensionAPI) {
+  // In-process handshake with the pi-antigravity fork: when its Google-grounding
+  // web_search is active (fork loaded first, per pi's first-registration-wins
+  // tool resolution), it sets this marker and we skip registering the Z.AI
+  // web_search/web_reader — which also un-shadows pi's built-in web_reader /
+  // web_reader_spa. Env PI_ANTIGRAVITY_GOOGLE_SEARCH=1 forces yield regardless of
+  // load order; PI_ANTIGRAVITY_GOOGLE_SEARCH=0 keeps the Z.AI tools.
+  const g = globalThis as Record<string, unknown>;
+  const yieldWebSearch =
+    g.__PI_ANTIGRAVITY_GOOGLE_WEB__ === true ||
+    process.env.PI_ANTIGRAVITY_GOOGLE_SEARCH === "1";
+  weblog(
+    yieldWebSearch
+      ? "web_search yields to antigravity-fork (marker seen); registering Z.AI web_reader only"
+      : "registering Z.AI web_search + web_reader (fork flag off / not loaded)",
+  );
+  if (!yieldWebSearch) {
   // ── web_search tool ──────────────────────────────────────────────────────
 
   pi.registerTool({
@@ -353,6 +378,8 @@ export default function webSearchExtension(pi: ExtensionAPI) {
       };
     },
   });
+
+  } // end !yieldWebSearch (web_search)
 
   // ── web_reader tool ──────────────────────────────────────────────────────
 
