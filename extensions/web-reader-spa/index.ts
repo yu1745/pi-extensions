@@ -29,6 +29,12 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import {
+  chooseScopeCandidate,
+  decideAriaScope,
+  type ScopeCandidate,
+  type ScopeDecision,
+} from "./selection.js";
 
 const DEBUG = /^(1|true|yes)$/i.test(process.env.PI_WEBREADER_DEBUG || "");
 function log(...a: unknown[]) {
@@ -90,9 +96,13 @@ interface AnyPage {
   ariaSnapshot(opts?: unknown): Promise<string>;
   content(): Promise<string>;
   screenshot(opts?: unknown): Promise<Buffer>;
+  evaluate<T, A = void>(fn: (arg: A) => T | Promise<T>, arg?: A): Promise<T>;
   url(): string;
   title(): Promise<string>;
-  locator(sel: string): { ariaSnapshot(opts?: unknown): Promise<string> };
+  locator(sel: string): {
+    first(): { ariaSnapshot(opts?: unknown): Promise<string> };
+    nth(index: number): { ariaSnapshot(opts?: unknown): Promise<string> };
+  };
   close(): Promise<void>;
 }
 
@@ -199,6 +209,40 @@ interface FetchParams {
   inlineImage?: boolean;
 }
 
+async function waitForReadableContent(page: AnyPage, signal?: AbortSignal) {
+  let previous = -1;
+  let stableSamples = 0;
+  const deadline = Date.now() + 8000;
+
+  while (Date.now() < deadline && !signal?.aborted) {
+    const state = await page.evaluate(() => {
+      const mainElements = [
+        ...document.querySelectorAll<HTMLElement>("main, [role=\"main\"], #main-content"),
+      ];
+      const mainText = mainElements.reduce(
+        (max, element) => Math.max(max, (element.innerText || "").trim().length),
+        0,
+      );
+      return {
+        hasMain: mainElements.length > 0,
+        mainText,
+        bodyText: (document.body?.innerText || "").trim().length,
+      };
+    }).catch(() => ({ hasMain: false, mainText: 0, bodyText: 0 }));
+
+    const readable = state.hasMain ? state.mainText > 200 : state.bodyText > 500;
+    const current = state.hasMain ? state.mainText : state.bodyText;
+    const tolerance = Math.max(30, Math.round(Math.max(previous, 0) * 0.02));
+    stableSamples = readable && previous >= 0 && Math.abs(current - previous) <= tolerance
+      ? stableSamples + 1
+      : 0;
+    if (stableSamples >= 2) return;
+
+    previous = current;
+    await page.waitForTimeout(350).catch(() => {});
+  }
+}
+
 async function fetchPage(p: FetchParams, signal?: AbortSignal) {
   const ctx = await ensureBrowser();
   const timeout = p.timeoutMs ?? 45000;
@@ -302,47 +346,59 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
     // 4. Extra wait (at least small pause for hydration if not specified)
     const extraWait = p.extraWaitMs ?? 400;
     if (extraWait > 0) await page.waitForTimeout(extraWait).catch(() => {});
+    await waitForReadableContent(page, signal);
 
     // Content extraction = Playwright ARIA accessibility snapshot (same source as
     // playwright-cli). Hidden/aria-hidden/hover-only nodes are excluded by design.
     let aria = "";
     let effectiveSelector = p.selector;
+    let selection: ScopeDecision | undefined;
+    let candidate: ScopeCandidate | undefined;
 
-    // Auto-detect main content container if selector is not explicitly provided
+    // Take the full snapshot as a completeness baseline. Automatic scoping is accepted only
+    // when it retains a meaningful share of this tree; this prevents a review card, resource
+    // card, or first feed item from being mistaken for the whole page.
+    let fullAria = "";
+    try {
+      fullAria = await page.ariaSnapshot({ timeout: Math.min(timeout, 10000) });
+    } catch (e) {
+      log("full-page ariaSnapshot failed:", (e as Error).message);
+    }
+
+    // Auto-detect the broadest substantive content container. Inspect every matching element
+    // instead of document.querySelector(...)/locator.first(), which loses multi-article feeds.
     if (!effectiveSelector && p.autoSelector !== false) {
       try {
-        const detected = await page.evaluate(() => {
-          // Priority candidates: broad content boundaries first (main / #main-content) to ensure
-          // both post body and top discussion comments are included, or specialized doc containers.
-          const candidates = [
-            "article.markdown",
-            "main article",
-            "[class*=\"prose-doc\"]",
-            "[class*=\"markdown-body\"]",
-            "[class*=\"doc-content\"]",
-            ".prose",
-            "#main-content",
-            "main",
-            "[role=\"main\"]",
-            "article",
-            ".content-container",
-            ".main-content",
-          ];
-          for (const sel of candidates) {
-            const el = document.querySelector(sel);
-            if (el) {
-              const text = (el.innerText || "").trim();
-              // Must have substantive content
-              if (text.length > 200) {
-                return sel;
-              }
-            }
-          }
-          return undefined;
-        });
-        if (detected) {
-          effectiveSelector = detected;
-          log("auto-detected main content selector:", effectiveSelector);
+        const selectors = [
+          "#main-content",
+          "main",
+          "[role=\"main\"]",
+          "article.markdown",
+          "[class*=\"prose-doc\"]",
+          "[class*=\"markdown-body\"]",
+          "[class*=\"doc-content\"]",
+          ".prose",
+          "main article",
+          ".content-container",
+          ".main-content",
+          "article",
+        ];
+        const candidates = await page.evaluate((sels: string[]) => {
+          const found: ScopeCandidate[] = [];
+          sels.forEach((selector, priority) => {
+            const elements = [...document.querySelectorAll<HTMLElement>(selector)];
+            const lengths = elements.map((element) => (element.innerText || "").trim().length);
+            const substantiveMatches = lengths.filter((length) => length > 200).length;
+            elements.forEach((element, index) => {
+              found.push({ selector, index, textLength: lengths[index], priority, substantiveMatches });
+            });
+          });
+          return found;
+        }, selectors);
+        candidate = chooseScopeCandidate(candidates);
+        if (candidate) {
+          effectiveSelector = candidate.selector;
+          log("auto-detected content candidate:", candidate);
         }
       } catch (e) {
         log("auto-detection threw (falling back to full page):", (e as Error).message);
@@ -351,12 +407,30 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
 
     if (effectiveSelector) {
       try {
-        // Use shorter timeout (max 4000ms) for locator to avoid blocking on non-existent selectors
-        aria = await page.locator(effectiveSelector).first().ariaSnapshot({ timeout: Math.min(timeout, 4000) });
+        const locator = page.locator(effectiveSelector);
+        const scopedAria = p.selector
+          ? await locator.first().ariaSnapshot({ timeout: Math.min(timeout, 4000) })
+          : await locator.nth(candidate?.index ?? 0).ariaSnapshot({ timeout: Math.min(timeout, 4000) });
+
+        // Explicit user selectors are authoritative. Automatic selectors must pass the
+        // coverage guard before they are allowed to discard the full-page snapshot.
+        if (p.selector) {
+          aria = scopedAria;
+        } else {
+          selection = decideAriaScope(fullAria, scopedAria, candidate);
+          if (selection.useScoped) {
+            aria = scopedAria;
+          } else {
+            aria = fullAria;
+            log("rejected auto scope:", selection.reason, selection.coverage);
+            effectiveSelector = undefined;
+          }
+        }
       } catch (e) {
         log("locator ariaSnapshot failed, falling back to full page:", (e as Error).message);
       }
     }
+    if (!aria || !aria.trim()) aria = fullAria;
     if (!aria || !aria.trim()) aria = await page.ariaSnapshot({ timeout: Math.min(timeout, 10000) });
 
     let html: string | undefined;
@@ -370,7 +444,7 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
 
     let screenshotB64: string | null = null;
     let screenshotPath: string | null = null;
-    if (p.screenshot) {
+    if (p.screenshot || p.inlineImage) {
       const buf = await page.screenshot({ fullPage: !!p.fullPage, type: "png", timeout });
       screenshotB64 = buf.toString("base64");
       try {
@@ -393,6 +467,7 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
       aria,
       html,
       effectiveSelector,
+      selection,
       screenshot: screenshotB64,
       screenshotPath,
     };
@@ -956,11 +1031,16 @@ export default function (pi: ExtensionAPI) {
         ? "Note: Tables contain merged cells annotated with [colspan=N]/[rowspan=N], '»' (horizontal continuation), and '«' (vertical continuation).\n"
         : "";
 
+      const selectionNote = result.selection && !result.selection.useScoped
+        ? result.selection.reason === "low-coverage"
+          ? `  [full-page fallback: ${result.selection.candidate?.selector ?? "candidate"} covered ${Math.round((result.selection.coverage ?? 0) * 100)}%]`
+          : `  [full-page fallback: ${result.selection.reason}]`
+        : "";
       const header =
         `URL: ${result.url}\n` +
         `Title: ${result.title}\n` +
         `HTTP: ${result.status ?? "?"}\n` +
-        `Browser: ${activeChannel}${viaCdp ? " (cdp)" : ""}${result.effectiveSelector ? `  [scope: ${result.effectiveSelector}]` : ""}${truncated ? "  [truncated]" : ""}\n` +
+        `Browser: ${activeChannel}${viaCdp ? " (cdp)" : ""}${result.effectiveSelector ? `  [scope: ${result.effectiveSelector}]` : ""}${selectionNote}${truncated ? "  [truncated]" : ""}\n` +
         (result.screenshotPath ? `Screenshot: ${result.screenshotPath}\n` : "") +
         spanLegend +
         `\n`;
@@ -973,7 +1053,8 @@ export default function (pi: ExtensionAPI) {
       if (p.inlineImage && result.screenshot) {
         content.push({
           type: "image",
-          source: { type: "base64", mediaType: "image/png", data: result.screenshot },
+          data: result.screenshot,
+          mimeType: "image/png",
         });
       }
 
@@ -987,6 +1068,7 @@ export default function (pi: ExtensionAPI) {
           truncated,
           format,
           ariaBytes: result.aria?.length ?? 0,
+          selection: result.selection,
           screenshotPath: result.screenshotPath,
         },
       };

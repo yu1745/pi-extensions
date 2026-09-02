@@ -62,7 +62,7 @@ Run `/reload` inside pi (or restart) to load it.
 | `extraWaitMs` | number | `400` | extra fixed wait after network idle (lazy content & SPA hydration) |
 | `timeoutMs` | number | `45000` | navigation timeout |
 | `screenshot` | boolean | `false` | capture a PNG (saved to the OS temp dir; the **path** is returned) |
-| `inlineImage` | boolean | `false` | also return the screenshot as an inline base64 image block (for multimodal models). Default off — feed the returned path to `analyze_image` instead |
+| `inlineImage` | boolean | `false` | also return the screenshot as an inline base64 image block (for multimodal models); implies `screenshot=true` |
 | `fullPage` | boolean | `false` | full-page screenshot |
 | `maxChars` | number | `60000` | cap returned text/markdown length |
 
@@ -123,15 +123,18 @@ A 100% real user profile + fingerprint is essentially indistinguishable from a h
   same data `playwright-cli`/Playwright MCP use). The accessibility tree inherently skips
   `display:none`/`visibility:hidden`/`aria-hidden` nodes, so hover menus and "not
   interested"-style clutter never leak in.
-- **Smart content scoping (`autoSelector`)**: Automatically detects the main article / content
-  boundary (such as `article.markdown`, `main article`, `[class*="prose-doc"]`, etc.) to bypass
-  giant sidebar navigation trees on documentation sites.
+- **Guarded content scoping (`autoSelector`)**: Examines every matching main/article/content
+  container, prefers the broadest substantive candidate, and compares its ARIA snapshot with a
+  full-page baseline. If the candidate retains less than 20% of the accessible page, or an
+  article selector has multiple substantive matches, extraction automatically falls back to the
+  full page instead of losing sibling articles, feed items, reviews, tables, or dashboard panels.
 - **Markdown Tables with Span Semantics**: Converts ARIA tables into structured Markdown tables.
   Merged cells are explicitly annotated with `[colspan=N]` / `[rowspan=N]`, with `»` marking
   horizontal continuations and `«` marking vertical continuations so LLMs accurately understand
   the table grid.
-- **Lazy loading & hydration**: Automatically performs a smooth micro-scroll and hydration wait
-  before extraction so dynamic client-side SPA feeds don't render empty.
+- **Lazy loading & hydration**: Performs a micro-scroll, then samples the main container until
+  substantive text is stable (up to 8 seconds) before extraction, avoiding empty SPA shells
+  without imposing a fixed multi-second delay on pages that are already ready.
 - The YAML is parsed in-Node and rendered to Markdown (headings, links, lists, tables, code, text).
   Long URLs (> `PI_WEBREADER_MAXURL`, typically ads/trackers) are dropped to keep output lean.
   Pass `format: "aria"` for the raw playwright-cli-style YAML.
