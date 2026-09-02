@@ -105,7 +105,14 @@ async function setContextWindow(ctx: ExtensionContext, enabled: boolean, pi: Ext
 export default function (pi: ExtensionAPI): void {
 	// Rewrite the provider payload immediately before sending. This is the same
 	// request field used by Codex's native /fast command.
+	// Keep the footer indicator fresh: re-render on every turn so the FAST
+	// badge survives status clears by other extensions or session churn.
+	pi.on("message_start", async (_event, ctx) => {
+		renderStatus(ctx);
+	});
+
 	pi.on("before_provider_request", (event, ctx) => {
+		if (ctx.model?.provider === TARGET_PROVIDER) renderStatus(ctx);
 		if (!state.fastModeEnabled || ctx.model?.provider !== TARGET_PROVIDER) return;
 		if (!event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) return;
 		return {
