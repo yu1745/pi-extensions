@@ -14,10 +14,9 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync } from "node:fs";
+import { getGoogleSearchEnabled } from "../shared/web-search-flag.js";
 
 function weblog(message: string): void {
   try {
@@ -255,44 +254,42 @@ function truncateReaderOutput(text: string, maxChars: number): string {
 
 // ─── Extension ────────────────────────────────────────────────────────────────
 
-function isAntigravityGoogleSearchEnabled(): boolean {
-  if (process.env.PI_ANTIGRAVITY_GOOGLE_SEARCH !== undefined) {
-    return process.env.PI_ANTIGRAVITY_GOOGLE_SEARCH === "1";
-  }
-  try {
-    const settingsPaths = [
-      join(getAgentDir(), "settings.json"),
-      join(process.cwd(), ".pi", "settings.json"),
-    ];
-    for (const p of settingsPaths) {
-      if (!existsSync(p)) continue;
-      const data = JSON.parse(readFileSync(p, "utf-8"));
-      if (typeof data?.antigravityGoogleSearch === "boolean") {
-        return data.antigravityGoogleSearch;
-      }
-    }
-  } catch {}
-  return false;
+/**
+ * Google-grounding backend, imported lazily so this extension still works when
+ * installed without the antigravity extension. Pure engine functions only.
+ */
+interface GoogleBackend {
+	resolveToken(ctx: unknown): Promise<{ token: string; projectId: string }>;
+	googleGroundingSearch(
+		token: string,
+		projectId: string,
+		query: string,
+		signal?: AbortSignal,
+	): Promise<GoogleAnswer>;
+	formatGoogleAnswer(answer: GoogleAnswer, query: string): string;
+}
+
+interface GoogleAnswer {
+	text: string;
+	queries: string[];
+	sources: Array<{ uri?: string; title?: string }>;
+}
+
+async function loadGoogleBackend(): Promise<GoogleBackend | null> {
+	try {
+		return (await import("../antigravity/tools/google-web.js")) as unknown as GoogleBackend;
+	} catch (err) {
+		weblog(`google backend unavailable, Z.AI serves web_search: ${err}`);
+		return null;
+	}
 }
 
 export default function webSearchExtension(pi: ExtensionAPI) {
-  // In-process handshake with the pi-antigravity fork: when its Google-grounding
-  // web_search is active (fork loaded first, per pi's first-registration-wins
-  // tool resolution), it sets this marker and we skip registering the Z.AI
-  // web_search/web_reader — which also un-shadows pi's built-in web_reader /
-  // web_reader_spa. Env PI_ANTIGRAVITY_GOOGLE_SEARCH=1 forces yield regardless of
-  // load order; PI_ANTIGRAVITY_GOOGLE_SEARCH=0 keeps the Z.AI tools.
-  // Also check settings.json directly to be resilient against arbitrary extension load order.
-  const g = globalThis as Record<string, unknown>;
-  const yieldWebSearch =
-    g.__PI_ANTIGRAVITY_GOOGLE_WEB__ === true ||
-    isAntigravityGoogleSearchEnabled();
-  weblog(
-    yieldWebSearch
-      ? "web_search yields to antigravity-fork (marker seen); registering Z.AI web_reader only"
-      : "registering Z.AI web_search + web_reader (fork flag off / not loaded)",
-  );
-  if (!yieldWebSearch) {
+	// web_search registers ONCE, here. Which backend serves it (Google grounding
+	// via antigravity, or Z.AI Web Search Prime) is decided per call at execute
+	// time via shared/web-search-flag.ts — no load-order handshake, no restart
+	// to toggle. `/antigravity.search 1|0` flips it mid-session.
+
   // ── web_search tool ──────────────────────────────────────────────────────
 
   pi.registerTool({
@@ -309,7 +306,8 @@ export default function webSearchExtension(pi: ExtensionAPI) {
     ],
     parameters: Type.Object({
       query: Type.String({
-        description: "Search query (recommended max 70 characters for best results)",
+        description:
+          "Search query. Google backend: supports native operators like site:example.com, after:2026-06, quotes, -exclude. Z.AI backend: recommended max 70 characters; use 'site:<domain>' in the query for domain filtering.",
       }),
       location: Type.Optional(
         Type.Union([Type.Literal("cn"), Type.Literal("us")]),
@@ -335,6 +333,42 @@ export default function webSearchExtension(pi: ExtensionAPI) {
     }),
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      // Backend 1: Google grounding via antigravity. Falls back to Z.AI only
+      // when the backend module or its credentials are unavailable; a failed
+      // search itself (network, rate limit) surfaces as a tool error instead
+      // of silently switching backends.
+      if (getGoogleSearchEnabled()) {
+        const backend = await loadGoogleBackend();
+        if (backend) {
+          let creds: { token: string; projectId: string };
+          try {
+            creds = await backend.resolveToken(ctx);
+          } catch (err) {
+            weblog(`google credentials unavailable, falling back to Z.AI: ${err}`);
+            creds = null as unknown as { token: string; projectId: string };
+          }
+          if (creds) {
+            weblog(`web_search execute: google query="${params.query.slice(0, 80)}"`);
+            const answer = await backend.googleGroundingSearch(
+              creds.token,
+              creds.projectId,
+              params.query,
+              signal,
+            );
+            return {
+              content: [{ type: "text", text: backend.formatGoogleAnswer(answer, params.query) }],
+              details: {
+                query: params.query,
+                source: "Google Search via Antigravity grounding",
+                googleQueries: answer.queries,
+                sourceCount: answer.sources.length,
+              },
+            };
+          }
+        }
+      }
+
+      // Backend 2: Z.AI Web Search Prime.
       const config = getConfig();
       const apiKey = await resolveApiKey(ctx);
 
@@ -401,8 +435,6 @@ export default function webSearchExtension(pi: ExtensionAPI) {
       };
     },
   });
-
-  } // end !yieldWebSearch (web_search)
 
   // ── web_reader tool ──────────────────────────────────────────────────────
 

@@ -12,7 +12,7 @@ import {
   resolveApiKeyFromContext,
 } from "./usage/index.js";
 import { prewarmConnection, redactSecrets } from "./utils/index.js";
-import { registerGoogleWebTools, getGoogleSearchEnabled, setGoogleSearchEnabled } from "./tools/google-web.js";
+import { getGoogleSearchEnabled, setGoogleSearchEnabled } from "../shared/web-search-flag.js";
 
 /**
  * Pi's interactive `notify` writes into the chat transcript. `console.log` in that
@@ -80,13 +80,12 @@ export default function (pi: ExtensionAPI): void {
     streamSimple: streamAntigravity,
   });
 
-  // Google-grounding web_search tool (available on every provider) + in-process
-  // marker that tells pi-extensions' Z.AI web-search/web-reader to stand down.
-  registerGoogleWebTools(pi);
+  // web_search is registered once by the web-search extension, which picks the
+  // backend (Google grounding vs Z.AI) at execute time via shared/web-search-flag.ts.
 
   pi.registerCommand("antigravity.search", {
     description:
-      "web_search source flag: 1 = Google (Antigravity grounding, suppresses yu1745 Z.AI web_search) | 0 = Z.AI (yu1745). Persisted in settings.json.",
+      "web_search backend flag: 1 = Google (Antigravity grounding) | 0 = Z.AI. Persisted in settings.json, effective immediately.",
     handler: async (args, ctx) => {
       const arg = (args || "").trim().toLowerCase();
       const current = getGoogleSearchEnabled() ? 1 : 0;
@@ -97,12 +96,12 @@ export default function (pi: ExtensionAPI): void {
         setGoogleSearchEnabled(next);
         emitCommandOutput(
           ctx,
-          `web_search flag: ${current} → ${next ? 1 : 0} (persisted: settings.json antigravityGoogleSearch).\nRestart pi to apply: 1 = fork's Google grounding serves web_search (Z.AI web_search suppressed, Z.AI web_reader always on); 0 = yu1745 Z.AI web_search serves it.`,
+          `web_search backend: ${current} → ${next ? 1 : 0} (persisted: settings.json antigravityGoogleSearch). Effective immediately: 1 = Google via Antigravity grounding, 0 = Z.AI Web Search Prime.`,
         );
       } else {
         emitCommandOutput(
           ctx,
-          `web_search flag: ${current}\nUsage: /antigravity.search 1 | /antigravity.search 0\n(1=Google via Antigravity, 0=Z.AI via yu1745; persisted in settings.json: antigravityGoogleSearch; env PI_ANTIGRAVITY_GOOGLE_SEARCH=1|0 overrides it)`,
+          `web_search backend: ${current}\nUsage: /antigravity.search 1 | /antigravity.search 0\n(1=Google via Antigravity, 0=Z.AI; persisted in settings.json: antigravityGoogleSearch; env PI_ANTIGRAVITY_GOOGLE_SEARCH=1|0 overrides it; takes effect on the next web_search call, no restart)`,
         );
       }
     },
