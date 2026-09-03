@@ -1,4 +1,5 @@
 import {
+  calculateCost,
   createAssistantMessageEventStream,
   type Api,
   type AssistantMessage,
@@ -594,7 +595,7 @@ export function friendlyAntigravityError(status: number | undefined, text: strin
 }
 
 function createOutput(model: Model<Api>): AssistantMessage {
-  return {
+  const output: AssistantMessage = {
     role: "assistant",
     content: [],
     api: ANTIGRAVITY_API,
@@ -606,12 +607,13 @@ function createOutput(model: Model<Api>): AssistantMessage {
       cacheRead: 0,
       cacheWrite: 0,
       totalTokens: 0,
-      // Antigravity is subscription-billed; keep reported $ costs at zero.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
     },
     stopReason: "stop",
     timestamp: Date.now(),
   };
+  calculateCost(model, output.usage);
+  return output;
 }
 
 function asToolCallArguments(args: Record<string, unknown> | undefined): ToolCall["arguments"] {
@@ -776,8 +778,7 @@ export async function streamResponse(
         output.usage.reasoning = thoughts;
         output.usage.cacheRead = cacheRead;
         output.usage.totalTokens = responseData.usageMetadata.totalTokenCount || 0;
-        // Keep subscription costs at zero (matches model catalog freeCost).
-        output.usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+        calculateCost(model, output.usage);
       }
     }
 
