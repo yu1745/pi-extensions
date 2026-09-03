@@ -12,7 +12,6 @@ import {
   resolveApiKeyFromContext,
 } from "./usage/index.js";
 import { prewarmConnection, redactSecrets } from "./utils/index.js";
-import { getGoogleSearchEnabled, setGoogleSearchEnabled } from "../shared/web-search-flag.js";
 
 /**
  * Pi's interactive `notify` writes into the chat transcript. `console.log` in that
@@ -78,33 +77,6 @@ export default function (pi: ExtensionAPI): void {
       getApiKey,
     },
     streamSimple: streamAntigravity,
-  });
-
-  // web_search is registered once by the web-search extension, which picks the
-  // backend (Google grounding vs Z.AI) at execute time via shared/web-search-flag.ts.
-
-  pi.registerCommand("antigravity.search", {
-    description:
-      "web_search backend flag: 1 = Google (Antigravity grounding) | 0 = Z.AI. Persisted in settings.json, effective immediately.",
-    handler: async (args, ctx) => {
-      const arg = (args || "").trim().toLowerCase();
-      const current = getGoogleSearchEnabled() ? 1 : 0;
-      let next: boolean | undefined;
-      if (arg === "1" || arg === "google" || arg === "on") next = true;
-      else if (arg === "0" || arg === "zai" || arg === "off") next = false;
-      if (next !== undefined) {
-        setGoogleSearchEnabled(next);
-        emitCommandOutput(
-          ctx,
-          `web_search backend: ${current} → ${next ? 1 : 0} (persisted: settings.json antigravityGoogleSearch). Effective immediately: 1 = Google via Antigravity grounding, 0 = Z.AI Web Search Prime.`,
-        );
-      } else {
-        emitCommandOutput(
-          ctx,
-          `web_search backend: ${current}\nUsage: /antigravity.search 1 | /antigravity.search 0\n(1=Google via Antigravity, 0=Z.AI; persisted in settings.json: antigravityGoogleSearch; env PI_ANTIGRAVITY_GOOGLE_SEARCH=1|0 overrides it; takes effect on the next web_search call, no restart)`,
-        );
-      }
-    },
   });
 
   pi.registerCommand("antigravity.usage", {

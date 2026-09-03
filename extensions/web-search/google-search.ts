@@ -2,31 +2,24 @@
  * Google Web Search backend via Antigravity (Cloud Code Assist) grounding.
  *
  * Performs real Google searches over the same `v1internal:generateContent` +
- * `googleSearch` grounding channel the Antigravity CLI itself uses. The
- * functions here are pure engines exported for the web-search extension,
- * which decides at EXECUTE time (via shared/web-search-flag.ts) whether to
- * serve `web_search` from Google grounding or Z.AI — so no registration-time
- * handshake, load-order dependency, or restart-to-toggle is needed anymore.
- *
- * Override the grounding model with ANTIGRAVITY_SEARCH_MODEL (default
- * gemini-2.5-flash, verified stable on this channel).
+ * `googleSearch` grounding channel the Antigravity CLI itself uses.
  */
 
-import { antigravityFetch } from "../utils/http.js";
-import { weblog } from "../utils/weblog.js";
-import { antigravityHeaders, endpointCandidates, parseApiKey } from "../client/client.js";
+import { antigravityFetch } from "../antigravity/utils/http.js";
+import { weblog } from "../antigravity/utils/weblog.js";
+import { antigravityHeaders, endpointCandidates, parseApiKey } from "../antigravity/client/client.js";
 
 const DEFAULT_SEARCH_MODEL = "gemini-2.5-flash";
 const GEO_RETRIES = 3;
 const MAX_OUTPUT_CHARS = 50_000;
 
-interface ToolAuthCtx {
+export interface ToolAuthCtx {
   modelRegistry: {
     getProviderAuth(provider: string): Promise<{ auth?: { apiKey?: string } } | undefined>;
   };
 }
 
-interface GroundingChunkWeb {
+export interface GroundingChunkWeb {
   uri?: string;
   title?: string;
 }
@@ -41,13 +34,19 @@ interface CandidatePart {
   thought?: boolean;
 }
 
+export interface GoogleAnswer {
+  text: string;
+  queries: string[];
+  sources: GroundingChunkWeb[];
+}
+
 /** Resolve Antigravity credentials from the session's provider auth. */
-export async function resolveToken(
+export async function resolveAntigravityToken(
   ctx: ToolAuthCtx,
 ): Promise<{ token: string; projectId: string }> {
   const auth = await ctx.modelRegistry.getProviderAuth("antigravity");
   const raw = auth?.auth?.apiKey;
-  return parseApiKey(raw); // throws a friendly error if not logged in
+  return parseApiKey(raw);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -59,19 +58,77 @@ function geoBackoff(): Promise<void> {
   return sleep(1000 + Math.floor(Math.random() * 2000));
 }
 
-interface GroundingAnswer {
-  text: string;
-  queries: string[];
-  sources: GroundingChunkWeb[];
+function isGroundingRedirectUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.hostname === "vertexaisearch.cloud.google.com" &&
+      parsed.pathname.includes("/grounding-api-redirect")
+    );
+  } catch {
+    return false;
+  }
 }
 
-/** One non-streaming grounded generateContent call, with geo-block retry. Exported for smoke tests. */
+async function resolveGroundingRedirect(
+  proxyUrl: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  try {
+    const timeoutSignal = AbortSignal.timeout(5000);
+    const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+    const response = await antigravityFetch(proxyUrl, {
+      method: "HEAD",
+      redirect: "manual",
+      signal: combinedSignal,
+    });
+    const location = response.headers.get("location");
+    if (!location) return proxyUrl;
+    const resolved = new URL(location, proxyUrl);
+    return resolved.protocol === "http:" || resolved.protocol === "https:" ? resolved.toString() : proxyUrl;
+  } catch {
+    return proxyUrl;
+  }
+}
+
+async function finalizeGroundingSources(
+  sources: GroundingChunkWeb[],
+  signal?: AbortSignal,
+): Promise<GroundingChunkWeb[]> {
+  const redirectUrls = new Set<string>();
+  for (const s of sources) {
+    if (s.uri && isGroundingRedirectUrl(s.uri)) redirectUrls.add(s.uri);
+  }
+  if (redirectUrls.size === 0) return sources;
+
+  signal?.throwIfAborted();
+  const resolvedEntries = await Promise.all(
+    [...redirectUrls].map(async (url) => [url, await resolveGroundingRedirect(url, signal)] as const),
+  );
+  signal?.throwIfAborted();
+  const resolvedMap = new Map(resolvedEntries);
+
+  const seen = new Set<string>();
+  const finalSources: GroundingChunkWeb[] = [];
+  for (const s of sources) {
+    const realUri = (s.uri && resolvedMap.get(s.uri)) ?? s.uri;
+    if (!realUri || seen.has(realUri)) continue;
+    seen.add(realUri);
+    finalSources.push({
+      ...s,
+      uri: realUri,
+    });
+  }
+  return finalSources;
+}
+
+/** One non-streaming grounded generateContent call, with geo-block retry. */
 export async function googleGroundingSearch(
   token: string,
   projectId: string,
   query: string,
   signal?: AbortSignal,
-): Promise<GroundingAnswer> {
+): Promise<GoogleAnswer> {
   const model = process.env.ANTIGRAVITY_SEARCH_MODEL?.trim() || DEFAULT_SEARCH_MODEL;
   const body = JSON.stringify({
     project: projectId,
@@ -115,24 +172,24 @@ export async function googleGroundingSearch(
           .map((p) => p.text)
           .join("\n");
         const gm = cand?.groundingMetadata ?? {};
+        const rawSources = (gm.groundingChunks ?? [])
+          .map((c) => c.web)
+          .filter((w): w is GroundingChunkWeb => Boolean(w?.uri));
+        const sources = await finalizeGroundingSources(rawSources, signal);
         return {
           text: text.trim(),
           queries: gm.webSearchQueries ?? [],
-          sources: (gm.groundingChunks ?? [])
-            .map((c) => c.web)
-            .filter((w): w is GroundingChunkWeb => Boolean(w?.uri)),
+          sources,
         };
       }
       lastStatus = res.status;
       lastError = await res.text();
-      // Rate-limited: endpoint failover cannot help — stop hammering alternates.
       if (res.status === 429) break;
-      // Only transport-level failures justify trying the next endpoint.
       if (![403, 500, 502, 503, 504].includes(res.status)) break;
     }
 
     if (lastStatus === 429 && attempt === 0) {
-      await sleep(2000); // one gentle retry for burst rate limits
+      await sleep(2000);
       continue;
     }
     const geoBlocked =
@@ -141,7 +198,6 @@ export async function googleGroundingSearch(
       weblog(`geo-blocked (400), retry ${attempt + 1}/${GEO_RETRIES} after backoff`);
     }
     if (!geoBlocked) break;
-    // else: swallow and retry (attempt loop) — proxy egress region flapping.
   }
 
   throw new Error(
@@ -154,8 +210,8 @@ function truncate(text: string): string {
   return text.slice(0, MAX_OUTPUT_CHARS) + "\n\n[Output truncated at 50000 chars]";
 }
 
-/** Render a grounding answer for the model, with sources and URI-expiry warning. */
-export function formatGoogleAnswer(answer: GroundingAnswer, query: string): string {
+/** Render a grounding answer for the model with sources. */
+export function formatGoogleAnswer(answer: GoogleAnswer, query: string): string {
   const lines: string[] = [];
   if (answer.queries.length) {
     lines.push(`Google search queries: ${answer.queries.join(" | ")}`);
@@ -174,10 +230,5 @@ export function formatGoogleAnswer(answer: GroundingAnswer, query: string): stri
       lines.push(`[${n}] ${s.title || "(untitled)"} — ${s.uri}`);
     }
   }
-  lines.push("");
-  lines.push(
-    "(Source URIs are short-lived, one-time redirect links: they resolve to the real page only within minutes of this search, only in a real browser. Read a source now with web_reader_spa, or re-locate it later via 'site:<domain> <keywords>'. Do not archive these URIs.)",
-  );
   return truncate(lines.join("\n"));
 }
-
