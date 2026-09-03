@@ -622,6 +622,7 @@ function asToolCallArguments(args: Record<string, unknown> | undefined): ToolCal
 
 /** Exported for unit tests. */
 export async function streamResponse(
+  model: Model<Api>,
   response: Response,
   stream: AssistantMessageEventStream,
   output: AssistantMessage,
@@ -969,7 +970,7 @@ export function streamAntigravity(
         };
         output.stopReason = "stop";
 
-        received = await streamResponse(response, stream, output);
+        received = await streamResponse(model, response, stream, output);
         if (received) break;
       }
 
