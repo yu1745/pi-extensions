@@ -16,6 +16,7 @@ pi install git:github.com/yu1745/pi-extensions
 | `openai-codex-fast` | `extensions/openai-codex-fast.ts` | `/fast` toggles `service_tier=priority` on Codex requests |
 | `tokenspeed` | `extensions/tokenspeed.ts` | Model output speed (tokens/sec) status line |
 | `working-bell` | `extensions/working-bell.ts` | Working bell + title status |
+| `codex-timer` | `extensions/codex-timer.ts` | Codex-style timers: live "Thinking Ns" footer while thinking, `─ Worked for Xm YYs ─` separator after each agent run |
 | `inject-resume` | `extensions/inject-resume.ts` | Inject-resume-on-exit (pi side, Linux/bash) |
 | `cny-footer` | `extensions/cny-footer.ts` | Footer with session cost in RMB |
 | `clear-new-alias` | `extensions/clear-new-alias.ts` | Clears the new-version alias notice |
