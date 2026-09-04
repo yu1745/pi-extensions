@@ -116,10 +116,42 @@ function formatReset(msLeft: number): string {
 	return `${mins}m`;
 }
 
-function paceColor(severity: "good" | "warn" | "danger"): "success" | "warning" | "error" {
+function deltaColor(severity: "good" | "warn" | "danger"): "success" | "warning" | "error" {
 	if (severity === "danger") return "error";
 	if (severity === "warn") return "warning";
 	return "success";
+}
+
+function formatDeltaTime(deltaMs: number): string {
+	const sign = deltaMs >= 0 ? "+" : "-";
+	const absMs = Math.abs(deltaMs);
+	const hours = absMs / (60 * 60 * 1000);
+	if (hours >= 24) {
+		const days = hours / 24;
+		return `${sign}${(Math.round(days * 10) / 10).toFixed(1)}d`;
+	}
+	const roundedHours = Math.round(hours);
+	if (roundedHours === 0) return "±0h";
+	return `${sign}${roundedHours}h`;
+}
+
+function calcDelta(usedPercent: number, cycleMs: number, elapsedMs: number): { text: string; severity: "good" | "warn" | "danger" } | null {
+	if (cycleMs <= 0 || elapsedMs <= 0 || elapsedMs >= cycleMs) return null;
+	const remainingMs = cycleMs - elapsedMs;
+	const theoreticalUsedMs = (usedPercent / 100) * cycleMs;
+	const deltaMs = theoreticalUsedMs - elapsedMs; // > 0: ahead/burning faster, < 0: behind/conserving
+	const text = formatDeltaTime(deltaMs);
+
+	let severity: "good" | "warn" | "danger" = "good";
+	if (deltaMs > 0) {
+		// If burning ahead by more than half of remaining time or by more than 20% of the entire cycle
+		if (deltaMs > remainingMs * 0.5 || deltaMs > cycleMs * 0.2) {
+			severity = "danger";
+		} else {
+			severity = "warn";
+		}
+	}
+	return { text, severity };
 }
 
 function renderFailure(cfg: ProviderConfig, state: FailureState, ctx: ExtensionContext): string {
@@ -404,23 +436,18 @@ async function fetchGLM(apiKey: string): Promise<FetchResult> {
 	return { kind: "unavailable", at: Date.now() };
 }
 
-// pace = used% / theoretical% (fraction of the cycle elapsed). > 1 means
-// burning faster than sustainable — will run out before the reset.
-function glmPace(usedPercent: number, nextResetTime: number | undefined, cycleMs: number, now = Date.now()): { value: number; severity: "good" | "warn" | "danger" } | null {
+// delta = theoreticalUsedTime - elapsed. > 0 means burning faster than sustainable (ahead),
+// < 0 means conserving (behind).
+function glmDelta(usedPercent: number, nextResetTime: number | undefined, cycleMs: number, now = Date.now()): { text: string; severity: "good" | "warn" | "danger" } | null {
 	if (!nextResetTime || !Number.isFinite(nextResetTime) || nextResetTime <= now) return null;
 	const cycleStart = nextResetTime - cycleMs;
 	if (cycleStart >= now) return null;
-	const theoreticalUsed = ((now - cycleStart) / cycleMs) * 100;
-	if (theoreticalUsed <= 0) return null;
-	const value = usedPercent / theoreticalUsed;
-	const severity = value > GLM_PACE_DANGER_THRESHOLD ? "danger"
-		: value > GLM_PACE_WARN_THRESHOLD ? "warn" : "good";
-	return { value, severity };
+	return calcDelta(usedPercent, cycleMs, now - cycleStart);
 }
 
-function glmWeekPace(usedPercent: number, nextResetTime: number | undefined, now = Date.now()): { value: number; severity: "good" | "warn" | "danger" } | null {
+function glmWeekDelta(usedPercent: number, nextResetTime: number | undefined, now = Date.now()): { text: string; severity: "good" | "warn" | "danger" } | null {
 	if (!nextResetTime || !Number.isFinite(nextResetTime) || nextResetTime <= now) return null;
-	return glmPace(usedPercent, nextResetTime, WEEK_MS, now);
+	return glmDelta(usedPercent, nextResetTime, WEEK_MS, now);
 }
 
 function renderGLM(payload: unknown, ctx: ExtensionContext): string {
@@ -431,16 +458,16 @@ function renderGLM(payload: unknown, ctx: ExtensionContext): string {
 
 	let primarySeg = t.fg("dim", "GLM") + t.fg(primaryColor, `${lvl} ${bar(state.leftPercent)} ${state.leftPercent}%`);
 	if (state.primaryCycleMs !== undefined) {
-		const pace = glmPace(100 - state.leftPercent, state.nextResetTime, state.primaryCycleMs);
-		if (pace) primarySeg += " " + t.fg(paceColor(pace.severity), `${(Math.round(pace.value * 10) / 10).toFixed(1)}×`);
+		const delta = glmDelta(100 - state.leftPercent, state.nextResetTime, state.primaryCycleMs);
+		if (delta) primarySeg += " " + t.fg(deltaColor(delta.severity), delta.text);
 	}
 
 	const parts: string[] = [primarySeg];
 
 	if (state.weekLeftPercent !== undefined) {
 		let weekSeg = t.fg(colorFor(state.weekLeftPercent, GLM_LOW_THRESHOLD, GLM_MID_THRESHOLD), `W${bar(state.weekLeftPercent, 6)} ${state.weekLeftPercent}%`);
-		const weekPace = glmWeekPace(100 - state.weekLeftPercent, state.weekNextResetTime);
-		if (weekPace) weekSeg += " " + t.fg(paceColor(weekPace.severity), `${(Math.round(weekPace.value * 10) / 10).toFixed(1)}×`);
+		const weekDelta = glmWeekDelta(100 - state.weekLeftPercent, state.weekNextResetTime);
+		if (weekDelta) weekSeg += " " + t.fg(deltaColor(weekDelta.severity), weekDelta.text);
 		parts.push(weekSeg);
 	}
 
@@ -559,28 +586,21 @@ async function fetchMM(apiKey: string): Promise<FetchResult> {
 	}
 }
 
-function mmPace(window: MMWindow): { value: number; severity: "good" | "warn" | "danger" } | null {
+function mmDelta(window: MMWindow): { text: string; severity: "good" | "warn" | "danger" } | null {
 	if (!window.startAt || !window.endAt || window.endAt <= window.startAt) return null;
 	const now = Date.now();
-	const elapsed = now - window.startAt;
-	const duration = window.endAt - window.startAt;
-	const theoreticalUsed = (elapsed / duration) * 100;
-	if (theoreticalUsed <= 0 || theoreticalUsed >= 100) return null;
-	const value = window.usedPercent / theoreticalUsed;
-	const severity = value > MM_PACE_DANGER_THRESHOLD ? "danger"
-		: value > MM_PACE_WARN_THRESHOLD ? "warn" : "good";
-	return { value, severity };
+	return calcDelta(window.usedPercent, window.endAt - window.startAt, now - window.startAt);
 }
 
 function renderMMWindow(label: string, window: MMWindow, ctx: ExtensionContext): string {
 	const t = ctx.ui.theme;
 	const quotaColor = colorFor(window.leftPercent, MM_LOW_THRESHOLD, MM_MID_THRESHOLD);
 	const base = t.fg(quotaColor, `${label} ${bar(window.leftPercent)} ${window.leftPercent}%`);
-	const pace = mmPace(window);
-	const pacePart = pace ? t.fg(paceColor(pace.severity), ` ${pace.value.toFixed(1)}×`) : "";
+	const delta = mmDelta(window);
+	const deltaPart = delta ? t.fg(deltaColor(delta.severity), ` ${delta.text}`) : "";
 	const reset = window.endAt !== undefined ? formatReset(window.endAt - Date.now()) : "";
 	const resetPart = reset ? t.fg("dim", ` ${reset}`) : "";
-	return base + pacePart + resetPart;
+	return base + deltaPart + resetPart;
 }
 
 function renderMM(payload: unknown, ctx: ExtensionContext): string {
@@ -708,16 +728,11 @@ function codexWindowLabel(window: CodexWindow, primary: boolean): string {
 	return primary ? "5h" : "week";
 }
 
-function codexPace(window: CodexWindow): { value: number; severity: "good" | "warn" | "danger" } | null {
+function codexDelta(window: CodexWindow): { text: string; severity: "good" | "warn" | "danger" } | null {
 	if (!window.resetAt || !window.windowSeconds || window.windowSeconds <= 0) return null;
 	const now = Date.now() / 1000;
 	const cycleStart = window.resetAt - window.windowSeconds;
-	const theoreticalUsed = ((now - cycleStart) / window.windowSeconds) * 100;
-	if (theoreticalUsed <= 0 || theoreticalUsed >= 100) return null;
-	const value = window.usedPercent / theoreticalUsed;
-	const severity = value > CODEX_PACE_DANGER_THRESHOLD ? "danger"
-		: value > CODEX_PACE_WARN_THRESHOLD ? "warn" : "good";
-	return { value, severity };
+	return calcDelta(window.usedPercent, window.windowSeconds * 1000, (now - cycleStart) * 1000);
 }
 
 function renderCodexWindow(window: CodexWindow, primary: boolean, ctx: ExtensionContext): string {
@@ -725,11 +740,11 @@ function renderCodexWindow(window: CodexWindow, primary: boolean, ctx: Extension
 	const label = codexWindowLabel(window, primary);
 	const quotaColor = colorFor(window.leftPercent, CODEX_LOW_THRESHOLD, CODEX_MID_THRESHOLD);
 	const base = t.fg(quotaColor, `${label} ${bar(window.leftPercent)} ${window.leftPercent}%`);
-	const pace = codexPace(window);
-	const pacePart = pace ? t.fg(paceColor(pace.severity), ` ${pace.value.toFixed(1)}×`) : "";
+	const delta = codexDelta(window);
+	const deltaPart = delta ? t.fg(deltaColor(delta.severity), ` ${delta.text}`) : "";
 	const reset = window.resetAt !== undefined ? formatReset(window.resetAt * 1000 - Date.now()) : "";
 	const resetPart = reset ? t.fg("dim", ` ${reset}`) : "";
-	return base + pacePart + resetPart;
+	return base + deltaPart + resetPart;
 }
 
 function renderCodex(payload: unknown, ctx: ExtensionContext): string {
@@ -766,6 +781,7 @@ interface AntigravityBucket {
 	label: string;
 	leftPercent: number;
 	resetTime?: string;
+	cycleMs?: number;
 }
 
 interface AntigravityPayload {
@@ -803,6 +819,18 @@ function antigravityHeaders(token: string): Record<string, string> {
 			pluginType: "GEMINI",
 		}),
 	};
+}
+
+function parseAntigravityWindowMs(rawWindow?: string, label?: string): number | undefined {
+	if (rawWindow) {
+		const parsedSec = Number(rawWindow.replace(/s$/i, ""));
+		if (Number.isFinite(parsedSec) && parsedSec > 0) return parsedSec * 1000;
+	}
+	const text = `${rawWindow || ""} ${label || ""}`.toLowerCase();
+	if (/\bweek/i.test(text)) return WEEK_MS;
+	if (/\b5h\b|five\s*hour/i.test(text)) return 5 * 60 * 60 * 1000;
+	if (/\bday\b|24\s*h/i.test(text)) return 24 * 60 * 60 * 1000;
+	return undefined;
 }
 
 function simplifyAntigravityLabel(groupName?: string, bucketName?: string): string {
@@ -901,10 +929,13 @@ async function fetchAntigravity(apiKey: string): Promise<FetchResult> {
 					const leftPercent = Math.round(clampPercent(rem * 100) ?? 0);
 					const bucketName = typeof b.displayName === "string" ? b.displayName : undefined;
 					const winLabel = simplifyAntigravityLabel(groupName, bucketName || groupName);
+					const rawWindow = typeof b.window === "string" ? b.window : undefined;
+					const cycleMs = parseAntigravityWindowMs(rawWindow, `${groupName} ${bucketName || ""}`);
 					groupBuckets.push({
 						label: winLabel,
 						leftPercent,
 						resetTime: typeof b.resetTime === "string" ? b.resetTime : undefined,
+						...(cycleMs !== undefined ? { cycleMs } : {}),
 					});
 				}
 			}
@@ -969,15 +1000,21 @@ function renderAntigravityBucket(b: AntigravityBucket, ctx: ExtensionContext): s
 	const t = ctx.ui.theme;
 	const quotaColor = colorFor(b.leftPercent, ANTIGRAVITY_LOW_THRESHOLD, ANTIGRAVITY_MID_THRESHOLD);
 	const base = t.fg(quotaColor, `${b.label} ${bar(b.leftPercent)} ${b.leftPercent}%`);
+
+	let deltaPart = "";
 	let resetPart = "";
 	if (b.resetTime) {
 		const ts = Date.parse(b.resetTime);
 		if (Number.isFinite(ts)) {
+			if (b.cycleMs && b.cycleMs > 0) {
+				const delta = calcDelta(100 - b.leftPercent, b.cycleMs, Date.now() - (ts - b.cycleMs));
+				if (delta) deltaPart = t.fg(deltaColor(delta.severity), ` ${delta.text}`);
+			}
 			const reset = formatReset(ts - Date.now());
 			if (reset) resetPart = t.fg("dim", ` ${reset}`);
 		}
 	}
-	return base + resetPart;
+	return base + deltaPart + resetPart;
 }
 
 function renderAntigravity(payload: unknown, ctx: ExtensionContext): string {
