@@ -77,8 +77,11 @@ export default function (pi: ExtensionAPI) {
 					// Aggregate usage across ALL entries (mirrors native FooterComponent).
 					const totals = newTotals();
 					let latestCacheHitRate: number | undefined;
+					let turns = 0;
 					for (const entry of sm.getEntries()) {
-						if (entry.type === "message" && entry.message.role === "assistant") {
+						if (entry.type === "message" && entry.message.role === "user") {
+							turns++;
+						} else if (entry.type === "message" && entry.message.role === "assistant") {
 							addUsage(totals, entry.message.usage);
 							const promptTokens =
 								entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
@@ -103,6 +106,9 @@ export default function (pi: ExtensionAPI) {
 					if (branch) pwd = `${pwd} (${branch})`;
 					const sessionName = sm.getSessionName();
 					if (sessionName) pwd = `${pwd} • ${sessionName}`;
+					if (turns > 0) {
+						pwd = `${pwd} • ${turns} ${turns === 1 ? "turn" : "turns"}`;
+					}
 
 					// Build stats parts (line 2 left side).
 					const statsParts: string[] = [];
