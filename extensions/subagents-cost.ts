@@ -70,8 +70,8 @@ function extractText(content: unknown): string {
 	return "";
 }
 
-function cleanModelName(raw: string | undefined): string {
-	if (!raw) return "default";
+function cleanModelName(raw: string | undefined): string | undefined {
+	if (!raw) return undefined;
 	return raw.includes("/") ? raw.split("/")[1] : raw;
 }
 
