@@ -34,6 +34,7 @@
 			"extensions/cny-footer.ts",
 			"extensions/inject-resume.ts",
 			"extensions/openai-codex-fast.ts",
+			"extensions/context-window.ts",
 			"extensions/subagent-model-map.ts",
 			"extensions/quota-footer.ts",
 			"extensions/siliconflow.ts",

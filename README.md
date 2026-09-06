@@ -13,7 +13,8 @@ pi install git:github.com/yu1745/pi-extensions
 | `web_reader_spa` | `extensions/web-reader-spa/` | SPA-aware, anti-WAF web reader (Playwright + stealth + ARIA extraction) |
 | `quota` | `extensions/quota-footer.ts` | Unified usage monitor in the footer: DeepSeek balance, GLM / MiniMax / Codex quota (one widget, switch-dispatched) |
 | `siliconflow` | `extensions/siliconflow.ts` | SiliconFlow (硅基流动) provider with native dynamic model refresh (`refreshModels` + persisted catalog) |
-| `openai-codex-fast` | `extensions/openai-codex-fast.ts` | `/fast` toggles `service_tier=priority` on Codex requests |
+| `openai-codex-fast` | `extensions/openai-codex-fast.ts` | `/fast` and `/ultrafast` toggle Codex `service_tier=priority` / `service_tier=ultrafast` |
+| `context-window` | `extensions/context-window.ts` | `/context-window` sets or overrides context window for the current model |
 | `tokenspeed` | `extensions/tokenspeed.ts` | Model output speed (tokens/sec) status line |
 | `working-bell` | `extensions/working-bell.ts` | Working bell + title status |
 | `codex-timer` | `extensions/codex-timer.ts` | Codex-style timers: live "Thinking Ns" footer while thinking, `─ Worked for Xm YYs ─` separator after each agent run |
