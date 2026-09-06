@@ -2,10 +2,11 @@
  * subagents-cost extension:
  *
  * Provides the `/subagents-cost` (and `/subagent-cost`, `/scost`) command.
- * Opens an interactive overlay panel displaying the cost breakdown of each subagent
+ * Opens an interactive overlay panel displaying the aggregated cost breakdown of each subagent
  * in the current session (description, model, tokens, tool uses, duration, and CNY cost).
  *
  * Features:
+ * - Aggregates multiple billing entries (initial run, intermediate steers, final retrieval) by agent ID.
  * - Default sort: Cost descending (highest cost first).
  * - Press Tab to toggle between Cost Descending and Spawn Chronological order.
  */
@@ -14,7 +15,6 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 
 const RATE = 7.0; // USD -> CNY
 
@@ -23,6 +23,25 @@ function formatTokens(count: number): string {
 	if (count < 1000) return String(count);
 	if (count < 1_000_000) return `${(count / 1000).toFixed(1)}k`;
 	return `${(count / 1_000_000).toFixed(2)}M`;
+}
+
+function formatDurationSec(sec: number): string {
+	if (sec <= 0) return "-";
+	if (sec < 1) return `${(sec * 1000).toFixed(0)}ms`;
+	if (sec < 60) return `${sec.toFixed(1)}s`;
+	const m = Math.floor(sec / 60);
+	const s = Math.floor(sec % 60);
+	return `${m}m${s}s`;
+}
+
+function parseDurationToSec(durStr: string | undefined): number {
+	if (!durStr || durStr === "-") return 0;
+	const s = durStr.trim().toLowerCase();
+	if (s.endsWith("ms")) return Number.parseFloat(s.slice(0, -2)) / 1000;
+	if (s.endsWith("s")) return Number.parseFloat(s.slice(0, -1));
+	if (s.endsWith("m")) return Number.parseFloat(s.slice(0, -1)) * 60;
+	if (s.endsWith("h")) return Number.parseFloat(s.slice(0, -1)) * 3600;
+	return 0;
 }
 
 interface SubagentCostItem {
@@ -35,7 +54,8 @@ interface SubagentCostItem {
 	toolUses: number;
 	tokens: number;
 	costCny: number;
-	duration: string;
+	durationSec: number;
+	steerCount: number;
 	status: string;
 }
 
@@ -52,7 +72,6 @@ function extractText(content: unknown): string {
 
 function cleanModelName(raw: string | undefined): string {
 	if (!raw) return "default";
-	// Strip provider prefix if present (e.g. "openai-codex/gpt-5.6-terra" -> "gpt-5.6-terra")
 	return raw.includes("/") ? raw.split("/")[1] : raw;
 }
 
@@ -75,23 +94,17 @@ function resolveAgentOutputTurns(agentId: string, sessionId: string, cwd: string
 }
 
 function collectSubagents(ctx: ExtensionContext): { items: SubagentCostItem[]; totalCny: number } {
-	const items: SubagentCostItem[] = [];
-	let totalCny = 0;
-	let idx = 0;
-
 	const branch = ctx.sessionManager.getBranch();
 
-	// Map of toolCallId -> model requested in arguments
+	// Map of toolCallId -> requested model
 	const callModelMap = new Map<string, string>();
 
-	// Pass 1: Build a knowledge base of known agent IDs -> { description, type, model }
-	// by scanning all toolCalls and text notifications in the branch.
+	// Pass 1: Build a catalog of agent IDs -> { description, type, model }
 	const agentCatalog = new Map<string, { description: string; type: string; model?: string }>();
 
 	for (const entry of branch) {
 		if (entry.type !== "message") continue;
 
-		// Scan tool calls for arguments and IDs
 		for (const content of entry.message.content || []) {
 			if (content && typeof content === "object" && content.type === "toolCall") {
 				const args = content.arguments || {};
@@ -101,7 +114,6 @@ function collectSubagents(ctx: ExtensionContext): { items: SubagentCostItem[]; t
 			}
 		}
 
-		// Scan toolResult content for spawned/completed agent banners
 		if (entry.message.role === "toolResult") {
 			const text = extractText(entry.message.content);
 			const details = entry.message.details || {};
@@ -148,83 +160,56 @@ function collectSubagents(ctx: ExtensionContext): { items: SubagentCostItem[]; t
 		}
 	}
 
-	// Pass 2: Extract all usage entries and cross-reference with agentCatalog
+	// Pass 2: Aggregate by agent ID
+	const aggregated = new Map<string, SubagentCostItem>();
+	let nextSpawnIndex = 1;
+	let totalCny = 0;
+
 	for (const entry of branch) {
 		if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
-			idx++;
 			const details = entry.message.details || {};
 			const usage = entry.message.usage || {};
 			const costUsd = usage.cost?.total ?? 0;
 			const cny = costUsd * RATE;
 			totalCny += cny;
 
-			let description = details.description;
-			let subagentType = details.subagentType || details.displayName;
-			let modelName = details.modelName;
-			let duration =
-				details.durationFormatted ||
-				(details.durationMs ? `${(details.durationMs / 1000).toFixed(1)}s` : "-");
-			let toolUses = details.toolUses ?? 0;
 			let agentId = details.agentId || entry.message.toolCallId || "unknown";
+			let isSteer = false;
 
 			const fullText = extractText(entry.message.content);
 
-			// Extract from text banners if available
-			if (fullText) {
-				const idMatch = fullText.match(/^Agent:\s*([^\n\r]+)/m);
-				if (idMatch && (!details.agentId || details.agentId === "unknown")) {
-					agentId = idMatch[1].trim();
-				}
-
-				// Check steer text: "Steering message sent to agent <id>." or "Agent <id> is not running"
-				const steerMatch =
-					fullText.match(/Steering message (?:sent to|queued for) agent\s*([a-f0-9-]+)/i) ||
-					fullText.match(/Agent\s*"([a-f0-9-]+)"\s*is not running/i);
-				if (steerMatch) {
-					agentId = steerMatch[1].trim();
-					if (!subagentType) subagentType = "steer";
-				}
-
-				const descMatch = fullText.match(/^Description:\s*([^\n\r]+)/m);
-				if (descMatch && (!description || description === "Subagent execution")) {
-					description = descMatch[1].trim();
-				}
-
-				const typeMatch = fullText.match(/^Type:\s*([^|\n\r]+)/m);
-				if (typeMatch && (!subagentType || subagentType === "agent")) {
-					subagentType = typeMatch[1].trim();
-				}
-
-				const durMatch = fullText.match(/Duration:\s*([0-9.]+(?:ms|s|m|h))/i);
-				if (durMatch && (duration === "-" || duration === "0.0ms" || duration.endsWith("ms"))) {
-					duration = durMatch[1].trim();
-				}
-
-				const toolsMatch = fullText.match(/Tool uses:\s*(\d+)/i);
-				if (toolsMatch && toolUses === 0) {
-					toolUses = Number.parseInt(toolsMatch[1], 10);
-				}
+			const steerMatch =
+				fullText.match(/Steering message (?:sent to|queued for) agent\s*([a-f0-9-]+)/i) ||
+				fullText.match(/Agent\s*"([a-f0-9-]+)"\s*is not running/i);
+			if (steerMatch) {
+				agentId = steerMatch[1].trim();
+				isSteer = true;
 			}
 
-			// Cross-reference with agentCatalog
+			const compMatch = fullText.match(/^Agent:\s*([a-f0-9-]+)/m);
+			if (compMatch && agentId === "unknown") {
+				agentId = compMatch[1].trim();
+			}
+
+			// Parse tools & duration
+			let toolUses = details.toolUses ?? 0;
+			const toolsMatch = fullText.match(/Tool uses:\s*(\d+)/i);
+			if (toolsMatch && toolUses === 0) {
+				toolUses = Number.parseInt(toolsMatch[1], 10);
+			}
+
+			let durSec = 0;
+			const durMatch = fullText.match(/Duration:\s*([0-9.]+(?:ms|s|m|h))/i);
+			if (durMatch) {
+				durSec = parseDurationToSec(durMatch[1]);
+			} else if (details.durationFormatted) {
+				durSec = parseDurationToSec(details.durationFormatted);
+			} else if (details.durationMs) {
+				durSec = details.durationMs / 1000;
+			}
+
+			// Turn count
 			let turns = details.turnCount;
-			if (agentCatalog.has(agentId)) {
-				const known = agentCatalog.get(agentId)!;
-				if (!description || description === "Subagent execution") {
-					description =
-						subagentType === "steer"
-							? `${known.description} (中途调整)`
-							: known.description;
-				}
-				if (!subagentType || subagentType === "agent") {
-					subagentType = known.type;
-				}
-				if ((!modelName || modelName === "default") && known.model) {
-					modelName = known.model;
-				}
-			}
-
-			// If turnCount is missing or default 1 while toolUses > 0, resolve from output file
 			if ((!turns || turns <= 1) && agentId !== "unknown") {
 				const realTurns = resolveAgentOutputTurns(agentId, ctx.sessionManager.getSessionId(), ctx.cwd);
 				if (realTurns !== undefined) {
@@ -232,23 +217,52 @@ function collectSubagents(ctx: ExtensionContext): { items: SubagentCostItem[]; t
 				}
 			}
 
-			items.push({
-				id: agentId,
-				spawnIndex: idx,
-				type: subagentType || "Agent",
-				model: modelName || "default",
-				description: description || "Subagent execution",
-				turnCount: turns ?? 1,
-				toolUses,
-				tokens: usage.totalTokens ?? 0,
-				costCny: cny,
-				duration,
-				status: details.status || "completed",
-			});
+			// Lookup or create aggregated item
+			if (!aggregated.has(agentId)) {
+				const known = agentCatalog.get(agentId);
+				const desc = details.description || known?.description || "Subagent execution";
+				const subType = details.subagentType || known?.type || (isSteer ? "steer" : "Agent");
+				const model = cleanModelName(details.modelName) || known?.model || "default";
+
+				aggregated.set(agentId, {
+					id: agentId,
+					spawnIndex: nextSpawnIndex++,
+					type: subType,
+					model,
+					description: desc,
+					turnCount: turns ?? 1,
+					toolUses,
+					tokens: usage.totalTokens ?? 0,
+					costCny: cny,
+					durationSec: durSec,
+					steerCount: isSteer ? 1 : 0,
+					status: details.status || "completed",
+				});
+			} else {
+				const item = aggregated.get(agentId)!;
+				item.costCny += cny;
+				item.tokens += usage.totalTokens ?? 0;
+				item.toolUses = Math.max(item.toolUses, toolUses);
+				item.durationSec = Math.max(item.durationSec, durSec);
+				if (turns && turns > item.turnCount) {
+					item.turnCount = turns;
+				}
+				if (isSteer) {
+					item.steerCount++;
+				}
+				// Refresh model or description if current has more detailed info
+				const known = agentCatalog.get(agentId);
+				if (item.model === "default" && known?.model) {
+					item.model = known.model;
+				}
+				if ((item.description === "Subagent execution" || item.description.endsWith("(中途调整)")) && known?.description) {
+					item.description = known.description;
+				}
+			}
 		}
 	}
 
-	return { items, totalCny };
+	return { items: Array.from(aggregated.values()), totalCny };
 }
 
 type SortMode = "cost" | "time";
@@ -280,8 +294,9 @@ export default function (pi: ExtensionAPI) {
 			return sorted.map((item, i) => {
 				const costStr = `¥${item.costCny.toFixed(3)}`;
 				const rankPrefix = sortMode === "cost" ? `#${i + 1}` : `[${item.spawnIndex}]`;
+				const steerTag = item.steerCount > 0 ? ` · ${item.steerCount} steer${item.steerCount > 1 ? "s" : ""}` : "";
 				const label = `${rankPrefix} [${item.type}] ${item.description}`;
-				const desc = `${costStr} · ${formatTokens(item.tokens)} tokens · ${item.toolUses} tools · ↻ ${item.turnCount} · ${item.duration} · ${item.model}`;
+				const desc = `${costStr} · ${formatTokens(item.tokens)} tokens · ${item.toolUses} tools · ↻ ${item.turnCount} · ${formatDurationSec(item.durationSec)} · ${item.model}${steerTag}`;
 				return {
 					value: item.id,
 					label,
@@ -310,7 +325,7 @@ export default function (pi: ExtensionAPI) {
 
 			const updateHeaders = () => {
 				const sortLabel = currentSort === "cost" ? "花费由高到低 (Cost ↓)" : "启动时间顺序 (Time ↑)";
-				const title = `Subagents Cost · Total: ¥${totalCny.toFixed(3)} (${originalItems.length} runs) · [${sortLabel}]`;
+				const title = `Subagents Cost · Total: ¥${totalCny.toFixed(3)} (${originalItems.length} agents) · [${sortLabel}]`;
 				titleText.setText(theme.fg("accent", theme.bold(title)));
 				hintText.setText(theme.fg("dim", "Tab 切换排序 (花费/时间) • Enter/Esc 关闭"));
 			};
