@@ -173,7 +173,7 @@ function collectSubagents(ctx: ExtensionContext): { items: SubagentCostItem[]; t
 			const cny = costUsd * RATE;
 			totalCny += cny;
 
-			let agentId = details.agentId || entry.message.toolCallId || "unknown";
+			let agentId = details.agentId;
 			let isSteer = false;
 
 			const fullText = extractText(entry.message.content);
@@ -187,8 +187,12 @@ function collectSubagents(ctx: ExtensionContext): { items: SubagentCostItem[]; t
 			}
 
 			const compMatch = fullText.match(/^Agent:\s*([a-f0-9-]+)/m);
-			if (compMatch && agentId === "unknown") {
+			if (compMatch) {
 				agentId = compMatch[1].trim();
+			}
+
+			if (!agentId) {
+				agentId = entry.message.toolCallId || "unknown";
 			}
 
 			// Parse tools & duration
