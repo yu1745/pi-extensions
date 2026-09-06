@@ -74,22 +74,31 @@ export default function (pi: ExtensionAPI) {
 				render(width: number): string[] {
 					const sm = ctx.sessionManager;
 
-					// Aggregate usage across ALL entries (mirrors native FooterComponent).
+					// Aggregate usage across current active branch entries.
+					// We separate parent session usage (assistant messages) from
+					// subagent usage reported via toolResult (Agent / get_subagent_result).
+					const parentTotals = newTotals();
+					const subagentTotals = newTotals();
 					const totals = newTotals();
 					let latestCacheHitRate: number | undefined;
-					let turns = 0;
-					for (const entry of sm.getEntries()) {
+					let turns = 0; // User message / conversational turns
+					let steps = 0; // Model execution / assistant steps
+					for (const entry of sm.getBranch()) {
 						if (entry.type === "message" && entry.message.role === "user") {
 							turns++;
 						} else if (entry.type === "message" && entry.message.role === "assistant") {
+							steps++;
+							addUsage(parentTotals, entry.message.usage);
 							addUsage(totals, entry.message.usage);
 							const promptTokens =
 								entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
 							latestCacheHitRate =
 								promptTokens > 0 ? (entry.message.usage.cacheRead / promptTokens) * 100 : undefined;
 						} else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
+							addUsage(subagentTotals, entry.message.usage);
 							addUsage(totals, entry.message.usage);
 						} else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
+							addUsage(parentTotals, entry.usage);
 							addUsage(totals, entry.usage);
 						}
 					}
@@ -107,7 +116,9 @@ export default function (pi: ExtensionAPI) {
 					const sessionName = sm.getSessionName();
 					if (sessionName) pwd = `${pwd} • ${sessionName}`;
 					if (turns > 0) {
-						pwd = `${pwd} • ${turns} ${turns === 1 ? "turn" : "turns"}`;
+						const turnStr = `${turns} ${turns === 1 ? "turn" : "turns"}`;
+						const stepStr = steps > 0 ? ` (${steps} ${steps === 1 ? "step" : "steps"})` : "";
+						pwd = `${pwd} • ${turnStr}${stepStr}`;
 					}
 
 					// Build stats parts (line 2 left side).
@@ -120,8 +131,14 @@ export default function (pi: ExtensionAPI) {
 						statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
 					}
 					if (totals.cost) {
-						const cny = totals.cost * RATE;
-						statsParts.push(`¥${cny.toFixed(3)}`);
+						const totalCny = totals.cost * RATE;
+						if (subagentTotals.cost > 0) {
+							const parentCny = parentTotals.cost * RATE;
+							const subCny = subagentTotals.cost * RATE;
+							statsParts.push(`¥${totalCny.toFixed(2)} [M:${parentCny.toFixed(2)} | S:${subCny.toFixed(2)}]`);
+						} else {
+							statsParts.push(`¥${totalCny.toFixed(3)}`);
+						}
 					}
 
 					// Context percent with threshold-based coloring.
