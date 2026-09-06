@@ -13,6 +13,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const RATE = 7.0; // USD -> CNY
 
@@ -52,6 +54,24 @@ function cleanModelName(raw: string | undefined): string {
 	if (!raw) return "default";
 	// Strip provider prefix if present (e.g. "openai-codex/gpt-5.6-terra" -> "gpt-5.6-terra")
 	return raw.includes("/") ? raw.split("/")[1] : raw;
+}
+
+function resolveAgentOutputTurns(agentId: string, sessionId: string, cwd: string): number | undefined {
+	if (!agentId || agentId === "unknown") return undefined;
+	const safeCwd = cwd.replace(/^\/+|\/+$/g, "").replace(/\//g, "-");
+	const uid = process.getuid ? process.getuid() : 1000;
+	const taskFile = `/tmp/pi-subagents-${uid}/${safeCwd}/${sessionId}/tasks/${agentId}.output`;
+
+	try {
+		if (existsSync(taskFile)) {
+			const content = readFileSync(taskFile, "utf-8");
+			const matches = content.match(/"type"\s*:\s*"assistant"/g);
+			return matches ? matches.length : undefined;
+		}
+	} catch {
+		// Ignore read errors
+	}
+	return undefined;
 }
 
 function collectSubagents(ctx: ExtensionContext): { items: SubagentCostItem[]; totalCny: number } {
@@ -187,6 +207,7 @@ function collectSubagents(ctx: ExtensionContext): { items: SubagentCostItem[]; t
 			}
 
 			// Cross-reference with agentCatalog
+			let turns = details.turnCount;
 			if (agentCatalog.has(agentId)) {
 				const known = agentCatalog.get(agentId)!;
 				if (!description || description === "Subagent execution") {
@@ -203,13 +224,21 @@ function collectSubagents(ctx: ExtensionContext): { items: SubagentCostItem[]; t
 				}
 			}
 
+			// If turnCount is missing or default 1 while toolUses > 0, resolve from output file
+			if ((!turns || turns <= 1) && agentId !== "unknown") {
+				const realTurns = resolveAgentOutputTurns(agentId, ctx.sessionManager.getSessionId(), ctx.cwd);
+				if (realTurns !== undefined) {
+					turns = realTurns;
+				}
+			}
+
 			items.push({
 				id: agentId,
 				spawnIndex: idx,
 				type: subagentType || "Agent",
 				model: modelName || "default",
 				description: description || "Subagent execution",
-				turnCount: details.turnCount ?? 1,
+				turnCount: turns ?? 1,
 				toolUses,
 				tokens: usage.totalTokens ?? 0,
 				costCny: cny,
