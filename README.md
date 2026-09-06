@@ -15,6 +15,7 @@ pi install git:github.com/yu1745/pi-extensions
 | `siliconflow` | `extensions/siliconflow.ts` | SiliconFlow (硅基流动) provider with native dynamic model refresh (`refreshModels` + persisted catalog) |
 | `openai-codex-fast` | `extensions/openai-codex-fast.ts` | `/fast` and `/ultrafast` toggle Codex `service_tier=priority` / `service_tier=ultrafast` |
 | `context-window` | `extensions/context-window.ts` | `/context-window` sets or overrides context window for the current model |
+| `append` | `extensions/append.ts` | `/append` queues user messages until the agent run stops (at `agent_end`), avoiding tool-call interruption |
 | `tokenspeed` | `extensions/tokenspeed.ts` | Model output speed (tokens/sec) status line |
 | `working-bell` | `extensions/working-bell.ts` | Working bell + title status |
 | `codex-timer` | `extensions/codex-timer.ts` | Codex-style timers: live "Thinking Ns" footer while thinking, `─ Worked for Xm YYs ─` separator after each agent run |
