@@ -21,6 +21,7 @@ pi install git:github.com/yu1745/pi-extensions
 | `codex-timer` | `extensions/codex-timer.ts` | Codex-style timers: live "Thinking Ns" footer while thinking, `─ Worked for Xm YYs ─` separator after each agent run |
 | `inject-resume` | `extensions/inject-resume.ts` | Inject-resume-on-exit (pi side, Linux/bash) |
 | `cny-footer` | `extensions/cny-footer.ts` | Footer with session cost in RMB |
+| `deepseek-time-pricing` | `extensions/deepseek-time-pricing.ts` | DeepSeek 分时定价：按消息时间戳重算 `usage.cost`，成本统计跟随高峰/空闲价；`/deepseek-pricing` 查看当前档位 |
 | `clear-new-alias` | `extensions/clear-new-alias.ts` | Clears the new-version alias notice |
 | `zvec-grep` | `extensions/zvec-grep/` | MCP bridge for zvec-grep's official agent search tool; handles server startup and remote-embedding authorization internally |
 
@@ -33,7 +34,7 @@ pi install git:github.com/yu1745/pi-extensions
 
 </details>
 
-> **16 extensions, one package.** Previously separate repos (`pi-web-reader-spa`) are merged here — uninstall the standalone packages before installing this one to avoid duplicate tool registration.
+> **17 extensions, one package.** Previously separate repos (`pi-web-reader-spa`) are merged here — uninstall the standalone packages before installing this one to avoid duplicate tool registration.
 > pi-smart-compact is provided separately by the fork `git:github.com/yu1745/pi-smart-compact` (upstream + `allowUnverifiedApply`).>
 > The `subagent` extension was **removed** in favor of [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents) (install with `pi install npm:@tintinweb/pi-subagents`).
 

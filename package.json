@@ -47,7 +47,8 @@
 			"extensions/filter-image-reader.ts",
 			"extensions/antigravity/index.ts",
 			"extensions/zvec-grep/index.ts",
-			"extensions/subagents-cost.ts"
+			"extensions/subagents-cost.ts",
+			"extensions/deepseek-time-pricing.ts"
 		]
 	},
 	"keywords": [
