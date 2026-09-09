@@ -212,32 +212,36 @@ export default function (pi: ExtensionAPI) {
 					const contextPercentValue = ctxUsage?.percent ?? 0;
 					const contextPercent = ctxUsage?.percent !== null && ctxUsage?.percent !== undefined ? contextPercentValue.toFixed(1) : "?";
 
-					// pwd + branch + session name (line 1).
-					let pwd = formatCwd(sm.getCwd(), home);
+					// ---- Line 1: pwd + branch + name + counters + TTFT ----
+					const sep = theme.fg("dim", " • ");
+					const line1Parts: string[] = [theme.fg("muted", formatCwd(sm.getCwd(), home))];
 					const branch = footerData.getGitBranch();
-					if (branch) pwd = `${pwd} (${branch})`;
+					if (branch) line1Parts.push(theme.fg("accent", `(${branch})`));
 					const sessionName = sm.getSessionName();
-					if (sessionName) pwd = `${pwd} • ${sessionName}`;
+					if (sessionName) line1Parts.push(theme.fg("mdHeading", sessionName));
 					if (turns > 0) {
 						const turnStr = `${turns} ${turns === 1 ? "turn" : "turns"}`;
 						const stepStr = steps > 0 ? ` (${steps} ${steps === 1 ? "step" : "steps"})` : "";
-						pwd = `${pwd} • ${turnStr}${stepStr}`;
+						line1Parts.push(theme.fg("accent", turnStr) + theme.fg("muted", stepStr));
 					}
 					// First-token latency of the last (or in-flight) provider response.
 					if (ttft.awaiting) {
-						pwd = `${pwd} • TTFT …`;
+						line1Parts.push(theme.fg("warning", "TTFT …"));
 					} else if (ttft.lastMs !== null) {
-						pwd = `${pwd} • TTFT ${formatLatency(ttft.lastMs)}`;
+						const ms = ttft.lastMs;
+						const color = ms < 800 ? "success" : ms < 2000 ? "warning" : "error";
+						line1Parts.push(theme.fg("muted", "TTFT ") + theme.fg(color, formatLatency(ms)));
 					}
+					const pwd = line1Parts.join(sep);
 
-					// Build stats parts (line 2 left side).
+					// ---- Line 2: usage / cost / context ----
 					const statsParts: string[] = [];
-					if (totals.input) statsParts.push(`↑${formatTokens(totals.input)}`);
-					if (totals.output) statsParts.push(`↓${formatTokens(totals.output)}`);
-					if (totals.cacheRead) statsParts.push(`R${formatTokens(totals.cacheRead)}`);
-					if (totals.cacheWrite) statsParts.push(`W${formatTokens(totals.cacheWrite)}`);
+					if (totals.input) statsParts.push(theme.fg("mdLink", `↑${formatTokens(totals.input)}`));
+					if (totals.output) statsParts.push(theme.fg("success", `↓${formatTokens(totals.output)}`));
+					if (totals.cacheRead) statsParts.push(theme.fg("accent", `R${formatTokens(totals.cacheRead)}`));
+					if (totals.cacheWrite) statsParts.push(theme.fg("warning", `W${formatTokens(totals.cacheWrite)}`));
 					if ((totals.cacheRead > 0 || totals.cacheWrite > 0) && latestCacheHitRate !== undefined) {
-						statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
+						statsParts.push(theme.fg("muted", `CH${latestCacheHitRate.toFixed(1)}%`));
 					}
 					if (totals.cost) {
 						// Split the session cost into cache / input / output (RMB).
@@ -247,15 +251,24 @@ export default function (pi: ExtensionAPI) {
 						const partsCny = cacheCny + inputCny + outputCny;
 						const totalCny = partsCny > 0 ? partsCny : totals.cost * RATE;
 						const breakdown = partsCny > 0
-							? ` (¥${formatCny(cacheCny)} + ¥${formatCny(inputCny)} + ¥${formatCny(outputCny)})`
+							? theme.fg("dim", " (") +
+									theme.fg("accent", `¥${formatCny(cacheCny)}`) +
+									theme.fg("dim", " + ") +
+									theme.fg("mdLink", `¥${formatCny(inputCny)}`) +
+									theme.fg("dim", " + ") +
+									theme.fg("success", `¥${formatCny(outputCny)}`) +
+									theme.fg("dim", ")")
 							: "";
+						let costText = theme.fg("warning", `¥${formatCny(totalCny)}`) + breakdown;
 						if (subagentTotals.cost > 0) {
 							const parentCny = parentTotals.cost * RATE;
 							const subCny = subagentTotals.cost * RATE;
-							statsParts.push(`¥${formatCny(totalCny)}${breakdown} [M:${formatCny(parentCny)} | S:${formatCny(subCny)}]`);
-						} else {
-							statsParts.push(`¥${formatCny(totalCny)}${breakdown}`);
+							costText +=
+								theme.fg("dim", " [M:") + theme.fg("warning", formatCny(parentCny)) +
+								theme.fg("dim", " | S:") + theme.fg("warning", formatCny(subCny)) +
+								theme.fg("dim", "]");
 						}
+						statsParts.push(costText);
 					}
 
 					// Context percent with threshold-based coloring.
@@ -267,7 +280,7 @@ export default function (pi: ExtensionAPI) {
 					let ctxColored: string;
 					if (contextPercentValue > 90) ctxColored = theme.fg("error", ctxDisplay);
 					else if (contextPercentValue > 70) ctxColored = theme.fg("warning", ctxDisplay);
-					else ctxColored = ctxDisplay;
+					else ctxColored = theme.fg("success", ctxDisplay);
 					statsParts.push(ctxColored);
 
 					let statsLeft = statsParts.join(" ");
@@ -279,18 +292,18 @@ export default function (pi: ExtensionAPI) {
 						const level = ctx.thinkingLevel || "off";
 						rightBase = level === "off" ? `${modelName} • thinking off` : `${modelName} • ${level}`;
 					}
-					let rightSide = rightBase;
+					let rightSide = theme.fg("muted", rightBase);
 					if (footerData.getAvailableProviderCount() > 1 && ctx.model) {
 						const withProvider = `(${ctx.model.provider}) ${rightBase}`;
 						if (visibleWidth(statsLeft) + 2 + visibleWidth(withProvider) <= width) {
-							rightSide = withProvider;
+							rightSide = theme.fg("dim", `(${ctx.model.provider}) `) + theme.fg("muted", rightBase);
 						}
 					}
 
 					// Assemble line with padding, truncating if too wide.
 					let statsLeftWidth = visibleWidth(statsLeft);
 					if (statsLeftWidth > width) {
-						statsLeft = truncateToWidth(statsLeft, width, "...");
+						statsLeft = truncateToWidth(statsLeft, width, theme.fg("dim", "..."));
 						statsLeftWidth = visibleWidth(statsLeft);
 					}
 					const rightWidth = visibleWidth(rightSide);
@@ -310,12 +323,8 @@ export default function (pi: ExtensionAPI) {
 						}
 					}
 
-					// Apply dim, preserving context-percent color (which ends with SGR reset).
-					const dimStatsLeft = theme.fg("dim", statsLeft);
-					const dimRemainder = theme.fg("dim", statsLine.slice(statsLeft.length));
-					const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
-
-					const lines: string[] = [pwdLine, dimStatsLeft + dimRemainder];
+					const pwdLine = truncateToWidth(pwd, width, theme.fg("dim", "..."));
+					const lines: string[] = [pwdLine, statsLine];
 
 					// Line 3: extension statuses (sorted, dim).
 					const statuses = footerData.getExtensionStatuses();
