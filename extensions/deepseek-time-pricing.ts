@@ -15,6 +15,11 @@
 // The default (1/7) matches cny-footer's RATE=7, so its ¥ footer shows the
 // official CNY price exactly. Override with DEEPSEEK_USD_PER_CNY.
 //
+// 2026-09-10 12:00 Beijing time: flash-series off-peak prices become
+// input (cache miss) 1 / output 4 / cache hit 0.02 元/M, peak = 2× off-peak.
+// From the same instant, V4 Pro requests are routed to V4.1 Flash and billed
+// at V4.1 Flash prices.
+//
 // Command: /deepseek-pricing — current tier, rates, and next switch time.
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -27,12 +32,19 @@ interface Rates {
 	cacheWrite: number;
 }
 
+interface PriceTier {
+	/** Epoch ms (UTC) from which this tier applies. 0 = original rates. */
+	from: number;
+	peak: Rates;
+	offPeak: Rates;
+}
+
 interface PricingRule {
 	label: string;
 	/** Tested against `message.responseModel ?? message.model` */
 	match: RegExp;
-	peak: Rates;
-	offPeak: Rates;
+	/** Sorted ascending by `from`; the last tier at/ before the message time wins. */
+	tiers: PriceTier[];
 }
 
 interface UsageCost {
@@ -68,20 +80,52 @@ const USD_PER_CNY = (() => {
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : 1 / 7;
 })();
 
+/** 2026-09-10 12:00 Beijing time (GMT+8) = 04:00 UTC. */
+const V41_FLASH_FROM = Date.UTC(2026, 8, 10, 4, 0, 0);
+
+/** V4.1 Flash off-peak rates introduced on 2026-09-10 12:00 (CNY/1M). */
+const V41_FLASH_OFF_PEAK: Rates = { input: 1, output: 4, cacheRead: 0.02, cacheWrite: 0 };
+/** V4.1 Flash peak rates = 2× off-peak. */
+const V41_FLASH_PEAK: Rates = { input: 2, output: 8, cacheRead: 0.04, cacheWrite: 0 };
+
 const PRICING: PricingRule[] = [
 	{
 		// deepseek-v4-flash, deepseek-v4-flash-vision-exp,
 		// deepseek-v4.1-flash-expires-on-0910, …
 		label: "deepseek-v4-flash",
 		match: /^deepseek-v4(?:\.\d+)?-flash/i,
-		peak: { input: 3, output: 9, cacheRead: 0.1, cacheWrite: 0 },
-		offPeak: { input: 1.5, output: 4.5, cacheRead: 0.05, cacheWrite: 0 },
+		tiers: [
+			{
+				from: 0,
+				peak: { input: 3, output: 9, cacheRead: 0.1, cacheWrite: 0 },
+				offPeak: { input: 1.5, output: 4.5, cacheRead: 0.05, cacheWrite: 0 },
+			},
+			{
+				// 2026-09-10 12:00 Beijing: cache-miss input 1 / output 4 /
+				// cache-hit 0.02 元/M; peak = 2× off-peak.
+				from: V41_FLASH_FROM,
+				peak: V41_FLASH_PEAK,
+				offPeak: V41_FLASH_OFF_PEAK,
+			},
+		],
 	},
 	{
 		label: "deepseek-v4-pro",
 		match: /^deepseek-v4(?:\.\d+)?-pro/i,
-		peak: { input: 9, output: 27, cacheRead: 0.3, cacheWrite: 0 },
-		offPeak: { input: 4.5, output: 13.5, cacheRead: 0.15, cacheWrite: 0 },
+		tiers: [
+			{
+				from: 0,
+				peak: { input: 9, output: 27, cacheRead: 0.3, cacheWrite: 0 },
+				offPeak: { input: 4.5, output: 13.5, cacheRead: 0.15, cacheWrite: 0 },
+			},
+			{
+				// From V4.1 Flash launch, V4 Pro requests are routed to V4.1 Flash
+				// and billed at V4.1 Flash prices.
+				from: V41_FLASH_FROM,
+				peak: V41_FLASH_PEAK,
+				offPeak: V41_FLASH_OFF_PEAK,
+			},
+		],
 	},
 ];
 
@@ -156,6 +200,17 @@ function findRule(provider: unknown, modelId: unknown): PricingRule | undefined 
 	return PRICING.find((rule) => rule.match.test(modelId));
 }
 
+/** The rate tier in effect at `date` (last tier whose `from` is not in the future). */
+function tierAt(rule: PricingRule, date: Date): PriceTier {
+	const t = date.getTime();
+	let chosen = rule.tiers[0];
+	for (const tier of rule.tiers) {
+		if (tier.from <= t) chosen = tier;
+		else break;
+	}
+	return chosen;
+}
+
 /** Reprice an assistant message with the tier in effect at its timestamp. */
 function withTimeBasedCost(message: unknown): Record<string, unknown> | undefined {
 	const view = message as PricedMessageLike;
@@ -167,7 +222,8 @@ function withTimeBasedCost(message: unknown): Record<string, unknown> | undefine
 		typeof view.timestamp === "number" && Number.isFinite(view.timestamp)
 			? new Date(view.timestamp)
 			: new Date();
-	const cny = isPeakAt(at) ? rule.peak : rule.offPeak;
+	const tier = tierAt(rule, at);
+	const cny = isPeakAt(at) ? tier.peak : tier.offPeak;
 
 	// pi stores cost in USD per 1M tokens.
 	const rate = {
@@ -191,8 +247,9 @@ function withTimeBasedCost(message: unknown): Record<string, unknown> | undefine
 
 const STATUS_KEY = "deepseek-pricing";
 
-function statusText(rule: PricingRule, peak: boolean): string {
-	const rates = peak ? rule.peak : rule.offPeak;
+function statusText(rule: PricingRule, at: Date): string {
+	const peak = isPeakAt(at);
+	const rates = peak ? tierAt(rule, at).peak : tierAt(rule, at).offPeak;
 	return `deepseek ${peak ? "高峰" : "空闲"} ${rates.input}/${rates.output} 元/M`;
 }
 
@@ -202,7 +259,7 @@ function updateStatus(ctx: ExtensionContext): void {
 		ctx.ui.setStatus(STATUS_KEY, undefined);
 		return;
 	}
-	ctx.ui.setStatus(STATUS_KEY, statusText(rule, isPeakAt(new Date())));
+	ctx.ui.setStatus(STATUS_KEY, statusText(rule, new Date()));
 }
 
 export default function (pi: ExtensionAPI) {
@@ -244,7 +301,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			const rates = peak ? rule.peak : rule.offPeak;
+			const rates = peak ? tierAt(rule, now).peak : tierAt(rule, now).offPeak;
 			ctx.ui.notify(
 				`${rule.label} 当前${peak ? "高峰" : "空闲"}价：输入 ${rates.input} / 输出 ${rates.output} / ` +
 					`缓存命中 ${rates.cacheRead} 元每百万 token${changeText}`,
