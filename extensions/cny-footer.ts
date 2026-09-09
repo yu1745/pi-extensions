@@ -4,6 +4,12 @@
  * Replaces pi's native footer with one that shows the session cost in RMB
  * (USD × 7). Mirrors the native Footer's three-line layout, theming, and
  * right-aligned model name, so it looks identical except for the currency.
+ *
+ * Line 1 also carries session counters and the last first-token latency:
+ *   ~/proj (main) • 3 turns (5 steps) • TTFT 1.24s
+ *
+ * Line 2 shows the session cost split by component:
+ *   ¥0.123 (¥0.01 + ¥0.09 + ¥0.02)   // total = cache + input + output
  */
 
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -18,6 +24,14 @@ function formatTokens(count: number): string {
 	if (count < 1_000_000) return `${Math.round(count / 1000)}k`;
 	if (count < 10_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
 	return `${Math.round(count / 1_000_000)}M`;
+}
+
+function formatCny(value: number): string {
+	if (!value) return "0";
+	const abs = Math.abs(value);
+	if (abs < 0.01) return value.toFixed(4);
+	if (abs < 1) return value.toFixed(3);
+	return value.toFixed(2);
 }
 
 function formatCwd(cwd: string, home: string): string {
@@ -47,30 +61,119 @@ interface Totals {
 	cacheRead: number;
 	cacheWrite: number;
 	cost: number;
+	/** USD cost split by component (for the `总价 = (cache + input + output)` breakdown). */
+	costCache: number;
+	costInput: number;
+	costOutput: number;
 }
 
 function newTotals(): Totals {
-	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, costCache: 0, costInput: 0, costOutput: 0 };
 }
 
-function addUsage(t: Totals, usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: { total: number } }): void {
+function addUsage(
+	t: Totals,
+	usage: {
+		input: number;
+		output: number;
+		cacheRead: number;
+		cacheWrite: number;
+		cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+	},
+): void {
 	t.input += usage.input;
 	t.output += usage.output;
 	t.cacheRead += usage.cacheRead;
 	t.cacheWrite += usage.cacheWrite;
 	t.cost += usage.cost.total;
+	t.costCache += usage.cost.cacheRead + usage.cost.cacheWrite;
+	t.costInput += usage.cost.input;
+	t.costOutput += usage.cost.output;
+}
+
+/** First-token latency (TTFT) state for the most recent provider response. */
+interface TtftState {
+	/** Timestamp the provider request was sent (before_provider_request). */
+	requestAt: number | null;
+	/** True while waiting for the first streamed token of the current response. */
+	awaiting: boolean;
+	/** Finalized first-token latency (ms) of the last response, if any. */
+	lastMs: number | null;
+}
+
+/** Stream events that carry the first token of an assistant response. */
+const FIRST_TOKEN_EVENTS = new Set([
+	"text_start",
+	"text_delta",
+	"thinking_start",
+	"thinking_delta",
+	"toolcall_start",
+	"toolcall_delta",
+]);
+
+function formatLatency(ms: number): string {
+	if (ms < 1000) return `${Math.round(ms)}ms`;
+	const s = ms / 1000;
+	return `${s < 10 ? s.toFixed(2) : s.toFixed(1)}s`;
 }
 
 export default function (pi: ExtensionAPI) {
+	let requestRender: (() => void) | null = null;
+	let ttft: TtftState = { requestAt: null, awaiting: false, lastMs: null };
+
+	// Anchor: fires right before the request is handed to the provider.
+	pi.on("before_provider_request", () => {
+		if (!ttft.awaiting || ttft.requestAt === null) {
+			ttft.requestAt = Date.now();
+			ttft.awaiting = true;
+			requestRender?.();
+		}
+	});
+
+	// Fallback anchor for custom providers that don't emit before_provider_request.
+	pi.on("message_start", (event) => {
+		if (event.message.role === "assistant" && !ttft.awaiting) {
+			ttft.requestAt = Date.now();
+			ttft.awaiting = true;
+			requestRender?.();
+		}
+	});
+
+	// Stop the clock on the first token of any kind (text / thinking / tool call).
+	pi.on("message_update", (event) => {
+		if (event.message.role !== "assistant") return;
+		if (!ttft.awaiting || ttft.requestAt === null) return;
+		const type = event.assistantMessageEvent?.type;
+		if (!type || !FIRST_TOKEN_EVENTS.has(type)) return;
+		ttft.lastMs = Date.now() - ttft.requestAt;
+		ttft.awaiting = false;
+		ttft.requestAt = null;
+		requestRender?.();
+	});
+
+	// Response ended without producing a token (error / abort): drop the pending timer.
+	pi.on("message_end", (event) => {
+		if (event.message.role !== "assistant") return;
+		if (ttft.awaiting) {
+			ttft.awaiting = false;
+			ttft.requestAt = null;
+		}
+	});
+
 	pi.on("session_start", (_event, ctx) => {
+		ttft = { requestAt: null, awaiting: false, lastMs: null };
 		ctx.ui.setFooter((tui, theme, footerData) => {
+			requestRender = () => tui.requestRender();
 			const home = process.env.HOME || process.env.USERPROFILE || "";
 
 			const unsubscribe = footerData.onBranchChange(() => tui.requestRender());
 
 			return {
 				invalidate() {},
-				dispose: unsubscribe,
+				dispose: () => {
+					requestRender = null;
+					unsubscribe();
+				},
 				render(width: number): string[] {
 					const sm = ctx.sessionManager;
 
@@ -120,6 +223,12 @@ export default function (pi: ExtensionAPI) {
 						const stepStr = steps > 0 ? ` (${steps} ${steps === 1 ? "step" : "steps"})` : "";
 						pwd = `${pwd} • ${turnStr}${stepStr}`;
 					}
+					// First-token latency of the last (or in-flight) provider response.
+					if (ttft.awaiting) {
+						pwd = `${pwd} • TTFT …`;
+					} else if (ttft.lastMs !== null) {
+						pwd = `${pwd} • TTFT ${formatLatency(ttft.lastMs)}`;
+					}
 
 					// Build stats parts (line 2 left side).
 					const statsParts: string[] = [];
@@ -131,13 +240,21 @@ export default function (pi: ExtensionAPI) {
 						statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
 					}
 					if (totals.cost) {
-						const totalCny = totals.cost * RATE;
+						// Split the session cost into cache / input / output (RMB).
+						const cacheCny = totals.costCache * RATE;
+						const inputCny = totals.costInput * RATE;
+						const outputCny = totals.costOutput * RATE;
+						const partsCny = cacheCny + inputCny + outputCny;
+						const totalCny = partsCny > 0 ? partsCny : totals.cost * RATE;
+						const breakdown = partsCny > 0
+							? ` (¥${formatCny(cacheCny)} + ¥${formatCny(inputCny)} + ¥${formatCny(outputCny)})`
+							: "";
 						if (subagentTotals.cost > 0) {
 							const parentCny = parentTotals.cost * RATE;
 							const subCny = subagentTotals.cost * RATE;
-							statsParts.push(`¥${totalCny.toFixed(2)} [M:${parentCny.toFixed(2)} | S:${subCny.toFixed(2)}]`);
+							statsParts.push(`¥${formatCny(totalCny)}${breakdown} [M:${formatCny(parentCny)} | S:${formatCny(subCny)}]`);
 						} else {
-							statsParts.push(`¥${totalCny.toFixed(3)}`);
+							statsParts.push(`¥${formatCny(totalCny)}${breakdown}`);
 						}
 					}
 
