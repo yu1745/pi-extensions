@@ -91,9 +91,12 @@ const V41_FLASH_PEAK: Rates = { input: 2, output: 8, cacheRead: 0.04, cacheWrite
 const PRICING: PricingRule[] = [
 	{
 		// deepseek-v4-flash, deepseek-v4-flash-vision-exp,
-		// deepseek-v4.1-flash-expires-on-0910, …
+		// deepseek-v4.1-flash-expires-on-0910, and the V4.1 alias
+		// `deepseek-flash` — the `v4[.x]-` segment is optional because the
+		// official endpoint reports `deepseek-flash` while pi's catalog uses
+		// `deepseek-v4-flash`.
 		label: "deepseek-v4-flash",
-		match: /^deepseek-v4(?:\.\d+)?-flash/i,
+		match: /^deepseek-(?:v4(?:\.\d+)?-)?flash/i,
 		tiers: [
 			{
 				from: 0,
@@ -110,8 +113,9 @@ const PRICING: PricingRule[] = [
 		],
 	},
 	{
+		// deepseek-v4-pro and its `deepseek-pro` alias.
 		label: "deepseek-v4-pro",
-		match: /^deepseek-v4(?:\.\d+)?-pro/i,
+		match: /^deepseek-(?:v4(?:\.\d+)?-)?pro/i,
 		tiers: [
 			{
 				from: 0,

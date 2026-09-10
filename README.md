@@ -21,7 +21,7 @@ pi install git:github.com/yu1745/pi-extensions
 | `codex-timer` | `extensions/codex-timer.ts` | Codex-style timers: live "Thinking Ns" footer while thinking, `─ Worked for Xm YYs ─` separator after each agent run |
 | `inject-resume` | `extensions/inject-resume.ts` | Inject-resume-on-exit (pi side, Linux/bash) |
 | `cny-footer` | `extensions/cny-footer.ts` | Footer with session cost in RMB, turn/step counters, and last first-token latency (TTFT) |
-| `deepseek-time-pricing` | `extensions/deepseek-time-pricing.ts` | DeepSeek 分时定价：按消息时间戳重算 `usage.cost`，成本统计跟随高峰/空闲价；`/deepseek-pricing` 查看当前档位 |
+| `deepseek-time-pricing` | `extensions/deepseek-time-pricing.ts` | DeepSeek 分时定价：按消息时间戳重算 `usage.cost`，成本统计跟随高峰/空闲价；`/deepseek-pricing` 查看当前档位。匹配 `deepseek-flash`、`deepseek-v4[.x]-flash*` 与 `deepseek-v4[.x]-pro`（provider 必须是 `deepseek`）；`tests/deepseek-time-pricing.test.ts` 覆盖各档位与边界 |
 | `deepseek-effort`（已禁用） | `extensions/deepseek-effort.ts` | 未在加载列表注册；DeepSeek V4.1 / `deepseek-flash`：`/effort` 支持 API 预设和实验性 1–100 系统前缀，两种模式明确分离，按会话分支保存 |
 | `clear-new-alias` | `extensions/clear-new-alias.ts` | Clears the new-version alias notice |
 | `zvec-grep` | `extensions/zvec-grep/` | MCP bridge for zvec-grep's official agent search tool; handles server startup and remote-embedding authorization internally |
