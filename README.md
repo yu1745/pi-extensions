@@ -11,7 +11,7 @@ pi install git:github.com/yu1745/pi-extensions
 | Extension | Path | What it does |
 |---|---|---|
 | `web_reader_spa` | `extensions/web-reader-spa/` | SPA-aware, anti-WAF web reader (Playwright + stealth + ARIA extraction) |
-| `quota` | `extensions/quota-footer.ts` | Unified usage monitor in the footer: DeepSeek balance, GLM / MiniMax / Codex quota (one widget, switch-dispatched) |
+| `quota` | `extensions/quota-footer.ts` | Unified usage monitor in the footer: DeepSeek balance, GLM / MiniMax / Codex / Command Code quota (one widget, switch-dispatched) |
 | `siliconflow` | `extensions/siliconflow.ts` | SiliconFlow (硅基流动) provider with native dynamic model refresh (`refreshModels` + persisted catalog) |
 | `openai-codex-fast` | `extensions/openai-codex-fast.ts` | `/fast` and `/ultrafast` toggle Codex `service_tier=priority` / `service_tier=ultrafast` |
 | `context-window` | `extensions/context-window.ts` | `/context-window` sets or overrides context window for the current model |
@@ -83,7 +83,7 @@ No keys are hardcoded. Z.AI-backed tools (`web-search`) resolve the key in this 
 2. pi's configured auth for the `zai-coding-cn` provider (via `modelRegistry.getProviderAuth` — independent of the session's current provider)
 3. error with a hint to run `/login zai-coding-cn`
 
-Provider quota monitor (`quota-footer`) reads keys at runtime from `modelRegistry.getApiKeyForProvider(...)`, never from source. The old `/ds-balance`, `/glm-quota`, `/minimax-quota`, `/openai-codex-quota` commands still work as aliases of `/quota`.
+Provider quota monitor (`quota-footer`) reads keys at runtime from `modelRegistry.getApiKeyForProvider(...)`, never from source. The old `/ds-balance`, `/glm-quota`, `/minimax-quota`, `/openai-codex-quota` commands still work as aliases of `/quota`. For `commandcode` it watches the same account endpoints as `pi-commandcode-provider`'s `/commandcode-quota` (`/alpha/billing/credits` + `/alpha/billing/subscriptions`), honoring `COMMANDCODE_API_BASE`.
 
 ## Development
 
