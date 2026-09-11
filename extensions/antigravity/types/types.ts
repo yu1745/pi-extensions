@@ -54,6 +54,8 @@ export type AntigravityStreamOptions = SimpleStreamOptions & {
   // Local enum adds any/required on top of pi-ai's "auto" | "none" union;
   // widened so the stream fn accepts SimpleStreamOptions (upstream type fix).
   toolChoice?: ToolChoice | "auto" | "none";
+  /** Optional explicit Antigravity trajectory; paired with sessionId when supplied. */
+  trajectoryId?: string;
 };
 
 export type GeminiTextPart = { text: string; thoughtSignature?: string };

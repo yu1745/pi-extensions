@@ -66,8 +66,9 @@ import {
 import {
   antigravityEnv,
   antigravityRequestEnvelope,
-  deriveStableContextIds,
+  type AntigravityRequestIdentity,
   isRecord,
+  prepareAntigravityRequestIdentity,
   sanitizeText,
 } from "../utils/util.js";
 import { antigravityFetch } from "../utils/http.js";
@@ -473,6 +474,7 @@ export function buildRequest(
   projectId: string,
   options: AntigravityStreamOptions,
   runtimeModel: string,
+  identity?: AntigravityRequestIdentity,
 ): AntigravityGenerateRequest {
   const request: GeminiRequestBody = {
     contents: convertMessages(model, context, runtimeModel),
@@ -516,13 +518,8 @@ export function buildRequest(
     };
   }
 
-  const stableIds = deriveStableContextIds(context);
-  const step = Math.max(2, (context.messages?.length || 0) + 1);
-  const envelope = antigravityRequestEnvelope(runtimeModel, isClaude, {
-    sessionId: options.sessionId || stableIds.sessionId,
-    trajectoryId: stableIds.trajectoryId,
-    step,
-  });
+  const callIdentity = identity ?? prepareAntigravityRequestIdentity(context, options);
+  const envelope = antigravityRequestEnvelope(runtimeModel, isClaude, callIdentity);
   request.sessionId = envelope.sessionId;
   request.labels = envelope.labels;
 
@@ -853,6 +850,9 @@ export function streamAntigravity(
       let lastText = "";
       let received = false;
       let runtimeModel = initialRuntimeModel;
+      // One logical call gets exactly one step. All transport and model retries
+      // below reuse it rather than advancing the trajectory.
+      const requestIdentity = prepareAntigravityRequestIdentity(context, opts);
 
       // Geo-block retry: "User location is not supported" fires when the local
       // proxy egress lands on a Gemini-unsupported region (e.g. HK). Swallow the
@@ -869,7 +869,9 @@ export function streamAntigravity(
         for (let candIdx = 0; candIdx < runtimeCandidates.length; candIdx++) {
           runtimeModel = runtimeCandidates[candIdx]!;
           setLastResolvedRuntimeModel(runtimeModel);
-          const body = JSON.stringify(buildRequest(model, context, projectId, opts, runtimeModel));
+          const body = JSON.stringify(
+            buildRequest(model, context, projectId, opts, runtimeModel, requestIdentity),
+          );
 
           for (const endpoint of endpointCandidates()) {
             setLastEndpoint(endpoint);
@@ -930,7 +932,7 @@ export function streamAntigravity(
           if (antigravityEnv("DEBUG_DUMP") === "1") {
             try {
               const body = JSON.stringify(
-                buildRequest(model, context, projectId, opts, runtimeModel),
+                buildRequest(model, context, projectId, opts, runtimeModel, requestIdentity),
               );
               let parsedBody: unknown = body;
               try {
