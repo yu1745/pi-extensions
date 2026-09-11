@@ -66,6 +66,7 @@ import {
 import {
   antigravityEnv,
   antigravityRequestEnvelope,
+  deriveStableContextIds,
   isRecord,
   sanitizeText,
 } from "../utils/util.js";
@@ -515,8 +516,14 @@ export function buildRequest(
     };
   }
 
-  const envelope = antigravityRequestEnvelope(runtimeModel, isClaude);
-  request.sessionId = options.sessionId || envelope.sessionId;
+  const stableIds = deriveStableContextIds(context);
+  const step = Math.max(2, (context.messages?.length || 0) + 1);
+  const envelope = antigravityRequestEnvelope(runtimeModel, isClaude, {
+    sessionId: options.sessionId || stableIds.sessionId,
+    trajectoryId: stableIds.trajectoryId,
+    step,
+  });
+  request.sessionId = envelope.sessionId;
   request.labels = envelope.labels;
 
   return {

@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+import type { Context } from "@earendil-works/pi-ai";
 import { ANTIGRAVITY_MODEL_ENUM } from "../models/models.js";
 
 export function antigravityEnv(name: string): string | undefined {
@@ -33,18 +35,61 @@ export function nowRequestId(): string {
   return antigravityRequestEnvelope("unknown", false).requestId;
 }
 
+export function deriveStableContextIds(context?: Context): {
+  sessionId: string;
+  trajectoryId: string;
+} {
+  const first = context?.messages?.[0];
+  const anchor =
+    (context?.systemPrompt || "") +
+    (first
+      ? typeof first.content === "string"
+        ? first.content
+        : JSON.stringify(first.content)
+      : "");
+
+  if (!anchor) {
+    const bytes = crypto.getRandomValues(new Uint8Array(8));
+    const sessionId = String(new DataView(bytes.buffer, bytes.byteOffset, 8).getBigInt64(0, true));
+    return {
+      sessionId,
+      trajectoryId: crypto.randomUUID(),
+    };
+  }
+
+  const hash = crypto.createHash("sha256").update(anchor).digest();
+  const sessionId = String(hash.readBigInt64LE(0));
+  const trajectoryId = [
+    hash.subarray(8, 12).toString("hex"),
+    hash.subarray(12, 14).toString("hex"),
+    hash.subarray(14, 16).toString("hex"),
+    hash.subarray(16, 18).toString("hex"),
+    hash.subarray(18, 24).toString("hex"),
+  ].join("-");
+
+  return { sessionId, trajectoryId };
+}
+
 export function antigravityRequestEnvelope(
   wireModelId: string,
   isClaude: boolean,
+  options?: {
+    sessionId?: string;
+    trajectoryId?: string;
+    step?: number;
+  },
 ): { requestId: string; sessionId: string; labels: Record<string, string> } {
   const agentId = crypto.randomUUID();
-  const trajectoryId = crypto.randomUUID();
-  const step = 2;
-  const bytes = crypto.getRandomValues(new Uint8Array(8));
-  const sessionId = String(new DataView(bytes.buffer, bytes.byteOffset, 8).getBigInt64(0, true));
+  const trajectoryId = options?.trajectoryId || crypto.randomUUID();
+  const step = options?.step ?? 2;
+  let sessionId = options?.sessionId;
+  if (!sessionId) {
+    const bytes = crypto.getRandomValues(new Uint8Array(8));
+    sessionId = String(new DataView(bytes.buffer, bytes.byteOffset, 8).getBigInt64(0, true));
+  }
   const usageLabel = isClaude ? "true" : "false";
   const labels: Record<string, string> = {
-    last_step_index: String(step - 1),
+    last_step_index: String(Math.max(1, step - 1)),
     trajectory_id: trajectoryId,
     used_claude: usageLabel,
     used_claude_conservative: usageLabel,
