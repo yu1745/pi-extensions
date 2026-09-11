@@ -244,12 +244,13 @@ export default function (pi: ExtensionAPI) {
 						statsParts.push(theme.fg("muted", `CH${latestCacheHitRate.toFixed(1)}%`));
 					}
 					if (totals.cost) {
-						// Split the session cost into cache / input / output (RMB).
-						const cacheCny = totals.costCache * RATE;
-						const inputCny = totals.costInput * RATE;
-						const outputCny = totals.costOutput * RATE;
+						// True session total cost (Main + Subagents) in RMB.
+						const totalCny = totals.cost * RATE;
+						// Main agent cost split into cache / input / output (RMB).
+						const cacheCny = parentTotals.costCache * RATE;
+						const inputCny = parentTotals.costInput * RATE;
+						const outputCny = parentTotals.costOutput * RATE;
 						const partsCny = cacheCny + inputCny + outputCny;
-						const totalCny = partsCny > 0 ? partsCny : totals.cost * RATE;
 						const breakdown = partsCny > 0
 							? theme.fg("dim", " (") +
 									theme.fg("accent", `¥${formatCny(cacheCny)}`) +
