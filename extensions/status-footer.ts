@@ -1,7 +1,7 @@
 /**
- * CNY Footer Extension (USD Display Edition)
+ * Status Footer Extension
  *
- * Replaces pi's native footer with an enhanced status footer.
+ * Enhanced status footer for pi.
  * Mirrors the native Footer's layout, theming, and right-aligned model name.
  *
  * Line 1 carries session counters and the last first-token latency:

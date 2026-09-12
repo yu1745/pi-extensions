@@ -31,7 +31,7 @@
 			"extensions/clear-new-alias.ts",
 			"extensions/codex-timer.ts",
 			"extensions/compact-threshold.ts",
-			"extensions/cny-footer.ts",
+			"extensions/status-footer.ts",
 			"extensions/inject-resume.ts",
 			"extensions/openai-codex-fast.ts",
 			"extensions/context-window.ts",
