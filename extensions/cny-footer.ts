@@ -1,20 +1,27 @@
 /**
- * CNY Footer Extension
+ * CNY Footer Extension (USD Display Edition)
  *
- * Replaces pi's native footer with one that shows the session cost in RMB
- * (USD × 7). Mirrors the native Footer's three-line layout, theming, and
- * right-aligned model name, so it looks identical except for the currency.
+ * Replaces pi's native footer with an enhanced status footer.
+ * Mirrors the native Footer's layout, theming, and right-aligned model name.
  *
- * Line 1 also carries session counters and the last first-token latency:
+ * Line 1 carries session counters and the last first-token latency:
  *   ~/proj (main) • 3 turns (5 steps) • TTFT 1.24s
  *
- * Line 2 shows the session cost split by component:
- *   ¥0.123 (¥0.01 + ¥0.09 + ¥0.02)   // total = cache + input + output
+ * Line 2 shows usage and session cost in USD:
+ *   - Normal session (within current cycle):
+ *     $174.46 ($15.32 + $10.15 + $2.62) [M:$28.09 | S:$146.37]
+ *   - Multi-cycle session (crossed billing cycle for openai-codex):
+ *     Shows current cycle usage and cost, with prior-cycle total appended:
+ *     $174.46 ($15.32 + $10.15 + $2.62) [M:$28.09 | S:$146.37] (prev: $501.14)
  */
 
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
+import * as https from "node:https";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
@@ -59,7 +66,6 @@ interface Totals {
 	cacheRead: number;
 	cacheWrite: number;
 	cost: number;
-	/** USD cost split by component (for the `总价 = (cache + input + output)` breakdown). */
 	costCache: number;
 	costInput: number;
 	costOutput: number;
@@ -91,15 +97,11 @@ function addUsage(
 
 /** First-token latency (TTFT) state for the most recent provider response. */
 interface TtftState {
-	/** Timestamp the provider request was sent (before_provider_request). */
 	requestAt: number | null;
-	/** True while waiting for the first streamed token of the current response. */
 	awaiting: boolean;
-	/** Finalized first-token latency (ms) of the last response, if any. */
 	lastMs: number | null;
 }
 
-/** Stream events that carry the first token of an assistant response. */
 const FIRST_TOKEN_EVENTS = new Set([
 	"text_start",
 	"text_delta",
@@ -115,11 +117,74 @@ function formatLatency(ms: number): string {
 	return `${s < 10 ? s.toFixed(2) : s.toFixed(1)}s`;
 }
 
+// ─── OpenAI-Codex 周期探测与缓存 ───────────────────────────────────────────────
+const CODEX_AUTH_FILE = path.join(os.homedir(), ".codex", "auth.json");
+let cachedCodexWindowStartMs: number | null = null;
+let lastWindowCheckAt = 0;
+const WINDOW_CHECK_INTERVAL_MS = 60_000; // 1 分钟检测一次窗口
+
+async function resolveCodexCycleStartMs(): Promise<number | null> {
+	const now = Date.now();
+	if (cachedCodexWindowStartMs !== null && now - lastWindowCheckAt < WINDOW_CHECK_INTERVAL_MS) {
+		return cachedCodexWindowStartMs;
+	}
+
+	if (!fs.existsSync(CODEX_AUTH_FILE)) return null;
+	try {
+		const auth = JSON.parse(fs.readFileSync(CODEX_AUTH_FILE, "utf8"));
+		const token = auth.tokens?.access_token;
+		const accountId = auth.tokens?.account_id || "";
+		if (!token) return null;
+
+		const res = await new Promise<any>((resolve, reject) => {
+			const req = https.request(
+				"https://chatgpt.com/backend-api/wham/usage",
+				{
+					headers: {
+						Authorization: `Bearer ${token}`,
+						"chatgpt-account-id": accountId,
+						"User-Agent": "CodexDesktop",
+						Accept: "application/json",
+					},
+					timeout: 4000,
+				},
+				(resp) => {
+					let data = "";
+					resp.on("data", (chunk) => (data += chunk));
+					resp.on("end", () => {
+						try {
+							resolve(JSON.parse(data));
+						} catch (e) {
+							reject(e);
+						}
+					});
+				}
+			);
+			req.on("error", reject);
+			req.on("timeout", () => {
+				req.destroy();
+				reject(new Error("Timeout"));
+			});
+			req.end();
+		});
+
+		const pw = res?.rate_limit?.primary_window;
+		if (pw && pw.reset_at) {
+			const resetAtMs = Number(pw.reset_at) > 1e12 ? Number(pw.reset_at) : Number(pw.reset_at) * 1000;
+			const windowSec = Number(pw.limit_window_seconds || 604800);
+			cachedCodexWindowStartMs = resetAtMs - windowSec * 1000;
+			lastWindowCheckAt = now;
+			return cachedCodexWindowStartMs;
+		}
+	} catch {}
+
+	return cachedCodexWindowStartMs;
+}
+
 export default function (pi: ExtensionAPI) {
 	let requestRender: (() => void) | null = null;
 	let ttft: TtftState = { requestAt: null, awaiting: false, lastMs: null };
 
-	// Anchor: fires right before the request is handed to the provider.
 	pi.on("before_provider_request", () => {
 		if (!ttft.awaiting || ttft.requestAt === null) {
 			ttft.requestAt = Date.now();
@@ -128,7 +193,6 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// Fallback anchor for custom providers that don't emit before_provider_request.
 	pi.on("message_start", (event) => {
 		if (event.message.role === "assistant" && !ttft.awaiting) {
 			ttft.requestAt = Date.now();
@@ -137,7 +201,6 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// Stop the clock on the first token of any kind (text / thinking / tool call).
 	pi.on("message_update", (event) => {
 		if (event.message.role !== "assistant") return;
 		if (!ttft.awaiting || ttft.requestAt === null) return;
@@ -149,7 +212,6 @@ export default function (pi: ExtensionAPI) {
 		requestRender?.();
 	});
 
-	// Response ended without producing a token (error / abort): drop the pending timer.
 	pi.on("message_end", (event) => {
 		if (event.message.role !== "assistant") return;
 		if (ttft.awaiting) {
@@ -160,10 +222,17 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => {
 		ttft = { requestAt: null, awaiting: false, lastMs: null };
+
+		// 异步预拉取一次 Codex 窗口
+		if (ctx.model?.provider === "openai-codex") {
+			resolveCodexCycleStartMs().then(() => {
+				requestRender?.();
+			});
+		}
+
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			requestRender = () => tui.requestRender();
 			const home = process.env.HOME || process.env.USERPROFILE || "";
-
 			const unsubscribe = footerData.onBranchChange(() => tui.requestRender());
 
 			return {
@@ -174,33 +243,58 @@ export default function (pi: ExtensionAPI) {
 				},
 				render(width: number): string[] {
 					const sm = ctx.sessionManager;
+					const isCodex = ctx.model?.provider === "openai-codex";
+					const cycleStartMs = isCodex ? cachedCodexWindowStartMs : null;
 
-					// Aggregate usage across current active branch entries.
-					// We separate parent session usage (assistant messages) from
-					// subagent usage reported via toolResult (Agent / get_subagent_result).
+					// 当前周期内的 totals
 					const parentTotals = newTotals();
 					const subagentTotals = newTotals();
 					const totals = newTotals();
+
+					// 周期之前的汇总数字（仅在跨越计费周期时记录）
+					let prevCycleCost = 0;
+					let hasCrossedCycle = false;
+
 					let latestCacheHitRate: number | undefined;
-					let turns = 0; // User message / conversational turns
-					let steps = 0; // Model execution / assistant steps
+					let turns = 0;
+					let steps = 0;
+
 					for (const entry of sm.getBranch()) {
+						const entryMs = entry.timestamp ? new Date(entry.timestamp).getTime() : 0;
+						// 是否属于当前周期之前的调用
+						const isBeforeCycle = isCodex && cycleStartMs !== null && entryMs > 0 && entryMs < cycleStartMs;
+
 						if (entry.type === "message" && entry.message.role === "user") {
 							turns++;
 						} else if (entry.type === "message" && entry.message.role === "assistant") {
 							steps++;
-							addUsage(parentTotals, entry.message.usage);
-							addUsage(totals, entry.message.usage);
-							const promptTokens =
-								entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
-							latestCacheHitRate =
-								promptTokens > 0 ? (entry.message.usage.cacheRead / promptTokens) * 100 : undefined;
+							if (isBeforeCycle) {
+								hasCrossedCycle = true;
+								prevCycleCost += entry.message.usage?.cost?.total || 0;
+							} else {
+								addUsage(parentTotals, entry.message.usage);
+								addUsage(totals, entry.message.usage);
+								const promptTokens =
+									entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
+								latestCacheHitRate =
+									promptTokens > 0 ? (entry.message.usage.cacheRead / promptTokens) * 100 : undefined;
+							}
 						} else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
-							addUsage(subagentTotals, entry.message.usage);
-							addUsage(totals, entry.message.usage);
+							if (isBeforeCycle) {
+								hasCrossedCycle = true;
+								prevCycleCost += entry.message.usage?.cost?.total || 0;
+							} else {
+								addUsage(subagentTotals, entry.message.usage);
+								addUsage(totals, entry.message.usage);
+							}
 						} else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
-							addUsage(parentTotals, entry.usage);
-							addUsage(totals, entry.usage);
+							if (isBeforeCycle) {
+								hasCrossedCycle = true;
+								prevCycleCost += entry.usage?.cost?.total || 0;
+							} else {
+								addUsage(parentTotals, entry.usage);
+								addUsage(totals, entry.usage);
+							}
 						}
 					}
 
@@ -241,10 +335,11 @@ export default function (pi: ExtensionAPI) {
 					if ((totals.cacheRead > 0 || totals.cacheWrite > 0) && latestCacheHitRate !== undefined) {
 						statsParts.push(theme.fg("muted", `CH${latestCacheHitRate.toFixed(1)}%`));
 					}
-					if (totals.cost) {
-						// True session total cost (Main + Subagents) in USD.
-						const totalUsd = totals.cost;
-						// Main agent cost split into cache / input / output (USD).
+
+					// Cost display
+					if (totals.cost || hasCrossedCycle) {
+						// 当前周期花费
+						const currentUsd = totals.cost;
 						const cacheUsd = parentTotals.costCache;
 						const inputUsd = parentTotals.costInput;
 						const outputUsd = parentTotals.costOutput;
@@ -258,7 +353,9 @@ export default function (pi: ExtensionAPI) {
 									theme.fg("success", `$${formatUsd(outputUsd)}`) +
 									theme.fg("dim", ")")
 							: "";
-						let costText = theme.fg("warning", `$${formatUsd(totalUsd)}`) + breakdown;
+
+						let costText = theme.fg("warning", `$${formatUsd(currentUsd)}`) + breakdown;
+
 						if (subagentTotals.cost > 0) {
 							const parentUsd = parentTotals.cost;
 							const subUsd = subagentTotals.cost;
@@ -267,6 +364,15 @@ export default function (pi: ExtensionAPI) {
 								theme.fg("dim", " | S:") + theme.fg("warning", `$${formatUsd(subUsd)}`) +
 								theme.fg("dim", "]");
 						}
+
+						// 如果跨越了计费周期，在末尾附带前期总花费： (prev: $501.14)
+						if (hasCrossedCycle && prevCycleCost > 0) {
+							costText +=
+								theme.fg("dim", " (prev: ") +
+								theme.fg("muted", `$${formatUsd(prevCycleCost)}`) +
+								theme.fg("dim", ")");
+						}
+
 						statsParts.push(costText);
 					}
 
