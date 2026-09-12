@@ -44,7 +44,7 @@ export default function (pi: ExtensionAPI) {
 	);
 
 	// --- Feature 1: live thinking timer in footer status ---
-	const startThinking = (ctx: { ui: { setStatus: (k: string, v: string) => void }; hasUI: boolean }) => {
+	const startThinking = (ctx: { ui: { setStatus: (k: string, v?: string) => void }; hasUI: boolean }) => {
 		thinkStart = Date.now();
 		awaitingText = true;
 		if (!ctx.hasUI) return;
@@ -80,7 +80,7 @@ export default function (pi: ExtensionAPI) {
 		if (awaitingText) {
 			awaitingText = false;
 			stopTick();
-			if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, "");
+			if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
 		}
 	});
 
@@ -88,7 +88,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_settled", async (_event, ctx) => {
 		stopTick();
 		awaitingText = false;
-		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, "");
+		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
 		const secs = (Date.now() - turnStart) / 1000;
 		if (turnStart > 0 && secs >= 1) {
 			pi.appendEntry<WorkedForData>("worked-for", {

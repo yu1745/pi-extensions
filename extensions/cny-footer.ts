@@ -431,13 +431,16 @@ export default function (pi: ExtensionAPI) {
 					const pwdLine = truncateToWidth(pwd, width, theme.fg("dim", "..."));
 					const lines: string[] = [pwdLine, statsLine];
 
-					// Line 3: extension statuses (sorted, dim).
+					// Line 3: extension statuses (sorted, dim, filter empty items).
 					const statuses = footerData.getExtensionStatuses();
 					if (statuses.size > 0) {
 						const sorted = Array.from(statuses.entries())
 							.sort(([a], [b]) => a.localeCompare(b))
-							.map(([, text]) => sanitizeStatusText(text));
-						lines.push(truncateToWidth(sorted.join(" "), width, theme.fg("dim", "...")));
+							.map(([, text]) => sanitizeStatusText(text))
+							.filter((text) => text.length > 0);
+						if (sorted.length > 0) {
+							lines.push(truncateToWidth(sorted.join("  "), width, theme.fg("dim", "...")));
+						}
 					}
 
 					return lines;
