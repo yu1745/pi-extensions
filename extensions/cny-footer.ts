@@ -16,8 +16,6 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const RATE = 7; // USD -> CNY
-
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
 	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
@@ -26,7 +24,7 @@ function formatTokens(count: number): string {
 	return `${Math.round(count / 1_000_000)}M`;
 }
 
-function formatCny(value: number): string {
+function formatUsd(value: number): string {
 	if (!value) return "0";
 	const abs = Math.abs(value);
 	if (abs < 0.01) return value.toFixed(4);
@@ -244,29 +242,29 @@ export default function (pi: ExtensionAPI) {
 						statsParts.push(theme.fg("muted", `CH${latestCacheHitRate.toFixed(1)}%`));
 					}
 					if (totals.cost) {
-						// True session total cost (Main + Subagents) in RMB.
-						const totalCny = totals.cost * RATE;
-						// Main agent cost split into cache / input / output (RMB).
-						const cacheCny = parentTotals.costCache * RATE;
-						const inputCny = parentTotals.costInput * RATE;
-						const outputCny = parentTotals.costOutput * RATE;
-						const partsCny = cacheCny + inputCny + outputCny;
-						const breakdown = partsCny > 0
+						// True session total cost (Main + Subagents) in USD.
+						const totalUsd = totals.cost;
+						// Main agent cost split into cache / input / output (USD).
+						const cacheUsd = parentTotals.costCache;
+						const inputUsd = parentTotals.costInput;
+						const outputUsd = parentTotals.costOutput;
+						const partsUsd = cacheUsd + inputUsd + outputUsd;
+						const breakdown = partsUsd > 0
 							? theme.fg("dim", " (") +
-									theme.fg("accent", `¥${formatCny(cacheCny)}`) +
+									theme.fg("accent", `$${formatUsd(cacheUsd)}`) +
 									theme.fg("dim", " + ") +
-									theme.fg("mdLink", `¥${formatCny(inputCny)}`) +
+									theme.fg("mdLink", `$${formatUsd(inputUsd)}`) +
 									theme.fg("dim", " + ") +
-									theme.fg("success", `¥${formatCny(outputCny)}`) +
+									theme.fg("success", `$${formatUsd(outputUsd)}`) +
 									theme.fg("dim", ")")
 							: "";
-						let costText = theme.fg("warning", `¥${formatCny(totalCny)}`) + breakdown;
+						let costText = theme.fg("warning", `$${formatUsd(totalUsd)}`) + breakdown;
 						if (subagentTotals.cost > 0) {
-							const parentCny = parentTotals.cost * RATE;
-							const subCny = subagentTotals.cost * RATE;
+							const parentUsd = parentTotals.cost;
+							const subUsd = subagentTotals.cost;
 							costText +=
-								theme.fg("dim", " [M:") + theme.fg("warning", formatCny(parentCny)) +
-								theme.fg("dim", " | S:") + theme.fg("warning", formatCny(subCny)) +
+								theme.fg("dim", " [M:") + theme.fg("warning", `$${formatUsd(parentUsd)}`) +
+								theme.fg("dim", " | S:") + theme.fg("warning", `$${formatUsd(subUsd)}`) +
 								theme.fg("dim", "]");
 						}
 						statsParts.push(costText);
