@@ -48,7 +48,8 @@
 			"extensions/antigravity/index.ts",
 			"extensions/zvec-grep/index.ts",
 			"extensions/subagents-cost.ts",
-			"extensions/deepseek-time-pricing.ts"
+			"extensions/deepseek-time-pricing.ts",
+			"extensions/codex-cost.ts"
 		]
 	},
 	"keywords": [
