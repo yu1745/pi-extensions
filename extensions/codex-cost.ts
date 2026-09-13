@@ -401,9 +401,9 @@ class CodexCostModalOverlay implements Component, Focusable {
 
 	render(width: number): string[] {
 		const t = this.theme;
-		const innerWidth = Math.max(50, Math.min(width - 4, 96));
-		const leftPad = Math.max(0, Math.floor((width - innerWidth - 2) / 2));
-		const padStr = " ".repeat(leftPad);
+		const innerWidth = Math.max(50, width - 2);
+		const leftPad = 0;
+		const padStr = "";
 
 		const topBorder = `${padStr}${t.fg("border", `┌${"─".repeat(innerWidth)}┐`)}`;
 		const bottomBorder = `${padStr}${t.fg("border", `└${"─".repeat(innerWidth)}┘`)}`;
@@ -776,9 +776,17 @@ export default function codexCostPlugin(pi: ExtensionAPI) {
 					},
 					{
 						overlay: true,
-						overlayOptions: {
-							anchor: "top-center",
-							margin: { top: 1, left: 2, right: 2 },
+						overlayOptions: () => {
+							let maxContentWidth = 0;
+							for (const line of reportLines) {
+								const w = visibleWidth(line);
+								if (w > maxContentWidth) maxContentWidth = w;
+							}
+							return {
+								anchor: "top-center",
+								width: Math.max(80, maxContentWidth + 4),
+								margin: { top: 1, left: 2, right: 2 },
+							};
 						},
 					} as any
 				);
