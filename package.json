@@ -8,6 +8,9 @@
 	"files": [
 		"extensions"
 	],
+	"scripts": {
+		"test": "node scripts/run-tests.mjs"
+	},
 	"dependencies": {
 		"linkedom": "^0.18.13",
 		"playwright": "^1.62.1",
