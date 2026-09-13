@@ -10,8 +10,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 const ZG = "zg";
 const ZG_WINDOWS_CLI = resolve(
@@ -20,6 +21,10 @@ const ZG_WINDOWS_CLI = resolve(
 const MCP_ENDPOINT = process.env.ZVEC_GREP_SERVER_URL ?? "http://127.0.0.1:7999/mcp";
 const COMMAND_TIMEOUT = 45_000;
 const MCP_TIMEOUT = 5 * 60_000;
+const DEFAULT_RESULT_LIMIT = 8;
+const MAX_RESULT_LIMIT = 20;
+const MAX_OUTPUT_LINES = 400;
+const MAX_OUTPUT_BYTES = 24 * 1024;
 
 type ExecResult = Awaited<ReturnType<ExtensionAPI["exec"]>>;
 type ToolUpdate = Parameters<NonNullable<Parameters<ExtensionAPI["registerTool"]>[0]["execute"]>>[3];
@@ -51,7 +56,12 @@ const FallbackSearchParameters = Type.Object({
   queries: StringOrStrings("One or more primary hybrid-search groups."),
   fts: StringOrStrings("Supplemental lexical-route groups."),
   vector: StringOrStrings("Supplemental semantic/vector-route groups."),
-  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "Maximum returned items per group or fused plan." })),
+  limit: Type.Optional(Type.Integer({
+    minimum: 1,
+    maximum: MAX_RESULT_LIMIT,
+    default: DEFAULT_RESULT_LIMIT,
+    description: "Maximum returned items per group or fused plan.",
+  })),
   globs: StringOrStrings("Ordered case-sensitive rg-style glob rules."),
   insensitiveGlobs: StringOrStrings("Ordered case-insensitive rg-style glob rules."),
   fileTypes: StringOrStrings("Included ripgrep file types."),
@@ -357,6 +367,9 @@ async function normalizeArguments(
     }
   }
 
+  const requestedLimit = typeof args.limit === "number" ? args.limit : DEFAULT_RESULT_LIMIT;
+  args.limit = Math.min(MAX_RESULT_LIMIT, Math.max(1, Math.trunc(requestedLimit)));
+
   const types = await rgTypes(pi, String(args.root), signal);
   translateFileTypes(args, "fileTypes", types);
   translateFileTypes(args, "excludedFileTypes", types);
@@ -373,6 +386,38 @@ function mcpText(result: JsonObject): string {
     if (text) return text;
   }
   return JSON.stringify(result, null, 2);
+}
+
+async function boundedMcpText(result: JsonObject): Promise<{
+  text: string;
+  truncated: boolean;
+  fullOutputPath?: string;
+}> {
+  const full = mcpText(result);
+  const lines = full.split(/\r?\n/);
+  if (lines.length <= MAX_OUTPUT_LINES && Buffer.byteLength(full, "utf8") <= MAX_OUTPUT_BYTES) {
+    return { text: full, truncated: false };
+  }
+
+  const kept: string[] = [];
+  let bytes = 0;
+  for (const line of lines) {
+    const lineBytes = Buffer.byteLength(`${line}\n`, "utf8");
+    if (kept.length >= MAX_OUTPUT_LINES || bytes + lineBytes > MAX_OUTPUT_BYTES) break;
+    kept.push(line);
+    bytes += lineBytes;
+  }
+
+  const directory = await mkdtemp(join(tmpdir(), "pi-zvec-grep-"));
+  const fullOutputPath = join(directory, "response.txt");
+  await writeFile(fullOutputPath, full, "utf8");
+  const omittedLines = lines.length - kept.length;
+  kept.push(
+    "",
+    `[zvec-grep output truncated: ${omittedLines} additional lines omitted; full response: ${fullOutputPath}]`,
+    "Narrow the query or add globs/fileTypes before reading more evidence.",
+  );
+  return { text: kept.join("\n"), truncated: true, fullOutputPath };
 }
 
 function hasMcpError(result: JsonObject): boolean {
@@ -416,9 +461,15 @@ function adaptMcpSchema(schema: JsonObject): JsonObject {
     // The default zvec-grep MCP transport currently accepts trace but drops
     // it from its text response; do not advertise a misleading LLM argument.
     delete (copy.properties as JsonObject).trace;
-    const freshness = (copy.properties as JsonObject).freshness;
+    const properties = copy.properties as JsonObject;
+    const freshness = properties.freshness;
     if (freshness && typeof freshness === "object" && !Array.isArray(freshness)) {
       (freshness as JsonObject).default = "wait_for_fresh";
+    }
+    const limit = properties.limit;
+    if (limit && typeof limit === "object" && !Array.isArray(limit)) {
+      (limit as JsonObject).default = DEFAULT_RESULT_LIMIT;
+      (limit as JsonObject).maximum = MAX_RESULT_LIMIT;
     }
   }
   if (Array.isArray(copy.required)) {
@@ -449,9 +500,15 @@ function registerSearch(pi: ExtensionAPI, tool: McpTool | undefined): void {
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const result = await authorizeAndCall(pi, params, signal, ctx.cwd, onUpdate);
       if (hasMcpError(result)) throw new Error(mcpText(result));
+      const bounded = await boundedMcpText(result);
       return {
-        content: [{ type: "text", text: mcpText(result) }],
-        details: { source: "zvec-grep MCP", workspace: absoluteRoot(ctx.cwd, (params as JsonObject).root) },
+        content: [{ type: "text", text: bounded.text }],
+        details: {
+          source: "zvec-grep MCP",
+          workspace: absoluteRoot(ctx.cwd, (params as JsonObject).root),
+          truncated: bounded.truncated,
+          fullOutputPath: bounded.fullOutputPath,
+        },
       };
     },
   });
