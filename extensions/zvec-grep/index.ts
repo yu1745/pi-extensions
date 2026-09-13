@@ -9,10 +9,14 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const ZG = "zg";
+const ZG_WINDOWS_CLI = resolve(
+  process.execPath, "..", "node_modules", "@zvec", "zvec-grep", "dist", "cli", "index.js",
+);
 const MCP_ENDPOINT = process.env.ZVEC_GREP_SERVER_URL ?? "http://127.0.0.1:7999/mcp";
 const COMMAND_TIMEOUT = 45_000;
 const MCP_TIMEOUT = 5 * 60_000;
@@ -89,12 +93,16 @@ function execZg(
   args: string[],
   options: Parameters<ExtensionAPI["exec"]>[2],
 ): Promise<ExecResult> {
-  // Node cannot spawn npm's .cmd shims directly on Windows (spawn EINVAL).
-  // Invoke the shim through cmd.exe while keeping argv-based execution on
-  // other platforms.
-  return process.platform === "win32"
-    ? pi.exec(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", "zg.cmd", ...args], options)
-    : pi.exec(ZG, args, options);
+  // Node cannot spawn npm's .cmd shims directly on Windows (spawn EINVAL),
+  // and cmd.exe creates a visible console window. Run the installed CLI entry
+  // with pi's current Node executable instead.
+  if (process.platform === "win32") {
+    if (!existsSync(ZG_WINDOWS_CLI)) {
+      throw new Error(`zvec-grep CLI entry not found beside Node: ${ZG_WINDOWS_CLI}`);
+    }
+    return pi.exec(process.execPath, ["--liftoff-only", ZG_WINDOWS_CLI, ...args], options);
+  }
+  return pi.exec(ZG, args, options);
 }
 
 function envToken(): Promise<string | undefined> {
