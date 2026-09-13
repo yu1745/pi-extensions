@@ -12,7 +12,7 @@ import { Type } from "typebox";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-const ZG = process.platform === "win32" ? "zg.cmd" : "zg";
+const ZG = "zg";
 const MCP_ENDPOINT = process.env.ZVEC_GREP_SERVER_URL ?? "http://127.0.0.1:7999/mcp";
 const COMMAND_TIMEOUT = 45_000;
 const MCP_TIMEOUT = 5 * 60_000;
@@ -67,7 +67,10 @@ const FallbackSearchParameters = Type.Object({
   ]))),
   modifiedAfter: Type.Optional(Type.Union([Type.Integer({ minimum: 0 }), Type.String()])),
   modifiedBefore: Type.Optional(Type.Union([Type.Integer({ minimum: 0 }), Type.String()])),
-  freshness: Type.Optional(Type.Union([Type.Literal("eventual"), Type.Literal("wait_for_fresh")])),
+  freshness: Type.Optional(Type.Union(
+    [Type.Literal("eventual"), Type.Literal("wait_for_fresh")],
+    { default: "wait_for_fresh" },
+  )),
   autoUpdate: Type.Optional(Type.Boolean({ description: "Allow eventual search to schedule a background update." })),
 });
 
@@ -79,6 +82,19 @@ const rgTypeMaps = new Map<string, Promise<Map<string, string[]>>>();
 
 function output(result: ExecResult): string {
   return [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n\n");
+}
+
+function execZg(
+  pi: ExtensionAPI,
+  args: string[],
+  options: Parameters<ExtensionAPI["exec"]>[2],
+): Promise<ExecResult> {
+  // Node cannot spawn npm's .cmd shims directly on Windows (spawn EINVAL).
+  // Invoke the shim through cmd.exe while keeping argv-based execution on
+  // other platforms.
+  return process.platform === "win32"
+    ? pi.exec(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", "zg.cmd", ...args], options)
+    : pi.exec(ZG, args, options);
 }
 
 function envToken(): Promise<string | undefined> {
@@ -201,11 +217,11 @@ class ZvecMcpClient {
 }
 
 async function ensureServer(pi: ExtensionAPI, signal: AbortSignal | undefined): Promise<void> {
-  const status = await pi.exec(ZG, ["server", "status", "--check-ready"], {
+  const status = await execZg(pi, ["server", "status", "--check-ready"], {
     cwd: process.cwd(), signal, timeout: COMMAND_TIMEOUT,
   });
   if (status.code === 0) return;
-  const started = await pi.exec(ZG, ["server", "on", "--mcp-toolset", "agent"], {
+  const started = await execZg(pi, ["server", "on", "--mcp-toolset", "agent"], {
     cwd: process.cwd(), signal, timeout: COMMAND_TIMEOUT,
   });
   if (started.code !== 0) throw new Error(`Unable to start zvec-grep server:\n${output(started)}`);
@@ -229,7 +245,7 @@ async function getClient(pi: ExtensionAPI, signal: AbortSignal | undefined): Pro
 
 async function grantWorkspace(pi: ExtensionAPI, root: string, signal: AbortSignal | undefined): Promise<void> {
   if (grantedWorkspaces.has(root)) return;
-  const result = await pi.exec(ZG, ["auth", "grant", root, "--capability", "embedding", "--scope", "workspace"], {
+  const result = await execZg(pi, ["auth", "grant", root, "--capability", "embedding", "--scope", "workspace"], {
     cwd: root, signal, timeout: COMMAND_TIMEOUT,
   });
   // A configured local embedding model does not need a remote grant. The
@@ -363,6 +379,9 @@ async function authorizeAndCall(
   onUpdate: ToolUpdate | undefined,
 ): Promise<JsonObject> {
   const args = await normalizeArguments(pi, ctxCwd, params, signal);
+  // Prefer correctness over stale-but-immediate results unless the caller
+  // explicitly opts into eventual consistency.
+  if (args.freshness === undefined) args.freshness = "wait_for_fresh";
   const root = String(args.root);
   await grantWorkspace(pi, root, signal);
   onUpdate?.({ content: [{ type: "text", text: "zvec-grep MCP: searching…" }], details: {} });
@@ -389,6 +408,10 @@ function adaptMcpSchema(schema: JsonObject): JsonObject {
     // The default zvec-grep MCP transport currently accepts trace but drops
     // it from its text response; do not advertise a misleading LLM argument.
     delete (copy.properties as JsonObject).trace;
+    const freshness = (copy.properties as JsonObject).freshness;
+    if (freshness && typeof freshness === "object" && !Array.isArray(freshness)) {
+      (freshness as JsonObject).default = "wait_for_fresh";
+    }
   }
   if (Array.isArray(copy.required)) {
     copy.required = copy.required.filter((field) => field !== "root" && field !== "trace");
