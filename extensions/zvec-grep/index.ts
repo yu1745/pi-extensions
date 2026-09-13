@@ -250,7 +250,7 @@ async function grantWorkspace(pi: ExtensionAPI, root: string, signal: AbortSigna
   });
   // A configured local embedding model does not need a remote grant. The
   // configured setup here is remote, so successful grants are cached.
-  if (result.code === 0 || /local model|not remote/i.test(output(result))) {
+  if (result.code === 0 || /local(?: embedding)? models?|not remote/i.test(output(result))) {
     grantedWorkspaces.add(root);
     return;
   }
