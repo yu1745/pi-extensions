@@ -28,6 +28,10 @@
 // /openai-codex-quota stay registered as aliases).
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getCellDimensions, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable, type TUI } from "@earendil-works/pi-tui";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 const STATUS_KEY = "quota";
 const REQUEST_TIMEOUT_MS = 5000;
@@ -58,6 +62,7 @@ interface ProviderConfig {
 	fetch(apiKey: string): Promise<FetchResult>;
 	render(payload: unknown, ctx: ExtensionContext): string;
 	ttlFor(payload: unknown): number;
+	extractWeekQuota?(payload: unknown): { leftPercent: number; resetAt?: number } | null;
 }
 
 // In-memory cache keyed by "provider:keyHash" so switching keys or providers
@@ -1262,6 +1267,14 @@ const CONFIGS: Record<string, ProviderConfig> = {
 		fetch: fetchGLM,
 		render: renderGLM,
 		ttlFor: glmTtlFor,
+		extractWeekQuota: (payload: unknown) => {
+			const state = payload as GLMPayload;
+			if (state.weekLeftPercent === undefined) return null;
+			return {
+				leftPercent: state.weekLeftPercent,
+				...(state.weekNextResetTime ? { resetAt: state.weekNextResetTime } : {}),
+			};
+		},
 	},
 	"minimax-cn": {
 		label: "MiniMax",
@@ -1270,6 +1283,14 @@ const CONFIGS: Record<string, ProviderConfig> = {
 		fetch: fetchMM,
 		render: renderMM,
 		ttlFor: mmTtlFor,
+		extractWeekQuota: (payload: unknown) => {
+			const state = payload as MMPayload;
+			if (!state.weekly) return null;
+			return {
+				leftPercent: state.weekly.leftPercent,
+				...(state.weekly.endAt ? { resetAt: state.weekly.endAt } : {}),
+			};
+		},
 	},
 	"openai-codex": {
 		label: "Codex",
@@ -1278,6 +1299,17 @@ const CONFIGS: Record<string, ProviderConfig> = {
 		fetch: fetchCodex,
 		render: renderCodex,
 		ttlFor: codexTtlFor,
+		extractWeekQuota: (payload: unknown) => {
+			const state = payload as CodexPayload;
+			// Look for window >= 24h (typically secondary or primary)
+			const candidates = [state.secondary, state.primary].filter((w): w is CodexWindow => Boolean(w));
+			const weekWin = candidates.find((w) => (w.windowSeconds ?? 0) > 24 * 3600);
+			if (!weekWin) return null;
+			return {
+				leftPercent: weekWin.leftPercent,
+				...(weekWin.resetAt ? { resetAt: weekWin.resetAt * 1000 } : {}),
+			};
+		},
 	},
 	antigravity: {
 		label: "Antigravity",
@@ -1286,6 +1318,20 @@ const CONFIGS: Record<string, ProviderConfig> = {
 		fetch: fetchAntigravity,
 		render: renderAntigravity,
 		ttlFor: antigravityTtlFor,
+		extractWeekQuota: (payload: unknown) => {
+			const state = payload as AntigravityPayload;
+			const weekBucket = state.buckets?.find((b) => /\b(week|weekly)\b/i.test(b.label));
+			if (!weekBucket) return null;
+			let resetAt: number | undefined;
+			if (weekBucket.resetTime) {
+				const parsed = Date.parse(weekBucket.resetTime);
+				if (!Number.isNaN(parsed)) resetAt = parsed;
+			}
+			return {
+				leftPercent: weekBucket.leftPercent,
+				...(resetAt ? { resetAt } : {}),
+			};
+		},
 	},
 	commandcode: {
 		label: "CC",
@@ -1294,8 +1340,331 @@ const CONFIGS: Record<string, ProviderConfig> = {
 		fetch: fetchCommandCodeQuota,
 		render: renderCommandCode,
 		ttlFor: commandCodeTtlFor,
+		extractWeekQuota: (payload: unknown) => {
+			const state = payload as CCPayload;
+			if (!state.weekly) return null;
+			return {
+				leftPercent: state.weekly.leftPercent,
+				...(state.weekly.resetAt ? { resetAt: state.weekly.resetAt } : {}),
+			};
+		},
 	},
 };
+
+// ─── history recording & persistence ──────────────────────────────────────────
+
+interface QuotaHistoryPoint {
+	timestamp: number;
+	leftPercent: number;
+	resetAt?: number;
+}
+
+interface QuotaHistoryStore {
+	[providerKey: string]: QuotaHistoryPoint[];
+}
+
+function getHistoryFilePath(): string {
+	const dir = path.join(os.homedir(), ".pi", "agent");
+	return path.join(dir, "quota-history.json");
+}
+
+function loadHistory(): QuotaHistoryStore {
+	try {
+		const fp = getHistoryFilePath();
+		if (fs.existsSync(fp)) {
+			const data = JSON.parse(fs.readFileSync(fp, "utf8"));
+			if (data && typeof data === "object" && !Array.isArray(data)) {
+				return data as QuotaHistoryStore;
+			}
+		}
+	} catch {}
+	return {};
+}
+
+function saveHistory(store: QuotaHistoryStore): void {
+	try {
+		const fp = getHistoryFilePath();
+		const dir = path.dirname(fp);
+		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(fp, JSON.stringify(store, null, 2), "utf8");
+	} catch {}
+}
+
+function getStorageKey(provider: string, apiKey: string): string {
+	// OAuth providers: access tokens refresh frequently and change hash.
+	// Use stable identity or provider name instead.
+	if (provider === "openai-codex") {
+		const accountId = getCodexAccountId(apiKey);
+		return accountId ? `openai-codex:${accountId}` : "openai-codex";
+	}
+	if (provider === "antigravity") {
+		// Antigravity apiKey is JSON string with { token, projectId } or raw token
+		const creds = parseAntigravityCreds(apiKey);
+		const projectId = creds?.projectId && creds.projectId !== "antigravity-default" ? creds.projectId : undefined;
+		return projectId ? `antigravity:${projectId}` : "antigravity";
+	}
+	if (provider === "commandcode") {
+		return "commandcode";
+	}
+
+	// API key providers (zai-coding-cn, minimax-cn, deepseek):
+	// API keys are static. If user has multiple accounts/keys, distinguish them via hash.
+	return `${provider}:${shortHash(apiKey)}`;
+}
+
+function recordQuotaChange(
+	provider: string,
+	apiKey: string,
+	quota: { leftPercent: number; resetAt?: number }
+): boolean {
+	const key = getStorageKey(provider, apiKey);
+	const store = loadHistory();
+	const list = store[key] || [];
+
+	const last = list[list.length - 1];
+	const now = Date.now();
+
+	// Record when:
+	// 1. First record ever
+	// 2. Percent has changed
+	// 3. ResetAt has changed (e.g. rolled into a new week)
+	// 4. More than 3 hours since last record (heartbeat so chart has points during idle)
+	const HEARTBEAT_MS = 3 * 60 * 60 * 1000;
+	if (
+		!last ||
+		last.leftPercent !== quota.leftPercent ||
+		last.resetAt !== quota.resetAt ||
+		now - last.timestamp > HEARTBEAT_MS
+	) {
+		list.push({
+			timestamp: now,
+			leftPercent: quota.leftPercent,
+			...(quota.resetAt !== undefined ? { resetAt: quota.resetAt } : {}),
+		});
+		// Cap history at 1000 entries per provider key
+		if (list.length > 1000) {
+			list.splice(0, list.length - 1000);
+		}
+		store[key] = list;
+		saveHistory(store);
+		return true;
+	}
+	return false;
+}
+
+// ─── TUI Chart Rendering ─────────────────────────────────────────────────────
+
+function formatShortDateTime(ts: number): string {
+	const d = new Date(ts);
+	const m = String(d.getMonth() + 1).padStart(2, "0");
+	const day = String(d.getDate()).padStart(2, "0");
+	const h = String(d.getHours()).padStart(2, "0");
+	const min = String(d.getMinutes()).padStart(2, "0");
+	return `${m}-${day} ${h}:${min}`;
+}
+
+function formatDurationHrs(ms: number): string {
+	const hours = ms / (3600 * 1000);
+	if (hours < 24) return `${hours.toFixed(1)}h`;
+	const days = hours / 24;
+	return `${days.toFixed(1)}d`;
+}
+
+function generateSixelChart(
+	points: QuotaHistoryPoint[],
+	widthPx = 1120,
+	heightPx = 420
+): string {
+	const buffer = new Uint8Array(widthPx * heightPx);
+	const minTime = points[0].timestamp;
+	const lastTime = points[points.length - 1].timestamp;
+	const maxTime = lastTime === minTime ? minTime + 60_000 : lastTime;
+
+	// Draw labels inside the raster, not as terminal text over image rows.
+	// A tiny 5x7 font keeps Sixel generation dependency-free (3x for readability).
+	const glyphs: Record<string, number[]> = {
+		"0": [14, 17, 19, 21, 25, 17, 14], "1": [4, 12, 4, 4, 4, 4, 14],
+		"2": [14, 17, 1, 2, 4, 8, 31], "3": [30, 1, 1, 14, 1, 1, 30],
+		"4": [2, 6, 10, 18, 31, 2, 2], "5": [31, 16, 16, 30, 1, 1, 30],
+		"6": [14, 16, 16, 30, 17, 17, 14], "7": [31, 1, 2, 4, 8, 8, 8],
+		"8": [14, 17, 17, 14, 17, 17, 14], "9": [14, 17, 17, 15, 1, 1, 14],
+		"%": [25, 25, 2, 4, 8, 19, 19], "-": [0, 0, 0, 31, 0, 0, 0],
+		":": [0, 4, 4, 0, 4, 4, 0],
+	};
+	const pixel = (x: number, y: number, color: number) => {
+		if (x >= 0 && x < widthPx && y >= 0 && y < heightPx) buffer[y * widthPx + x] = color;
+	};
+	const fontScale = 3;
+	const textWidth = (text: string) => (text.length * 6 - 1) * fontScale;
+	const drawText = (text: string, x: number, y: number) => {
+		for (const char of text) {
+			const glyph = glyphs[char];
+			if (glyph) for (let row = 0; row < 7; row++) {
+				for (let col = 0; col < 5; col++) if (glyph[row] & (1 << (4 - col))) {
+					for (let dy = 0; dy < fontScale; dy++) for (let dx = 0; dx < fontScale; dx++) {
+						pixel(x + col * fontScale + dx, y + row * fontScale + dy, 4);
+					}
+				}
+			}
+			x += 6 * fontScale;
+		}
+	};
+	const left = 86, right = widthPx - 12, top = 12, bottom = heightPx - 62;
+	const plotWidth = right - left, plotHeight = bottom - top;
+	const yFor = (percent: number) => top + Math.round((1 - Math.max(0, Math.min(100, percent)) / 100) * plotHeight);
+
+	// Dashed grid underneath the curve; area fill preserves these pixels.
+	// Horizontal lines every 12.5%, vertical lines at quarter-time intervals.
+	const dashLength = 8, dashPeriod = 14;
+	for (let step = 1; step <= 8; step++) {
+		const y = yFor(step * 12.5);
+		for (let x = left + 1; x <= right; x++) {
+			if ((x - left) % dashPeriod < dashLength) pixel(x, y, 1);
+		}
+	}
+	for (const fraction of [0.25, 0.5, 0.75, 1]) {
+		const x = left + Math.round(fraction * plotWidth);
+		for (let y = top; y < bottom; y++) {
+			if ((y - top) % dashPeriod < dashLength) pixel(x, y, 1);
+		}
+	}
+
+	const coords = points.map((p) => ({
+		x: left + Math.min(plotWidth, Math.max(0, Math.round(((p.timestamp - minTime) / (maxTime - minTime)) * plotWidth))),
+		y: yFor(p.leftPercent),
+	}));
+
+	const colY = new Int32Array(widthPx).fill(-1);
+	for (let i = 0; i < coords.length - 1; i++) {
+		const { x: x0, y: y0 } = coords[i];
+		const { x: x1, y: y1 } = coords[i + 1];
+		for (let x = x0; x <= x1; x++) {
+			const frac = x1 === x0 ? 0 : (x - x0) / (x1 - x0);
+			colY[x] = Math.round(y0 + frac * (y1 - y0));
+		}
+	}
+
+	// Draw smooth glow line and subtle area fill
+	for (let x = 0; x < widthPx; x++) {
+		const yLine = colY[x];
+		if (yLine >= 0) {
+			for (let y = yLine + 2; y < bottom; y++) {
+				if (buffer[y * widthPx + x] === 0) buffer[y * widthPx + x] = 3;
+			}
+			for (let dy = -1; dy <= 1; dy++) {
+				const y = yLine + dy;
+				if (y >= top && y <= bottom) buffer[y * widthPx + x] = 2;
+			}
+		}
+	}
+
+	// Axes and tick labels are painted last so the area fill cannot cover them.
+	for (let y = top; y <= bottom; y++) pixel(left, y, 4);
+	for (let x = left; x <= right; x++) pixel(x, bottom, 4);
+	for (const percent of [0, 25, 50, 75, 100]) {
+		const y = yFor(percent);
+		for (let x = left - 4; x < left; x++) pixel(x, y, 4);
+		const label = `${percent}%`;
+		drawText(label, left - 10 - textWidth(label), y - Math.floor(7 * fontScale / 2));
+	}
+	for (const fraction of [0, 0.25, 0.5, 0.75, 1]) {
+		const x = left + Math.round(fraction * plotWidth);
+		for (let y = bottom; y <= bottom + 4; y++) pixel(x, y, 4);
+		const [date, time] = formatShortDateTime(minTime + fraction * (maxTime - minTime)).split(" ");
+		const labelX = Math.max(left, Math.min(widthPx - textWidth(date), x - Math.floor(textWidth(date) / 2)));
+		drawText(date, labelX, bottom + 10);
+		drawText(time, labelX, bottom + 36);
+	}
+
+	// Sixel color table:
+	// #1: muted blue-gray dashed grid (RGB 32, 43, 49)
+	// #2: vibrant cyan curve (RGB 22, 74, 97)
+	// #3: soft dark-blue area gradient fill (RGB 5, 29, 43)
+	let out = "\x1bPq\"1;1;" + widthPx + ";" + heightPx;
+	out += "#1;2;32;43;49";
+	out += "#2;2;22;74;97";
+	out += "#3;2;5;29;43";
+	out += "#4;2;70;74;78"; // axes and labels
+
+	const sixelBands = Math.ceil(heightPx / 6);
+	for (let band = 0; band < sixelBands; band++) {
+		const startY = band * 6;
+		for (let color = 1; color <= 4; color++) {
+			let runChar = 0;
+			let runCount = 0;
+			let planeStr = "";
+
+			for (let x = 0; x < widthPx; x++) {
+				let byte = 0;
+				for (let bit = 0; bit < 6; bit++) {
+					const y = startY + bit;
+					if (y < heightPx && buffer[y * widthPx + x] === color) {
+						byte |= 1 << bit;
+					}
+				}
+				if (byte === runChar) {
+					runCount++;
+				} else {
+					if (runCount > 0) {
+						planeStr += runCount > 3 ? `!${runCount}${String.fromCharCode(63 + runChar)}` : String.fromCharCode(63 + runChar).repeat(runCount);
+					}
+					runChar = byte;
+					runCount = 1;
+				}
+			}
+			if (runCount > 0) {
+				planeStr += runCount > 3 ? `!${runCount}${String.fromCharCode(63 + runChar)}` : String.fromCharCode(63 + runChar).repeat(runCount);
+			}
+			if (/[^\?]/.test(planeStr)) {
+				out += `#${color}${planeStr}$`;
+			}
+		}
+		// Advance only between bands; a trailing advance can scroll at the
+		// bottom of the viewport even when the raster itself fits.
+		if (band < sixelBands - 1) out += "-";
+	}
+	out += "\x1b\\";
+	return out;
+}
+
+class SixelChartEntryComponent implements Component {
+	private sixel: string;
+	private header: string;
+	private footer: string;
+	private heightPx: number;
+
+	constructor(sixel: string, header: string, footer: string, heightPx = 160) {
+		this.sixel = sixel;
+		this.header = header;
+		this.footer = footer;
+		this.heightPx = heightPx;
+	}
+
+	invalidate(): void {}
+
+	render(width: number): string[] {
+		const lines = wrapTextWithAnsi(this.header, Math.max(1, width));
+		// Use pi's measured cell height (or its fallback), including the final
+		// six-pixel Sixel band. Recompute on render so cell-size changes take effect.
+		const rowsNeeded = Math.ceil(Math.ceil(this.heightPx / 6) * 6 / getCellDimensions().heightPx);
+
+		// pi currently recognizes image blocks through Kitty metadata. Keep this
+		// quiet marker until pi supports Sixel natively. Reserved rows MUST have
+		// zero visible width: spaces disable tui-main-screen's block pre-clear.
+		// Let the renderer clear ALL rows before painting, never erase after it.
+		// Sixel terminals differ in final cursor position; restore the origin so
+		// pi alone advances through the reserved rows (as for Kitty images).
+		lines.push(`\x1b7${this.sixel}\x1b8\x1b_Gq=2,r=${rowsNeeded};\x1b\\`);
+		for (let i = 1; i < rowsNeeded; i++) lines.push("");
+		lines.push(...wrapTextWithAnsi(this.footer, Math.max(1, width)));
+		return lines;
+	}
+}
+
+interface SixelChartEntryData {
+	providerLabel: string;
+	points: QuotaHistoryPoint[];
+}
 
 function renderEntry(entry: { result: FetchResult }, cfg: ProviderConfig, ctx: ExtensionContext): string {
 	return entry.result.kind === "success"
@@ -1321,6 +1690,14 @@ async function refresh(ctx: ExtensionContext, cfg: ProviderConfig, apiKey: strin
 	if (result.kind === "success") {
 		cache.set(key, { result, savedAt: now, lastAttemptAt: now });
 		ctx.ui.setStatus(STATUS_KEY, cfg.render(result.payload, ctx));
+
+		// Record week quota history if supported
+		if (cfg.extractWeekQuota && ctx.model?.provider) {
+			const weekQuota = cfg.extractWeekQuota(result.payload);
+			if (weekQuota) {
+				recordQuotaChange(ctx.model.provider, apiKey, weekQuota);
+			}
+		}
 	} else {
 		cache.set(key, { result, savedAt: now, lastAttemptAt: now });
 		ctx.ui.setStatus(STATUS_KEY, renderFailure(cfg, result, ctx));
@@ -1378,6 +1755,44 @@ async function syncActivation(ctx: ExtensionContext): Promise<void> {
 // ─── extension entry ─────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI): void {
+	// Register custom entry renderer for Sixel charts in chat stream (like codex-timer's "worked-for")
+	pi.registerEntryRenderer<SixelChartEntryData>("quota-sixel-chart", (entry, _opts, theme) => {
+		const data = entry.data;
+		if (!data || !data.points || data.points.length === 0) {
+			return new Text(theme.fg("dim", "暂无历史额度数据"), 0, 0);
+		}
+
+		const latestP = data.points[data.points.length - 1];
+		const firstP = data.points[0];
+		const deltaPct = latestP.leftPercent - firstP.leftPercent;
+		const deltaStr =
+			deltaPct <= 0
+				? `已消耗 ${Math.abs(deltaPct)}%`
+				: `增加 +${deltaPct}% (可能已重置)`;
+
+		let resetStr = "";
+		if (latestP.resetAt) {
+			resetStr = ` | 距离重置: ${formatReset(latestP.resetAt - Date.now())}`;
+		}
+
+		const minTime = data.points[0].timestamp;
+		const lastTime = data.points[data.points.length - 1].timestamp;
+		const maxTime = lastTime === minTime ? minTime + 60_000 : lastTime;
+		const startLabel = formatShortDateTime(minTime);
+		const endLabel = formatShortDateTime(maxTime);
+
+		const header = `${theme.bold(`📊 ${data.providerLabel} Week 额度高分辨率趋势图 (Sixel 硬件渲染)`)}\n` +
+			`   当前剩余: ${theme.fg("accent", `${latestP.leftPercent}%`)} | ${deltaStr}${resetStr} | 记录数: ${data.points.length}`;
+
+		const footer = `   ${theme.fg("dim", `[100% ──── 0%]   时间范围: ${startLabel}  至  ${endLabel}`)}`;
+
+		// Leave room for the percentage axis and two-line date/time ticks.
+		const chartHeight = 420;
+		const sixel = generateSixelChart(data.points, 1120, chartHeight);
+
+		return new SixelChartEntryComponent(sixel, header, footer, chartHeight);
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		await syncActivation(ctx);
 	});
@@ -1418,9 +1833,79 @@ export default function (pi: ExtensionAPI): void {
 		ctx.ui.notify(`${cfg.label} quota refreshed`, "info");
 	};
 
+	const insertSixelChartEntry = async (ctx: ExtensionContext) => {
+		const provider = ctx.model?.provider;
+		const cfg = provider ? CONFIGS[provider] : undefined;
+		if (!cfg || !provider) {
+			ctx.ui.notify("当前模型服务商不支持额度追踪", "warning");
+			return;
+		}
+		const apiKey = await ctx.modelRegistry.getApiKeyForProvider(provider);
+		if (!apiKey) {
+			ctx.ui.notify(`未配置 ${provider} 的 API 凭据`, "warning");
+			return;
+		}
+
+		// Ensure we have current data
+		const key = cacheKey(provider, apiKey);
+		let entry = cache.get(key);
+		if (!entry || entry.result.kind !== "success") {
+			await refresh(ctx, cfg, apiKey, key, epoch, true);
+			entry = cache.get(key);
+		}
+
+		let currentWeekQuota: { leftPercent: number; resetAt?: number } | null = null;
+		if (cfg.extractWeekQuota && entry?.result.kind === "success") {
+			currentWeekQuota = cfg.extractWeekQuota(entry.result.payload);
+			if (currentWeekQuota) {
+				recordQuotaChange(provider, apiKey, currentWeekQuota);
+			}
+		}
+
+		const storageKey = getStorageKey(provider, apiKey);
+		const store = loadHistory();
+		const historyList = store[storageKey] || [];
+
+		const displayPoints = [...historyList];
+		if (displayPoints.length === 0 && currentWeekQuota) {
+			displayPoints.push({
+				timestamp: Date.now(),
+				leftPercent: currentWeekQuota.leftPercent,
+				...(currentWeekQuota.resetAt ? { resetAt: currentWeekQuota.resetAt } : {}),
+			});
+		}
+
+		if (displayPoints.length === 0) {
+			ctx.ui.notify(`${cfg.label} 当前无周额度数据可供绘制`, "warning");
+			return;
+		}
+
+		// Append a custom entry to the chat transcript!
+		// Just like codex-timer's "worked-for", this does NOT participate in LLM context
+		// and renders directly inside the chat flow!
+		pi.appendEntry<SixelChartEntryData>("quota-sixel-chart", {
+			providerLabel: cfg.label,
+			points: displayPoints,
+		});
+	};
+
 	pi.registerCommand("quota", {
-		description: "Force-refresh the current provider's usage/balance in the footer",
-		handler: forceRefresh,
+		description: "Force-refresh the current provider's usage/balance in the footer (or /quota chart)",
+		handler: async (args, ctx) => {
+			const raw = String(args || "").trim().toLowerCase();
+			if (raw.startsWith("chart") || raw.startsWith("history") || raw.startsWith("graph")) {
+				await insertSixelChartEntry(ctx);
+				return;
+			}
+			await forceRefresh(args, ctx);
+		},
+	});
+
+	pi.registerCommand("quota-chart", {
+		description: "在聊天流中插入周额度随时间下降的 Sixel 高分辨率平滑折线图",
+		handler: async (_args, ctx) => {
+			await insertSixelChartEntry(ctx);
+		},
 	});
 
 	// Backwards-compatible aliases for the old per-provider commands.
