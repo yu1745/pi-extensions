@@ -1,7 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import * as https from "https";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	matchesKey,
@@ -31,6 +30,8 @@ interface OfficialDayRow {
 	isCurrent: boolean;
 	credits: number;
 	usd: number;
+	originalUsd?: number;
+	calibrated?: boolean;
 	models: ModelBreakdownItem[];
 }
 
@@ -44,6 +45,9 @@ interface OfficialUsageData {
 	ceilingUsd: number | null;
 	remainingUsd: number | null;
 	days: OfficialDayRow[];
+	firstDayCalibrated?: boolean;
+	firstDayOriginalUsd?: number;
+	firstDayCalibratedUsd?: number;
 }
 
 interface PluginConfig {
@@ -51,6 +55,9 @@ interface PluginConfig {
 	// 用户手动指定的切分起始 UTC 日期 (如 "2026-09-12")
 	// 若未设置，则默认跟随官方当前 7-Day 滚动周期的起点
 	customStartUtcDate?: string;
+	// 第一天（起始天）的校准实际消耗美元数
+	// 当官方计费窗口起始时间不是整点 UTC 00:00 时，第一天会包含上一个周期的消耗，通过此项进行校准
+	firstDayActualUsd?: number;
 }
 
 function getSystemTimeZone(): string {
@@ -69,6 +76,7 @@ function loadConfig(): PluginConfig {
 			return {
 				timeZone: data.timeZone || tz,
 				customStartUtcDate: data.customStartUtcDate,
+				firstDayActualUsd: typeof data.firstDayActualUsd === "number" ? data.firstDayActualUsd : undefined,
 			};
 		}
 	} catch {}
@@ -87,41 +95,22 @@ function saveConfig(cfg: PluginConfig): void {
 
 // 请求 ChatGPT 官方 backend-api
 async function callOfficialApi(endpoint: string, token: string, accountId: string): Promise<any> {
-	return new Promise((resolve, reject) => {
-		const req = https.request(
-			`https://chatgpt.com${endpoint}`,
-			{
-				headers: {
-					Authorization: `Bearer ${token}`,
-					"chatgpt-account-id": accountId,
-					"User-Agent": "CodexDesktop",
-					Accept: "application/json",
-				},
-				timeout: 8000,
-			},
-			(resp) => {
-				let body = "";
-				resp.on("data", (c) => (body += c));
-				resp.on("end", () => {
-					if (resp.statusCode && resp.statusCode >= 400) {
-						reject(new Error(`API Error ${resp.statusCode}: ${body.slice(0, 200)}`));
-						return;
-					}
-					try {
-						resolve(JSON.parse(body));
-					} catch (e) {
-						reject(e);
-					}
-				});
-			}
-		);
-		req.on("error", reject);
-		req.on("timeout", () => {
-			req.destroy();
-			reject(new Error("请求超时"));
-		});
-		req.end();
+	const resp = await fetch(`https://chatgpt.com${endpoint}`, {
+		headers: {
+			Authorization: `Bearer ${token}`,
+			"chatgpt-account-id": accountId,
+			"User-Agent": "CodexDesktop",
+			Accept: "application/json",
+		},
+		signal: AbortSignal.timeout(8000),
 	});
+
+	if (!resp.ok) {
+		const text = await resp.text();
+		throw new Error(`API Error ${resp.status}: ${text.slice(0, 200)}`);
+	}
+
+	return resp.json();
 }
 
 function formatUtcDayToLocalRange(utcDateStr: string, tz: string): { label: string; isCurrent: boolean } {
@@ -169,7 +158,11 @@ function formatResetTime(ms: number, tz: string): string {
 }
 
 // 统一按照官方逻辑拉取真实全端数据
-async function fetchOfficialData(tz: string, customStartUtcDate?: string): Promise<OfficialUsageData> {
+async function fetchOfficialData(
+	tz: string,
+	customStartUtcDate?: string,
+	firstDayActualUsd?: number
+): Promise<OfficialUsageData> {
 	if (!fs.existsSync(CODEX_AUTH_FILE)) {
 		throw new Error(`找不到 ${CODEX_AUTH_FILE}，请先在本地登录 Codex Desktop 或 Codex CLI`);
 	}
@@ -266,7 +259,33 @@ async function fetchOfficialData(tz: string, customStartUtcDate?: string): Promi
 
 	days.sort((a, b) => a.date.localeCompare(b.date));
 
-	const totalUsd = totalCredits * USD_PER_CREDIT;
+	let firstDayCalibrated = false;
+	let firstDayOriginalUsd: number | undefined;
+	let firstDayCalibratedUsd: number | undefined;
+
+	// 如果配置了第一天实际消耗校准值，对统计起点的第一天进行校准
+	if (typeof firstDayActualUsd === "number" && days.length > 0) {
+		const firstDay = days[0];
+		firstDayOriginalUsd = firstDay.usd;
+		firstDayCalibratedUsd = Math.max(0, firstDayActualUsd);
+		firstDayCalibrated = true;
+
+		firstDay.originalUsd = firstDayOriginalUsd;
+		firstDay.calibrated = true;
+		firstDay.usd = firstDayCalibratedUsd;
+		firstDay.credits = firstDayCalibratedUsd / USD_PER_CREDIT;
+
+		// 同步按比例调整第一天的模型明细
+		if (firstDayOriginalUsd > 0) {
+			const scale = firstDayCalibratedUsd / firstDayOriginalUsd;
+			for (const m of firstDay.models) {
+				m.usd = m.usd * scale;
+				m.credits = m.credits * scale;
+			}
+		}
+	}
+
+	const totalUsd = days.reduce((sum, d) => sum + d.usd, 0);
 	const ceilingUsd = usedPercent > 0 && totalUsd > 0 ? totalUsd / (usedPercent / 100) : null;
 	const remainingUsd = ceilingUsd ? Math.max(0, ceilingUsd - totalUsd) : null;
 
@@ -280,6 +299,9 @@ async function fetchOfficialData(tz: string, customStartUtcDate?: string): Promi
 		ceilingUsd,
 		remainingUsd,
 		days,
+		firstDayCalibrated,
+		firstDayOriginalUsd,
+		firstDayCalibratedUsd,
 	};
 }
 
@@ -318,7 +340,10 @@ function buildReportLines(data: OfficialUsageData, tz: string, theme: any): stri
 
 	for (const day of data.days) {
 		const ongoingBadge = day.isCurrent ? ` ${theme.fg("accent", "[进行中]")}` : "";
-		const dayHead = theme.bold(theme.fg("accent", `[${day.localRangeLabel}]`)) + ongoingBadge;
+		const calibBadge = day.calibrated
+			? ` ${theme.fg("warning", `[校准: 原始 $${day.originalUsd?.toFixed(2) ?? ""}]`)}`
+			: "";
+		const dayHead = theme.bold(theme.fg("accent", `[${day.localRangeLabel}]`)) + ongoingBadge + calibBadge;
 		const dayTotal = `${theme.bold(`$${day.usd.toFixed(2)}`)} ${theme.fg(
 			"dim",
 			`(${day.credits.toFixed(1)} credits)`
@@ -647,19 +672,56 @@ export default function codexCostPlugin(pi: ExtensionAPI) {
 		description: "实时同步 OpenAI 官方配额与每日全端多设备消费流水报表",
 		getArgumentCompletions: (prefix) => {
 			const options = [
+				{ value: "calibrate", label: "calibrate <amount> - 设置第一天实际消耗的美元校准值（如 /codex-cost calibrate 15.5）" },
 				{ value: "cycle", label: "cycle - 打开官方时间桶轮盘设置统计切分起点" },
-				{ value: "reset", label: "reset - 重置为跟随官方 7-Day 周期起点" },
+				{ value: "reset", label: "reset - 重置为跟随官方 7-Day 周期起点并清除校准" },
 			];
 			const filtered = options.filter((o) => o.value.startsWith(prefix));
 			return filtered.length > 0 ? filtered : null;
 		},
 		handler: async (args, ctx: ExtensionContext) => {
-			const subcmd = args.trim().toLowerCase();
+			const rawArgs = args.trim();
+			const parts = rawArgs.split(/\s+/);
+			const subcmd = parts[0]?.toLowerCase() || "";
 
 			if (subcmd === "reset") {
 				config.customStartUtcDate = undefined;
+				config.firstDayActualUsd = undefined;
 				saveConfig(config);
-				ctx.ui.notify("已重置切分周期：完全跟随官方 7-Day 滚动窗口起点", "info");
+				ctx.ui.notify("已重置切分周期：完全跟随官方 7-Day 滚动窗口起点，并清除第一天校准值", "info");
+				return;
+			}
+
+			if (subcmd === "calibrate" || subcmd === "calib") {
+				const valStr = parts[1];
+				if (!valStr) {
+					if (typeof config.firstDayActualUsd === "number") {
+						ctx.ui.notify(
+							`当前第一天实际校准值: $${config.firstDayActualUsd.toFixed(2)}。重置请执行 /codex-cost calibrate off`,
+							"info"
+						);
+					} else {
+						ctx.ui.notify("未设置校准值。用法: /codex-cost calibrate <美元数> (例如 /codex-cost calibrate 25.8)", "info");
+					}
+					return;
+				}
+
+				if (valStr.toLowerCase() === "off" || valStr.toLowerCase() === "clear" || valStr.toLowerCase() === "reset") {
+					config.firstDayActualUsd = undefined;
+					saveConfig(config);
+					ctx.ui.notify("已清除第一天校准值", "info");
+					return;
+				}
+
+				const num = Number(valStr.replace(/^\$/, ""));
+				if (Number.isNaN(num) || num < 0) {
+					ctx.ui.notify(`无效的金额数值: ${valStr}，请输入有效非负数（如 12.34）`, "error");
+					return;
+				}
+
+				config.firstDayActualUsd = num;
+				saveConfig(config);
+				ctx.ui.notify(`已设置第一天实际消耗校准值为: $${num.toFixed(2)}`, "info");
 				return;
 			}
 
@@ -701,7 +763,11 @@ export default function codexCostPlugin(pi: ExtensionAPI) {
 
 			// 直接调官方接口拉取实时数据并展示
 			try {
-				const data = await fetchOfficialData(config.timeZone, config.customStartUtcDate);
+				const data = await fetchOfficialData(
+					config.timeZone,
+					config.customStartUtcDate,
+					config.firstDayActualUsd
+				);
 				const reportLines = buildReportLines(data, config.timeZone, ctx.ui.theme);
 
 				await ctx.ui.custom<void>(

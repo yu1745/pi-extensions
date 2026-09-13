@@ -19,7 +19,6 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import * as https from "node:https";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -136,37 +135,17 @@ async function resolveCodexCycleStartMs(): Promise<number | null> {
 		const accountId = auth.tokens?.account_id || "";
 		if (!token) return null;
 
-		const res = await new Promise<any>((resolve, reject) => {
-			const req = https.request(
-				"https://chatgpt.com/backend-api/wham/usage",
-				{
-					headers: {
-						Authorization: `Bearer ${token}`,
-						"chatgpt-account-id": accountId,
-						"User-Agent": "CodexDesktop",
-						Accept: "application/json",
-					},
-					timeout: 4000,
-				},
-				(resp) => {
-					let data = "";
-					resp.on("data", (chunk) => (data += chunk));
-					resp.on("end", () => {
-						try {
-							resolve(JSON.parse(data));
-						} catch (e) {
-							reject(e);
-						}
-					});
-				}
-			);
-			req.on("error", reject);
-			req.on("timeout", () => {
-				req.destroy();
-				reject(new Error("Timeout"));
-			});
-			req.end();
+		const resp = await fetch("https://chatgpt.com/backend-api/wham/usage", {
+			headers: {
+				Authorization: `Bearer ${token}`,
+				"chatgpt-account-id": accountId,
+				"User-Agent": "CodexDesktop",
+				Accept: "application/json",
+			},
+			signal: AbortSignal.timeout(4000),
 		});
+		if (!resp.ok) return null;
+		const res = await resp.json();
 
 		const pw = res?.rate_limit?.primary_window;
 		if (pw && pw.reset_at) {
