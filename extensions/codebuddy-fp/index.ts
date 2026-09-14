@@ -321,22 +321,20 @@ async function rawRequest(urlStr: string, method: string, headerPairs: [string, 
 const FALLBACK_EFFORTS: Record<string, string[]> = {
   "deepseek": ["low", "high", "max"],
 };
-function piThinkingLevelMap(supported?: string[]): Record<string, string | null> | undefined {
+/** 严格映射：只有官方 supportedEfforts 声明的档位可选（pi 语义 null=隐藏该档），
+ *  不做就近降档——medium 未声明就不可选，避免把 xhigh 悄悄变成 max。
+ *  off 仅在 canDisableThinking 时映射为 "none"（官方关闭思考的取值）。 */
+function piThinkingLevelMap(supported?: string[], canDisableThinking?: boolean): Record<string, string | null> | undefined {
   if (!supported?.length) return undefined;
-  const pick = (want: string[]): string | null => {
-    for (const w of want) if (supported.includes(w)) return w;
-    return null;
-  };
-  // 无 off/minimal 档可用且不支持关闭思考时，降级到最低支持档（pi 语义：null=不支持该档）
-  const lowest = supported[0];
+  const has = (l: string) => supported.includes(l);
   return {
-    off: supported.length === 1 ? lowest : null,
-    minimal: lowest ?? null,
-    low: pick(["low"]),
-    medium: pick(["medium", "low", "high"]),
-    high: pick(["high", "max"]),
-    xhigh: pick(["max", "high"]),
-    max: pick(["max", "high"]),
+    off: canDisableThinking ? "none" : null,
+    minimal: null,
+    low: has("low") ? "low" : null,
+    medium: has("medium") ? "medium" : null,
+    high: has("high") ? "high" : null,
+    xhigh: has("xhigh") ? "xhigh" : null,
+    max: has("max") ? "max" : null,
   };
 }
 /** "x0.03 credits" → " (x0.03)"；积分制不分输入/输出/缓存，只展示倍率，cost 留零 */
@@ -358,6 +356,7 @@ function modelsFromConfig(cfg: any): Model2[] {
     if (!m?.supportsToolCall || m?.tags?.length) continue; // 跳过非 chat（文生图等带 tags）
     const id: string = m.id;
     const efforts = m.reasoning?.supportedEfforts ?? FALLBACK_EFFORTS[id.split("-")[0]] ?? undefined;
+    // 未声明 supportedEfforts 的（DeepSeek 系）视为不可关闭思考
     const defaultEffort: string = m.reasoning?.defaultEffort ?? m.reasoning?.effort ?? "high";
     out.push({
       provider: "codebuddy",
@@ -372,7 +371,7 @@ function modelsFromConfig(cfg: any): Model2[] {
       contextWindow: m.maxInputTokens ?? m.maxAllowedSize ?? 128_000,
       maxTokens: m.maxOutputTokens ?? 32_000,
       samplingParams: m.temperature != null ? { temperature: m.temperature } : undefined,
-      thinkingLevelMap: piThinkingLevelMap(efforts),
+      thinkingLevelMap: piThinkingLevelMap(efforts, m.reasoning?.canDisableThinking),
       defaultEffort,
       compat: {
         supportsStore: false,
@@ -968,7 +967,7 @@ export default async function (pi: ExtensionAPI) {
             messages = messages.map((m: any, i: number) => (i === 0 ? { ...m, content: offSys } : m));
           }
         }
-        return {
+        const out = {
           model: stripRateId(p.model), // id 里的倍率后缀不出网
           messages,
           tools,
@@ -980,6 +979,11 @@ export default async function (pi: ExtensionAPI) {
           verbosity: p.verbosity ?? "high",
           reasoning_summary: p.reasoning_summary ?? "auto",
         };
+        if (process.env.CODEBUDDY_DEBUG_BODY) {
+          try { require("node:fs").appendFileSync(process.env.CODEBUDDY_DEBUG_BODY,
+            JSON.stringify({ round: chatRound, model: out.model, effort: out.reasoning_effort, max_tokens: out.max_tokens }) + "\n"); } catch {}
+        }
+        return out;
       },
     };
   };
