@@ -1,5 +1,38 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
+import { TuiAltScreen } from "@earendil-works/pi-tui";
+
+/** Lines moved per mouse-wheel notch in fullscreen mode (pi-tui default is 1). */
+const FULLSCREEN_WHEEL_LINES = 4;
+/** Mirrors pi-tui's ALT_WHEEL_SCROLL_MULTIPLIER, which is not exported. */
+const ALT_WHEEL_MULTIPLIER = 5;
+
+/** Guards against re-patching when the extension is reloaded (jiti uses moduleCache: false). */
+const WHEEL_PATCHED = Symbol.for("yu1745.pi-extensions.smart-ctrl-c.wheel");
+
+type WheelScrollProto = {
+  getWheelScrollLines(button: number): number;
+  [WHEEL_PATCHED]?: boolean;
+};
+
+/**
+ * Speed up fullscreen mouse-wheel scrolling.
+ *
+ * `TuiAltScreen` assigns `this.wheelScrollLines` from its constructor options
+ * (`options.wheelScrollLines ?? 1`), and pi's `createInteractiveTui` never passes
+ * that option. So the field is always a number, and overriding it per instance
+ * only affects the renderer that happens to exist at that moment. Patching the
+ * prototype instead covers the initial renderer, every renderer rebuilt by
+ * `/tui-mode` switches, and new sessions alike.
+ */
+function installWheelScrollPatch(): void {
+  const proto = (TuiAltScreen as unknown as { prototype?: WheelScrollProto } | undefined)?.prototype;
+  if (!proto || typeof proto.getWheelScrollLines !== "function" || proto[WHEEL_PATCHED]) return;
+  proto.getWheelScrollLines = function (button: number): number {
+    return (button & 8) !== 0 ? FULLSCREEN_WHEEL_LINES * ALT_WHEEL_MULTIPLIER : FULLSCREEN_WHEEL_LINES;
+  };
+  proto[WHEEL_PATCHED] = true;
+}
 
 let patched = false;
 
@@ -7,22 +40,14 @@ export default function (pi: ExtensionAPI) {
   if (patched) return;
   patched = true;
 
+  // Install at load time: wheel input is consumed by TuiAltScreen's own input
+  // listener, so it never reaches CustomEditor.handleInput.
+  installWheelScrollPatch();
+
   const originalHandleInput = CustomEditor.prototype.handleInput;
 
   CustomEditor.prototype.handleInput = function (data: string) {
-    // 动态劫持并加速全屏滚轮为 4 行
     const tui = (this as any).tui;
-    if (tui && tui.wheelScrollLines !== 4) {
-      tui.wheelScrollLines = 4;
-      const altScreenProto = Object.getPrototypeOf(tui);
-      if (altScreenProto && altScreenProto.getWheelScrollLines) {
-        altScreenProto.getWheelScrollLines = function (button: number) {
-          const lines = this.wheelScrollLines ?? 4;
-          return (button & 8) !== 0 ? lines * 5 : lines;
-        };
-      }
-    }
-
     const kb = (this as any).keybindings;
 
     // 捕获 Ctrl+C（匹配 app.clear）
