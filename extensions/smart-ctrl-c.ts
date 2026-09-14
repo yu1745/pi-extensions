@@ -10,12 +10,23 @@ export default function (pi: ExtensionAPI) {
   const originalHandleInput = CustomEditor.prototype.handleInput;
 
   CustomEditor.prototype.handleInput = function (data: string) {
+    // 动态劫持并加速全屏滚轮为 4 行
+    const tui = (this as any).tui;
+    if (tui && tui.wheelScrollLines !== 4) {
+      tui.wheelScrollLines = 4;
+      const altScreenProto = Object.getPrototypeOf(tui);
+      if (altScreenProto && altScreenProto.getWheelScrollLines) {
+        altScreenProto.getWheelScrollLines = function (button: number) {
+          const lines = this.wheelScrollLines ?? 4;
+          return (button & 8) !== 0 ? lines * 5 : lines;
+        };
+      }
+    }
+
     const kb = (this as any).keybindings;
 
     // 捕获 Ctrl+C（匹配 app.clear）
     if (kb && kb.matches(data, "app.clear")) {
-      const tui = (this as any).tui;
-
       // 1. 如果全屏模式下有鼠标选中文本，执行复制
       if (tui && typeof tui.hasActiveSelection === "function" && tui.hasActiveSelection()) {
         const copyHandler = (this as any).actionHandlers?.get("app.message.copy");
