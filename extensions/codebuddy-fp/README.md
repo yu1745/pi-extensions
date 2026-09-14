@@ -13,15 +13,12 @@ CodeBuddy（腾讯）provider，出网请求对官方 CLI（`@tencent-ai/codebud
 
 ## 使用
 
-```sh
-# 方式一：OAuth（浏览器登录）
-/codebuddy-login
+pi 原生 `/login` → 选 `codebuddy` → 二级选择：
 
-# 方式二：从官方 CLI 导入（先 npm i -g @tencent-ai/codebuddy-code && codebuddy /login）
-/codebuddy-import
-```
+1. **浏览器 OAuth 授权**（微信/QQ/腾讯账号，弹 URL，授权后自动继续）
+2. **从官方 CodeBuddy CLI 导入**（需先 `npm i -g @tencent-ai/codebuddy-code && codebuddy /login`，读其本地明文凭证）
 
-然后 `/models` 选 `codebuddy/deepseek-v4.1-flash`（或 `hy4-preview` / `hy3` / `kimi-k3`）。
+之后 `/models` 选 `codebuddy/deepseek-v4.1-flash`（或 `hy4-preview` / `hy3` / `kimi-k3`）。退出用原生 `/logout`。
 
 ## 文件
 

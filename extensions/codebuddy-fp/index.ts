@@ -19,8 +19,8 @@
  * 已验证非 git 工作区下 CLI 本身也不发 report，且不发这些端点就不存在
  * git remote / machineId / cpu 信息上报。
  *
- * 登录：/codebuddy-login 命令走官方 OAuth 设备授权
- * （POST /v2/plugin/auth/state?platform=CLI → 浏览器授权 → GET /v2/plugin/auth/token）
+ * 登录：pi 原生 /login 选 codebuddy，二级选择「浏览器 OAuth 授权」或
+ * 「从官方 CLI 导入凭证」（POST /v2/plugin/auth/state → 浏览器 → GET /v2/plugin/auth/token）
  * token 存 ~/.pi/agent/extensions/codebuddy-fp/auth.json（0600），自动刷新
  * （POST /v2/plugin/auth/token/refresh）。
  */
@@ -168,7 +168,7 @@ let authCache: AuthState | null = null;
 
 async function getValidAuth(force = false): Promise<AuthState> {
   if (!authCache) authCache = loadAuth();
-  if (!authCache) throw new Error("CodeBuddy 未登录：请先执行 /codebuddy-login");
+  if (!authCache) throw new Error("CodeBuddy 未登录：请先 /login 选择 codebuddy");
   // 提前 2 分钟主动刷新（refresh 端点官方标注“不受频率限制”）
   if (force || Date.now() > authCache.expiresAt - 120_000) {
     authCache = await refreshAuth(authCache);
@@ -882,8 +882,41 @@ export default function (pi: ExtensionAPI) {
       // 接 pi 原生 /login 流程：凭证由 pi 存入 ~/.pi/agent/auth.json（oauth 形状 + 业务字段）
       oauth: {
         name: "CodeBuddy (Tencent)",
+        loginLabel: "Sign in with CodeBuddy (browser OAuth or import from CLI)",
         async login(interaction: any) {
-          // OAuth 设备授权：onAuth 展示 URL → 浏览器登录 → 轮询取 token
+          // 统一入口：选 OAuth 浏览器授权，或从官方 CLI 本地凭证导入
+          const method = await interaction.prompt({
+            type: "select",
+            message: "CodeBuddy 登录方式",
+            options: [
+              { id: "oauth", label: "浏览器 OAuth 授权（微信/QQ/腾讯账号）" },
+              { id: "import", label: "从官方 CodeBuddy CLI 导入凭证（需已安装并登录）" },
+            ],
+          });
+          if (method === "import") {
+            // 官方 CLI 明文凭证：~/.local/share/CodeBuddyExtension/Data/Public/auth/*.info
+            const authDir = path.join(os.homedir(), ".local/share/CodeBuddyExtension/Data/Public/auth");
+            let files: string[] = [];
+            try { files = fs.readdirSync(authDir).filter((f) => f.endsWith(".info")); } catch {}
+            for (const f of files) {
+              try {
+                const d = JSON.parse(fs.readFileSync(path.join(authDir, f), "utf8"));
+                const at = d?.auth?.accessToken, rt = d?.auth?.refreshToken;
+                if (!at || !rt) continue;
+                const expiresAt = d?.auth?.expiresAt ?? 0;
+                const a: AuthState = {
+                  accessToken: at, refreshToken: rt,
+                  userId: d?.account?.uid ?? "", domain: d?.auth?.domain ?? "www.codebuddy.cn",
+                  nickname: d?.account?.nickname ?? "", expiresAt,
+                };
+                saveAuth(a);
+                interaction.notify?.({ message: `已导入官方 CLI 凭证：${a.nickname || a.userId || f}` });
+                return { type: "oauth" as const, access: at, refresh: rt, expires: expiresAt, userId: a.userId, domain: a.domain, nickname: a.nickname };
+              } catch {}
+            }
+            throw new Error(`未找到可导入的官方 CLI 凭证（${authDir}）。请先安装并登录官方 CLI，或改选浏览器 OAuth。`);
+          }
+          // ── OAuth 设备授权：notify 展示 URL → 浏览器登录 → 轮询取 token ──
           const res = await rawRequest(`${BASE}/v2/plugin/auth/state?platform=CLI`, "POST", [
             ["Content-Type", "application/json"],
             ["User-Agent", USER_AGENT],
@@ -897,8 +930,7 @@ export default function (pi: ExtensionAPI) {
           const state = st.state ?? st.data?.state;
           const authUrl = st.authUrl ?? st.data?.authUrl;
           if (!state || !authUrl) throw new Error("auth state: missing state/authUrl");
-          interaction.onAuth?.({ url: authUrl });
-          interaction.onPrompt?.({ message: `CodeBuddy 登录：浏览器打开并完成授权\n${authUrl}` });
+          interaction.notify?.({ message: `CodeBuddy 登录：浏览器打开并完成授权后自动继续\n${authUrl}` });
           // 轮询（3s × 100 次 = 5 分钟）
           for (let i = 0; i < 100; i++) {
             await new Promise((r) => setTimeout(r, 3000));
@@ -1036,95 +1068,6 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerProvider(provider as any);
 
-  // ── /codebuddy-login：OAuth 设备授权 ──────────────────────────────────────
-  pi.registerCommand("codebuddy-login", {
-    description: "Login to CodeBuddy via OAuth device flow",
-    handler: async (_args: string, ctx: any) => {
-      const proxyUrl = process.env.CODEBUDDY_PROXY ?? process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY ?? undefined;
-      const res = await rawRequest(`${BASE}/v2/plugin/auth/state?platform=CLI`, "POST", [
-        ["Content-Type", "application/json"],
-        ["User-Agent", USER_AGENT],
-        ["X-Requested-With", "XMLHttpRequest"],
-        ["X-Product", "SaaS"],
-        ["X-Domain", "www.codebuddy.cn"],
-        ["Host", new URL(BASE).host],
-        ["Connection", "keep-alive"],
-      ], Buffer.from("{}"), proxyUrl);
-      if (!res.ok) throw new Error(`auth state failed: ${res.status}`);
-      const st = (await res.json()) as any;
-      const state = st.state ?? st.data?.state;
-      const authUrl = st.authUrl ?? st.data?.authUrl;
-      if (!state || !authUrl) throw new Error("auth state: missing state/authUrl");
-
-      ctx.ui.notify(`CodeBuddy 登录 URL（浏览器打开并完成登录）：\n${authUrl}`, "info");
-
-      // 后台轮询（3s 间隔，最长 5 分钟）
-      const started = Date.now();
-      const timer = setInterval(async () => {
-        try {
-          if (Date.now() - started > 5 * 60_000) {
-            clearInterval(timer);
-            ctx.ui.notify("CodeBuddy 登录超时（5 分钟），重新执行 /codebuddy-login", "error");
-            return;
-          }
-          const r = await rawRequest(`${BASE}/v2/plugin/auth/token?state=${encodeURIComponent(state)}`, "GET", [
-            ["User-Agent", USER_AGENT],
-            ["X-Requested-With", "XMLHttpRequest"],
-            ["X-Product", "SaaS"],
-            ["X-Domain", "www.codebuddy.cn"],
-            ["Host", new URL(BASE).host],
-            ["Connection", "keep-alive"],
-          ], Buffer.alloc(0), proxyUrl);
-          if (!r.ok) return; // pending（官方：未完成时业务 code 非 0）
-          const tok = (await r.json()) as any;
-          const accessToken = tok.accessToken ?? tok.data?.accessToken;
-          const refreshToken = tok.refreshToken ?? tok.data?.refreshToken;
-          if (!accessToken || !refreshToken) return;
-          clearInterval(timer);
-
-          // 拿 uid/nickname
-          const acctRes = await rawRequest(`${BASE}/v2/plugin/login/account`, "GET", [
-            ["Authorization", `Bearer ${accessToken}`],
-            ["User-Agent", USER_AGENT],
-            ["X-Requested-With", "XMLHttpRequest"],
-            ["X-Product", "SaaS"],
-            ["Host", new URL(BASE).host],
-            ["Connection", "keep-alive"],
-          ], Buffer.alloc(0), proxyUrl);
-          let userId = "";
-          let nickname = "";
-          let domain = tok.domain ?? "www.codebuddy.cn";
-          if (acctRes.ok) {
-            const acct = (await acctRes.json()) as any;
-            userId = String(acct.uid ?? acct.userId ?? acct.data?.uid ?? "");
-            nickname = String(acct.nickname ?? acct.data?.nickname ?? "");
-            domain = acct.domain ?? domain;
-          }
-
-          const auth: AuthState = {
-            accessToken,
-            refreshToken,
-            userId,
-            domain,
-            nickname,
-            expiresAt: Date.now() + (tok.expiresIn ?? tok.data?.expiresIn ?? 3600) * 1000,
-          };
-          saveAuth(auth);
-          authCache = auth;
-          try {
-            fs.unlinkSync(STATE_FILE);
-          } catch {}
-          ctx.ui.notify(
-            `CodeBuddy 登录成功：${nickname || userId || "ok"}${userId ? ` (${userId})` : ""}\n用 /models 选 codebuddy/hy4-preview`,
-            "success"
-          );
-        } catch {
-          // 轮询失败忽略，下轮重试
-        }
-      }, 3000);
-    },
-  });
-
   // ── /codebuddy-import：从官方 CLI 本地明文凭证自动导入（无浏览器场景）═══
   // CLI 存储路径：~/.local/share/CodeBuddyExtension/Data/Public/auth/<authId>.info
   // authId 来自官方包 product.json 的 authentication.id（Tencent-Cloud.coding-copilot）
@@ -1138,7 +1081,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(
           `未找到官方 CLI 凭证（${authDir}）。
 请先安装并登录官方 CLI：npm i -g @tencent-ai/codebuddy-code && codebuddy （/login），
-或改用 /codebuddy-login 直接 OAuth 登录。`, "error");
+或改选「浏览器 OAuth 授权」。`, "error");
         return;
       }
       for (const f of files) {
@@ -1167,24 +1110,10 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("codebuddy-logout", {
-    description: "Remove stored CodeBuddy credentials",
-    handler: async (_args: string, ctx: any) => {
-      try {
-        const f = piAuthFile();
-        const store = JSON.parse(fs.readFileSync(f, "utf8"));
-        delete store.codebuddy;
-        fs.writeFileSync(f, JSON.stringify(store, null, 2), { mode: 0o600 });
-      } catch {}
-      authCache = null;
-      ctx.ui.notify("CodeBuddy 凭证已删除（pi auth.json）", "info");
-    },
-  });
-
   pi.on("session_start", async (_event, ctx) => {
     const a = loadAuth();
     if (!a) {
-      ctx.ui.notify("CodeBuddy 未登录，执行 /codebuddy-login 后用 /models 选择 codebuddy/*", "info");
+      ctx.ui.notify("CodeBuddy 未登录，/login 选择 codebuddy 后用 /models 选 codebuddy/*", "info");
     }
   });
 }
