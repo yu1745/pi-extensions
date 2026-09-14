@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { resolveCommandCodeDisplayKey } from "../commandcode/src/active-account.ts";
 import { SixelChartEntryComponent } from "./history/chart-component.js";
 import { formatShortDateTime, generateSixelChart } from "./history/sixel.js";
 import { getStorageKey, loadHistory, recordQuotaChange } from "./history/store.js";
@@ -8,6 +9,11 @@ import type { FetchResult, ProviderConfig, SixelChartEntryData } from "./types.j
 import { cacheKey, ERROR_RETRY_TTL_MS, formatReset, RATE_LIMIT_RETRY_TTL_MS, renderFailure } from "./utils.js";
 
 const STATUS_KEY = "quota";
+
+async function quotaApiKey(ctx: ExtensionContext, provider: string): Promise<string | undefined> {
+	const fallback = () => ctx.modelRegistry.getApiKeyForProvider(provider);
+	return provider === "commandcode" ? resolveCommandCodeDisplayKey(fallback) : fallback();
+}
 
 // In-memory cache keyed by "provider:keyHash" so switching keys or providers
 // never shows stale data. Pi extensions are long-lived in one process; a
@@ -55,6 +61,8 @@ async function refresh(
 	}
 
 	const result = await cfg.fetch(apiKey);
+	// Account rotation can occur without a model switch. Drop a stale account's result.
+	if (ctx.model?.provider === "commandcode" && await quotaApiKey(ctx, "commandcode") !== apiKey) return;
 	if (myEpoch !== epoch) return; // model switched while we were fetching — drop
 
 	if (result.kind === "success") {
@@ -109,7 +117,7 @@ async function syncActivation(ctx: ExtensionContext): Promise<void> {
 	const cfg = provider ? CONFIGS[provider] : undefined;
 	if (!cfg || !provider) return; // no monitor for this provider → stay invisible
 
-	const apiKey = await ctx.modelRegistry.getApiKeyForProvider(provider);
+	const apiKey = await quotaApiKey(ctx, provider);
 	if (!apiKey) {
 		if (myEpoch === epoch) {
 			ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("dim", `${cfg.label} ${cfg.noKeyLabel}`));
@@ -186,9 +194,13 @@ export default function (pi: ExtensionAPI): void {
 		const provider = ctx.model?.provider;
 		const cfg = provider ? CONFIGS[provider] : undefined;
 		if (!cfg || !provider) return;
-		const apiKey = await ctx.modelRegistry.getApiKeyForProvider(provider);
+		const apiKey = await quotaApiKey(ctx, provider);
 		if (!apiKey) return;
 		scheduleRefresh(ctx, cfg, apiKey, cacheKey(provider, apiKey), epoch);
+	});
+
+	pi.on("agent_end", async (_event, ctx) => {
+		if (ctx.model?.provider === "commandcode") await syncActivation(ctx);
 	});
 
 	const forceRefresh = async (_args: unknown, ctx: ExtensionContext) => {
@@ -198,7 +210,7 @@ export default function (pi: ExtensionAPI): void {
 			ctx.ui.notify("No quota monitor for the current provider", "warning");
 			return;
 		}
-		const apiKey = await ctx.modelRegistry.getApiKeyForProvider(provider);
+		const apiKey = await quotaApiKey(ctx, provider);
 		if (!apiKey) {
 			ctx.ui.notify(`No API key configured for ${provider}`, "warning");
 			return;
@@ -216,7 +228,7 @@ export default function (pi: ExtensionAPI): void {
 			ctx.ui.notify("当前模型服务商不支持额度追踪", "warning");
 			return;
 		}
-		const apiKey = await ctx.modelRegistry.getApiKeyForProvider(provider);
+		const apiKey = await quotaApiKey(ctx, provider);
 		if (!apiKey) {
 			ctx.ui.notify(`未配置 ${provider} 的 API 凭据`, "warning");
 			return;

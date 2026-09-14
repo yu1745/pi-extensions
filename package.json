@@ -9,7 +9,9 @@
 		"extensions"
 	],
 	"scripts": {
-		"test": "node scripts/run-tests.mjs"
+		"test": "node scripts/run-tests.mjs",
+		"test:commandcode": "node --experimental-transform-types --test --test-concurrency=4 tests/commandcode-*.test.ts tests/commandcode-upstream/test-*.ts",
+		"typecheck:commandcode": "tsc -p extensions/commandcode/tsconfig.json"
 	},
 	"dependencies": {
 		"linkedom": "^0.18.13",
@@ -42,6 +44,7 @@
 			"extensions/subagent-model-map.ts",
 			"extensions/quota-footer.ts",
 			"extensions/siliconflow.ts",
+			"extensions/commandcode/index.ts",
 			"extensions/tokenspeed.ts",
 			"extensions/tool-duration.ts",
 			"extensions/web-reader-spa/index.ts",
