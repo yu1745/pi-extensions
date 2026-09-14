@@ -1186,6 +1186,42 @@ export default async function (pi: ExtensionAPI) {
     },
   });
 
+  // ── /codebuddy-models：打印 id ↔ 倍率 ↔ 窗口 对照表（pi UI 只显示 id，倍率无处可放）──
+  pi.registerCommand("codebuddy-models", {
+    description: "List CodeBuddy models with credit rates",
+    handler: async (_args: string, ctx: any) => {
+      const a = loadAuth();
+      if (!a) { ctx.ui.notify("CodeBuddy 未登录", "error"); return; }
+      try {
+        const res = await rawRequest(`${BASE}/v3/config`, "GET", [
+          ["Accept", "application/json, text/plain, */*"],
+          ["X-Requested-With", "XMLHttpRequest"],
+          ["Connection", "close"],
+          ["Authorization", `Bearer ${a.accessToken}`],
+          ["X-User-Id", a.userId],
+          ["X-Domain", a.domain],
+          ["X-Product", "SaaS"],
+          ["User-Agent", USER_AGENT],
+          ["X-Request-ID", uuidv7Hex()],
+          ["Host", new URL(BASE).host],
+        ], Buffer.alloc(0), undefined);
+        const cfg = await res.json();
+        const rows = (cfg?.data?.models ?? [])
+          .filter((m: any) => m?.supportsToolCall && !m?.tags?.length)
+          .sort((x: any, y: any) => String(x.credits ?? "").localeCompare(String(y.credits ?? "")));
+        const w = (v: string, n: number) => v.padEnd(n);
+        let out = w("MODEL ID", 24) + w("RATE", 10) + w("CTX", 9) + "MAX-OUT\n" + "-".repeat(52) + "\n";
+        for (const m of rows) {
+          out += w(m.id, 24) + w(String(m.credits ?? "-"), 10) + w(String(m.maxInputTokens ?? "-"), 9) + String(m.maxOutputTokens ?? "-") + "\n";
+        }
+        out += "\n换算（未求证传闻）：积分 = tokens/1000 × 倍率；缓存命中约 1/24 价";
+        ctx.ui.notify(out, "info");
+      } catch (e: any) {
+        ctx.ui.notify("拉取模型表失败: " + (e?.message ?? e), "error");
+      }
+    },
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     const a = loadAuth();
     if (!a) {
