@@ -129,20 +129,23 @@ export function accountQuotaText(entry?: AccountDisplayQuota): {
   const five = credits.windowLimits.find((limit) => limit.window === "fiveHour")
   const week = credits.windowLimits.find((limit) => limit.window === "weekly")
 
-  // 近期（5小时内）可用额度：受限于总剩余余额以及 5 小时窗口剩余额度
-  const fiveAvailable =
-    five && five.cap > 0
-      ? Math.min(credits.remainingCredits, Math.max(0, five.cap - five.used))
-      : credits.remainingCredits
+  // 当前真实可用额度：取总剩余余额、5小时窗口剩余以及本周窗口剩余的交集（最小值）
+  let available = credits.remainingCredits
+  if (five && five.cap > 0) {
+    available = Math.min(available, Math.max(0, five.cap - five.used))
+  }
+  if (week && week.cap > 0) {
+    available = Math.min(available, Math.max(0, week.cap - week.used))
+  }
 
   const window = (label: string, limit?: CommandCodeWindowLimit) =>
     limit
       ? `${label}  已用 ${amount(limit.used)} / ${amount(limit.cap)} (${percent(limit)})  · ${resetLabel(limit.resetAt === null ? null : limit.resetAt * 1000)}`
       : `${label}  未返回窗口数据`
   return {
-    compact: `近期可用 $${amount(fiveAvailable)} (总余 $${amount(credits.remainingCredits)}) · 5h ${percent(five)} · 周 ${percent(week)}`,
+    compact: `近期可用 $${amount(available)} (总余 $${amount(credits.remainingCredits)}) · 5h ${percent(five)} · 周 ${percent(week)}`,
     detail: [
-      `近期可用 $${amount(fiveAvailable)}  ·  账户总余 $${amount(credits.remainingCredits)}（月度 ${amount(credits.monthlyCredits)} / 购买 ${amount(credits.purchasedCredits)} / 免费 ${amount(credits.freeCredits)}）`,
+      `近期可用 $${amount(available)}  ·  账户总余 $${amount(credits.remainingCredits)}（月度 ${amount(credits.monthlyCredits)} / 购买 ${amount(credits.purchasedCredits)} / 免费 ${amount(credits.freeCredits)}）`,
       window("5小时", five),
       window("周窗口", week),
       `查询时间 ${time} · 百分比为已用比例 · 此处查询不改变轮换状态`,

@@ -187,10 +187,14 @@ export async function openCommandCodeAccounts(
         if (result?.ok && result.quota.credits) {
           const credits = result.quota.credits
           const five = credits.windowLimits.find((limit) => limit.window === "fiveHour")
-          const recentAvail =
-            five && five.cap > 0
-              ? Math.min(credits.remainingCredits, Math.max(0, five.cap - five.used))
-              : credits.remainingCredits
+          const week = credits.windowLimits.find((limit) => limit.window === "weekly")
+          let recentAvail = credits.remainingCredits
+          if (five && five.cap > 0) {
+            recentAvail = Math.min(recentAvail, Math.max(0, five.cap - five.used))
+          }
+          if (week && week.cap > 0) {
+            recentAvail = Math.min(recentAvail, Math.max(0, week.cap - week.used))
+          }
           totalBalance += credits.remainingCredits
           totalRecentAvailable += recentAvail
           knownBalances++
