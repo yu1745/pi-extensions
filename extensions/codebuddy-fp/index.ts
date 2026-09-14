@@ -892,8 +892,10 @@ async function fingerprintFetch(input: RequestInfo | URL, init?: RequestInit): P
   // 头内容不变）；gzip body 沿用。clone() 旁路供遥测解析。
   const headerObj: Record<string, string> = {};
   for (const [k, v] of headers) headerObj[k] = v;
+  // 透传 abort signal：pi 按 ESC 的 app.interrupt 靠它取消请求（之前丢了导致整个 TUI 卡死）
+  const signal: AbortSignal | undefined = init?.signal ?? (input instanceof Request ? input.signal : undefined);
   const doChat = (h: Record<string, string>) =>
-    globalThis.fetch(url, { method, headers: h, body: gz, ...(proxyUrl ? {} : {}) });
+    globalThis.fetch(url, { method, headers: h, body: gz, signal });
   let resp = await doChat(headerObj);
   // 收尾遥测（对齐官方节奏）：
   // - report：仅【首轮无工具】（单发场景）或【工具轮结束】（finish_reason=tool_calls）时发一批；
