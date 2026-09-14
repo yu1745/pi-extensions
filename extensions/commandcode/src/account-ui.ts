@@ -1,5 +1,5 @@
 import { DynamicBorder, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
-import { Container, Input, Text, matchesKey } from "@earendil-works/pi-tui"
+import { Container, Input, Text, matchesKey, visibleWidth } from "@earendil-works/pi-tui"
 import { readAccountConfig, saveAccountConfig, type AccountConfigDraft } from "./account-config.ts"
 import type { CommandCodeAccountManager } from "./account-manager.ts"
 import {
