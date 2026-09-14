@@ -273,6 +273,7 @@ async function rawRequest(urlStr: string, method: string, headerPairs: [string, 
     const opts: any = {
       host: u.hostname, port, method, path: u.pathname + u.search,
       headers: headerPairs, // 数组形式：严格按给定顺序发送
+      agent: false, // 不进连接池：响应结束即毁 socket，防止空闲 keep-alive 句柄挂住进程退出
     };
     if (tlsSock) opts.createConnection = () => tlsSock!;
     const req = https.request(opts, (res: any) => {
@@ -290,7 +291,11 @@ async function rawRequest(urlStr: string, method: string, headerPairs: [string, 
             chunks.push(c);
             ctrl.enqueue(new Uint8Array(c));
           });
-          res.on("end", () => { try { ctrl.close(); } catch {} doneResolve(Buffer.concat(chunks)); });
+          res.on("end", () => {
+            try { ctrl.close(); } catch {}
+            try { res.destroy(); } catch {} // 释放底层 socket，进程可退出
+            doneResolve(Buffer.concat(chunks));
+          });
           res.on("error", (e: unknown) => { try { ctrl.error(e); } catch {} doneReject(e); });
         },
         cancel() { res.destroy(); },
