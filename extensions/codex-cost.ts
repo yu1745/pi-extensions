@@ -1,6 +1,8 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import * as https from "https";
+import { HttpsProxyAgent } from "https-proxy-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	matchesKey,
@@ -95,22 +97,45 @@ function saveConfig(cfg: PluginConfig): void {
 
 // 请求 ChatGPT 官方 backend-api
 async function callOfficialApi(endpoint: string, token: string, accountId: string): Promise<any> {
-	const resp = await fetch(`https://chatgpt.com${endpoint}`, {
-		headers: {
-			Authorization: `Bearer ${token}`,
-			"chatgpt-account-id": accountId,
-			"User-Agent": "CodexDesktop",
-			Accept: "application/json",
-		},
-		signal: AbortSignal.timeout(8000),
+	const proxy = process.env.https_proxy || process.env.http_proxy || process.env.ALL_PROXY;
+	const agent = proxy ? new HttpsProxyAgent(proxy) : undefined;
+
+	return new Promise((resolve, reject) => {
+		const req = https.request(
+			`https://chatgpt.com${endpoint}`,
+			{
+				headers: {
+					Authorization: `Bearer ${token}`,
+					"chatgpt-account-id": accountId,
+					"User-Agent": "CodexDesktop",
+					Accept: "application/json",
+				},
+				agent,
+				timeout: 8000,
+			},
+			(resp) => {
+				let body = "";
+				resp.on("data", (c) => (body += c));
+				resp.on("end", () => {
+					if (resp.statusCode && resp.statusCode >= 400) {
+						reject(new Error(`API Error ${resp.statusCode}: ${body.slice(0, 200)}`));
+						return;
+					}
+					try {
+						resolve(JSON.parse(body));
+					} catch (e) {
+						reject(e);
+					}
+				});
+			}
+		);
+		req.on("error", reject);
+		req.on("timeout", () => {
+			req.destroy();
+			reject(new Error("请求超时"));
+		});
+		req.end();
 	});
-
-	if (!resp.ok) {
-		const text = await resp.text();
-		throw new Error(`API Error ${resp.status}: ${text.slice(0, 200)}`);
-	}
-
-	return resp.json();
 }
 
 function formatUtcDayToLocalRange(utcDateStr: string, tz: string): { label: string; isCurrent: boolean } {
