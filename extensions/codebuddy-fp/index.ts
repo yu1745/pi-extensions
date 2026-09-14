@@ -276,24 +276,109 @@ async function rawRequest(urlStr: string, method: string, headerPairs: [string, 
     };
     if (tlsSock) opts.createConnection = () => tlsSock!;
     const req = https.request(opts, (res: any) => {
+      // 真流式：响应头一到立即 resolve，body 以 web ReadableStream 透传（边收边吐）；
+      // 同时旁路累积 chunk，供遥测解析（finish/tool_calls/usage/total_bytes）。
       const chunks: Buffer[] = [];
-      res.on("data", (c: Buffer) => chunks.push(c));
-      res.on("end", () => {
-        const buf = Buffer.concat(chunks);
-        const resp = new Response(buf, {
-          status: res.statusCode ?? 502,
-          headers: new Headers(res.headers as Record<string, string>),
-        });
-        (resp as any)._rawBuf = buf; // 供 traces 统计 total_bytes / 内容长度
-        resolve(resp);
+      let firstChunkAt = 0;
+      let doneResolve!: (b: Buffer) => void;
+      let doneReject!: (e: unknown) => void;
+      const whenDone = new Promise<Buffer>((res2, rej) => { doneResolve = res2; doneReject = rej; });
+      const stream = new ReadableStream<Uint8Array>({
+        start(ctrl) {
+          res.on("data", (c: Buffer) => {
+            if (!firstChunkAt) firstChunkAt = Date.now();
+            chunks.push(c);
+            ctrl.enqueue(new Uint8Array(c));
+          });
+          res.on("end", () => { try { ctrl.close(); } catch {} doneResolve(Buffer.concat(chunks)); });
+          res.on("error", (e: unknown) => { try { ctrl.error(e); } catch {} doneReject(e); });
+        },
+        cancel() { res.destroy(); },
       });
-      res.on("error", reject);
+      const resp = new Response(stream, {
+        status: res.statusCode ?? 502,
+        headers: new Headers(res.headers as Record<string, string>),
+      });
+      (resp as any)._whenDone = whenDone;       // 完整 body（流结束后）
+      (resp as any)._firstChunkAt = () => firstChunkAt; // 首 chunk 时刻（读时取值）
+      resolve(resp);
     });
     req.once("error", reject);
     if (body.length) req.write(body);
     req.end();
   });
 }
+
+// ═══ 模型元数据：从 /v3/config 响应解析官方模型表 ═══
+// 官方字段 → pi Model：maxInputTokens→contextWindow, maxOutputTokens→maxTokens,
+// temperature→samplingParams, supportsImages→input, supportedEfforts→thinkingLevelMap。
+// 未声明 supportedEfforts 的模型（DeepSeek 系）按真实 API 档位 low/high/max 映射。
+const FALLBACK_EFFORTS: Record<string, string[]> = {
+  "deepseek": ["low", "high", "max"],
+};
+function piThinkingLevelMap(supported?: string[]): Record<string, string | null> | undefined {
+  if (!supported?.length) return undefined;
+  const pick = (want: string[]): string | null => {
+    for (const w of want) if (supported.includes(w)) return w;
+    return null;
+  };
+  // 无 off/minimal 档可用且不支持关闭思考时，降级到最低支持档（pi 语义：null=不支持该档）
+  const lowest = supported[0];
+  return {
+    off: supported.length === 1 ? lowest : null,
+    minimal: lowest ?? null,
+    low: pick(["low"]),
+    medium: pick(["medium", "low", "high"]),
+    high: pick(["high", "max"]),
+    xhigh: pick(["max", "high"]),
+    max: pick(["max", "high"]),
+  };
+}
+/** "x0.03 credits" → " (x0.03)"；积分制不分输入/输出/缓存，只展示倍率，cost 留零 */
+function rateSuffix(credits?: string): string {
+  const m = /^(x[\d.]+)/.exec(String(credits ?? "").trim());
+  return m ? ` (${m[1]})` : "";
+}
+
+function modelsFromConfig(cfg: any): Model2[] {
+  const list: any[] = cfg?.data?.models ?? [];
+  const out: Model2[] = [];
+  for (const m of list) {
+    if (!m?.supportsToolCall || m?.tags?.length) continue; // 跳过非 chat（文生图等带 tags）
+    const id: string = m.id;
+    const efforts = m.reasoning?.supportedEfforts ?? FALLBACK_EFFORTS[id.split("-")[0]] ?? undefined;
+    const defaultEffort: string = m.reasoning?.defaultEffort ?? m.reasoning?.effort ?? "high";
+    out.push({
+      provider: "codebuddy",
+      api: "openai-completions" as const,
+      baseUrl: `${BASE}/v2`,
+      id,
+      name: `${m.name ?? id}${rateSuffix(m.credits)}`,
+      reasoning: !!m.supportsReasoning,
+      input: m.supportsImages ? ["text", "image"] : ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: m.maxInputTokens ?? m.maxAllowedSize ?? 128_000,
+      maxTokens: m.maxOutputTokens ?? 32_000,
+      samplingParams: m.temperature != null ? { temperature: m.temperature } : undefined,
+      thinkingLevelMap: piThinkingLevelMap(efforts),
+      defaultEffort,
+      compat: {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        maxTokensField: "max_tokens",
+        requiresReasoningContentOnAssistantMessages: true,
+      },
+    });
+  }
+  return out;
+}
+type Model2 = {
+  provider: string; api: "openai-completions"; baseUrl: string; id: string; name: string;
+  reasoning: boolean; input: string[]; cost: Record<string, number>;
+  contextWindow: number; maxTokens: number; samplingParams?: Record<string, unknown>;
+  thinkingLevelMap?: Record<string, string | null>; defaultEffort?: string;
+  compat: Record<string, unknown>;
+};
 
 // ═══ 工具对齐（官方 22 工具首发，第二轮起换 pi 真实工具）═══
 // 思路：chat 第 1 轮 body.tools 替换为官方 CLI 抓包的 22 个工具定义（指纹对齐）；
@@ -548,7 +633,7 @@ async function sendReport(a: AuthState, m: ChatMeta2, model: string, inputLength
   await rawRequest(`${BASE}/v2/report`, "POST", full, body, proxyUrl).catch(() => {});
 }
 
-interface ChatMeta2 { convReqID: string; messageID: string; traceId: string; spanId: string; startMs: number; }
+interface ChatMeta2 { convReqID: string; messageID: string; traceId: string; spanId: string; startMs: number; firstChunkAt?: number; }
 
 // traces 攒批：官方是会话结束一次性 export；这里入队，beforeExit / 队列过大时 flush
 const traceQueue: { a: AuthState; m: ChatMeta2; model: string; status: number; respBuf: Buffer; inputLength: number; sse: any }[] = [];
@@ -594,7 +679,7 @@ function buildSpans(a: AuthState, m: ChatMeta2, model: string, status: number, r
         str("request.id", m.messageID), str("conversation.request.id", m.convReqID),
         str("workbuddy.session_id", conversationID), str("workbuddy.prompt_request_id", m.convReqID),
         str("workbuddy.message_id", m.messageID), str("workbuddy.request_id", m.messageID),
-        { key: "first_token_ms", value: { intValue: Math.max(1, endMs - m.startMs) } },
+        { key: "first_token_ms", value: { intValue: Math.max(1, (m.firstChunkAt ?? endMs) - m.startMs) } },
         { key: "chunk_count", value: { intValue: 1 } },
         { key: "total_bytes", value: { intValue: respBuf.length } },
         str("stream.status", "ok"), str("workbuddy.stop_reason", "ok"),
@@ -688,7 +773,7 @@ async function sendTraces(a: AuthState, m: ChatMeta2, model: string, status: num
             str("request.id", m.messageID), str("conversation.request.id", m.convReqID),
             str("workbuddy.session_id", conversationID), str("workbuddy.prompt_request_id", m.convReqID),
             str("workbuddy.message_id", m.messageID), str("workbuddy.request_id", m.messageID),
-            { key: "first_token_ms", value: { intValue: Math.max(1, endMs - m.startMs) } },
+            { key: "first_token_ms", value: { intValue: Math.max(1, (m.firstChunkAt ?? endMs) - m.startMs) } },
             { key: "chunk_count", value: { intValue: 1 } },
             { key: "total_bytes", value: { intValue: respBuf.length } },
             str("stream.status", "ok"), str("workbuddy.stop_reason", "ok"),
@@ -798,15 +883,23 @@ async function fingerprintFetch(input: RequestInfo | URL, init?: RequestInit): P
   const meta2: ChatMeta2 = { convReqID, messageID, traceId, spanId, startMs: chatStart };
   const modelId = (() => { try { return JSON.parse(bodyBuf.toString("utf8")).model ?? ""; } catch { return ""; } })();
   const respBuf: Buffer = (resp as any)._rawBuf ?? Buffer.alloc(0);
-  const sse = parseSse(respBuf);
+  const whenDone: Promise<Buffer> = (resp as any)._whenDone ?? Promise.resolve(respBuf);
+  const firstChunkAt: () => number = (resp as any)._firstChunkAt ?? (() => Date.now());
   void (async () => {
     try {
+      // 等流真正结束（最多 10 分钟）再解析 SSE 发遥测
+      const buf = await Promise.race([
+        whenDone,
+        new Promise<Buffer>((r) => setTimeout(() => r(Buffer.alloc(0)), 10 * 60_000)),
+      ]);
+      const sse = parseSse(buf.length ? buf : respBuf);
+      meta2.firstChunkAt = firstChunkAt() || Date.now();
       const isToolRound = sse.finishReason === "tool_calls";
       if ((isToolRound && !didToolReport) || (!isToolRound && chatRound === 1)) {
         if (isToolRound) didToolReport = true;
         await sendReport(auth, meta2, modelId, bodyBuf.length, proxyUrl, sse);
       }
-      queueTraces(auth, meta2, modelId, resp.status, respBuf, bodyBuf.length, sse, proxyUrl);
+      queueTraces(auth, meta2, modelId, resp.status, buf.length ? buf : respBuf, bodyBuf.length, sse, proxyUrl);
     } catch {}
   })();
   // 401 兜底：强制刷新 token 后重试一次（对齐官方 CLI：401 → refresh → 重建 headers → 重试）
@@ -824,7 +917,7 @@ async function fingerprintFetch(input: RequestInfo | URL, init?: RequestInit): P
 
 // ── 扩展主体 ─────────────────────────────────────────────────────────────────
 
-export default function (pi: ExtensionAPI) {
+export default async function (pi: ExtensionAPI) {
   const base = openAICompletionsApi();
   // onPayload：1) 补官方 CLI 独有字段 verbosity/reasoning_summary；
   // 2) 按官方抓包基线的 JSON 字段顺序重建 body（model,messages,tools,temperature,max_tokens,stream,stream_options,reasoning_effort,verbosity,reasoning_summary）
@@ -857,13 +950,39 @@ export default function (pi: ExtensionAPI) {
           max_tokens: model.maxTokens, // 官方 CLI 固定发模型 max_tokens，不随上下文余量缩水
           stream: p.stream,
           stream_options: p.stream_options ?? { include_usage: true },
-          reasoning_effort: p.reasoning_effort ?? "low",
+          reasoning_effort: p.reasoning_effort ?? "high", // 官方 config 默认档（deepseek/hy4 均为 high）
           verbosity: p.verbosity ?? "high",
           reasoning_summary: p.reasoning_summary ?? "auto",
         };
       },
     };
   };
+
+  // 启动前抓官方 /v3/config 模型目录（pi 保证工厂完成后才继续启动，/models 全可用）。
+  // 目录以腾讯返回为准，不做增删改；抓取失败回落静态兜底表。
+  let dynamicModels: Model2[] | null = null;
+  try {
+    const a = loadAuth();
+    if (a) {
+      const res = await rawRequest(`${BASE}/v3/config`, "GET", [
+        ["Accept", "application/json, text/plain, */*"],
+        ["X-Requested-With", "XMLHttpRequest"],
+        ["Connection", "close"],
+        ["Authorization", `Bearer ${a.accessToken}`],
+        ["X-User-Id", a.userId],
+        ["X-Domain", a.domain],
+        ["X-Product", "SaaS"],
+        ["User-Agent", USER_AGENT],
+        ["X-Request-ID", uuidv7Hex()],
+        ["Host", new URL(BASE).host],
+      ], Buffer.alloc(0), undefined);
+      if (res.ok) {
+        const cfg = await res.json();
+        const parsed = modelsFromConfig(cfg);
+        if (parsed.length) dynamicModels = parsed;
+      }
+    }
+  } catch {}
 
   const provider = createProvider({
     id: "codebuddy",
@@ -982,82 +1101,39 @@ export default function (pi: ExtensionAPI) {
         async toAuth(cred: any) { return { apiKey: cred.access }; },
       },
     },
-    models: [
+    models: (dynamicModels ?? [
+      // 兜底静态表（config 抓取失败时用）；数值来自官方 /v3/config 抓包基线
       {
-        provider: "codebuddy",
-        api: "openai-completions" as const,
-        baseUrl: `${BASE}/v2`,
-        id: "deepseek-v4.1-flash",
-        name: "DeepSeek V4.1 Flash",
-        reasoning: true,
-        input: ["text"],
+        provider: "codebuddy", api: "openai-completions" as const, baseUrl: `${BASE}/v2`,
+        id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash (x0.03)",
+        reasoning: true, input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 128_000,
-        maxTokens: 128_000,
+        contextWindow: 1_000_000, maxTokens: 128_000,
         samplingParams: { temperature: 1 },
-        thinkingLevelMap: { off: "low", minimal: "low", low: "low", medium: "low", high: "high", xhigh: "high", max: "high" },
-        compat: {
-          supportsStore: false,
-          supportsDeveloperRole: false,
-          maxTokensField: "max_tokens",
-          requiresReasoningContentOnAssistantMessages: true,
-        },
+        thinkingLevelMap: { off: null, minimal: null, low: "low", medium: null, high: "high", xhigh: "max", max: "max" },
+        compat: { supportsStore: false, supportsDeveloperRole: false, maxTokensField: "max_tokens", requiresReasoningContentOnAssistantMessages: true },
       },
       {
-        provider: "codebuddy",
-        api: "openai-completions" as const,
-        baseUrl: `${BASE}/v2`,
-        id: "hy4-preview",
-        name: "Hunyuan 4 Preview",
-        reasoning: true,
-        input: ["text"],
+        provider: "codebuddy", api: "openai-completions" as const, baseUrl: `${BASE}/v2`,
+        id: "hy4-preview", name: "Hy4 preview (x0.29)",
+        reasoning: true, input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 256_000,
-        maxTokens: 64_000,
-        compat: {
-          supportsStore: false,
-          supportsDeveloperRole: false,
-          maxTokensField: "max_tokens",
-          requiresReasoningContentOnAssistantMessages: true,
-        },
+        contextWindow: 1_000_000, maxTokens: 64_000,
+        samplingParams: { temperature: 0.9 },
+        thinkingLevelMap: { off: "high", minimal: "high", low: "high", medium: "high", high: "high", xhigh: "high", max: "high" },
+        compat: { supportsStore: false, supportsDeveloperRole: false, maxTokensField: "max_tokens", requiresReasoningContentOnAssistantMessages: true },
       },
       {
-        provider: "codebuddy",
-        api: "openai-completions" as const,
-        baseUrl: `${BASE}/v2`,
-        id: "hy3",
-        name: "Hunyuan 3",
-        reasoning: true,
-        input: ["text"],
+        provider: "codebuddy", api: "openai-completions" as const, baseUrl: `${BASE}/v2`,
+        id: "kimi-k3-1", name: "Kimi K3 (x1.62)",
+        reasoning: true, input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 128_000,
-        maxTokens: 32_000,
-        compat: {
-          supportsStore: false,
-          supportsDeveloperRole: false,
-          maxTokensField: "max_tokens",
-          requiresReasoningContentOnAssistantMessages: true,
-        },
+        contextWindow: 1_000_000, maxTokens: 32_000,
+        samplingParams: { temperature: 1 },
+        thinkingLevelMap: { off: null, minimal: null, low: "low", medium: null, high: "high", xhigh: "max", max: "max" },
+        compat: { supportsStore: false, supportsDeveloperRole: false, maxTokensField: "max_tokens", requiresReasoningContentOnAssistantMessages: true },
       },
-      {
-        provider: "codebuddy",
-        api: "openai-completions" as const,
-        baseUrl: `${BASE}/v2`,
-        id: "kimi-k3",
-        name: "Kimi K3",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 256_000,
-        maxTokens: 32_000,
-        compat: {
-          supportsStore: false,
-          supportsDeveloperRole: false,
-          maxTokensField: "max_tokens",
-          requiresReasoningContentOnAssistantMessages: true,
-        },
-      },
-    ],
+    ]) as any,
     api: {
       stream: (model: any, context: any, options: any) =>
         base.stream(model, context, wrapOptions(options)),
