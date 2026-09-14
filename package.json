@@ -56,7 +56,8 @@
 			"extensions/subagents-cost.ts",
 			"extensions/deepseek-time-pricing.ts",
 			"extensions/codex-cost.ts",
-			"extensions/chinese-bang-bash.ts"
+			"extensions/chinese-bang-bash.ts",
+			"extensions/smart-ctrl-c.ts"
 		]
 	},
 	"keywords": [
