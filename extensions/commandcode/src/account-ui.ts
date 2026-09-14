@@ -180,11 +180,19 @@ export async function openCommandCodeAccounts(
       })
       const rows = accountItems.map((item) => item.value)
       let totalBalance = 0,
+        totalRecentAvailable = 0,
         knownBalances = 0
       for (const account of draft.accounts) {
         const result = quotaCache.get(account.apiKey)?.result
         if (result?.ok && result.quota.credits) {
-          totalBalance += result.quota.credits.remainingCredits
+          const credits = result.quota.credits
+          const five = credits.windowLimits.find((limit) => limit.window === "fiveHour")
+          const recentAvail =
+            five && five.cap > 0
+              ? Math.min(credits.remainingCredits, Math.max(0, five.cap - five.used))
+              : credits.remainingCredits
+          totalBalance += credits.remainingCredits
+          totalRecentAvailable += recentAvail
           knownBalances++
         }
       }
@@ -193,9 +201,12 @@ export async function openCommandCodeAccounts(
       const threshold = `⚙ 修改耗尽阈值（当前 ${draft.remainingCreditsThreshold}）`
       const save = dirty() ? "✓ 保存并生效" : "✓ 已保存（无修改）"
       const exit = dirty() ? "退出（放弃未保存修改）" : "关闭"
+      const summaryText = knownBalances
+        ? `近期可用 $${totalRecentAvailable.toFixed(2)} / 总余 $${totalBalance.toFixed(2)}`
+        : "余额未知"
       const choice = await selectAccountQuotaMenu(
         ctx,
-        `Command Code · DeepSeek | ${draft.accounts.length} 个账号 | ${knownBalances ? `已查余额 $${totalBalance.toFixed(2)}` : "余额未知"} (${knownBalances}/${draft.accounts.length})${dirty() ? " · 未保存" : ""}`,
+        `Command Code · DeepSeek | ${draft.accounts.length} 个账号 | ${summaryText} (${knownBalances}/${draft.accounts.length})${dirty() ? " · 未保存" : ""}`,
         [
           ...accountItems,
           ...[refresh, add, threshold, save, exit].map((label) => ({ value: label, label })),
