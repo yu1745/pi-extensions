@@ -1,7 +1,4 @@
 node_modules/
 *.log
 *.bak
-*.bak-*
-# codebuddy-fp 本地凭证（绝不入库）
-extensions/codebuddy-fp/auth.json
-extensions/codebuddy-fp/login-state.json
+*.bak-*extensions/codebuddy-fp/login-state.json

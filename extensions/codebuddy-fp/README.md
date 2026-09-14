@@ -9,7 +9,7 @@ CodeBuddy（腾讯）provider，出网请求对官方 CLI（`@tencent-ai/codebud
 - **完整出网序列**：`config → accounts → chat → report → traces`，全部走 `node:https` 原始请求（保序头、HTTP/1.1、可选 CONNECT 代理）
 - **遥测对齐**：report 三类事件 + 工具轮五类事件（`chat_message_response/status`、`chat_tool_action`）、OTLP traces（含官方 SDK bug 字段照抄）、真实 machineId（`/etc/machine-id`）
 - **隐私红线**：`vcsRepo` 等字段恒空、config 永不带 `repos[]`——**git remote 绝不上报**；工作目录等环境信息为真值
-- **token 管理**：OAuth 设备授权（`/codebuddy-login`）、官方 CLI 明文凭证导入（`/codebuddy-import`）、临期主动刷新 + 401 兜底重试 + 并发去重
+- **token 管理**：pi 原生 `/login` OAuth 流程（provider `oauth` 接口：`login`/`refresh`/`toAuth`，pi 到期自动刷新）、便捷命令 `/codebuddy-login`、官方 CLI 明文凭证导入 `/codebuddy-import`、请求内 401 兜底重试 + 并发去重
 
 ## 使用
 
@@ -28,7 +28,7 @@ CodeBuddy（腾讯）provider，出网请求对官方 CLI（`@tencent-ai/codebud
 - `index.ts` — 扩展本体
 - `official-tools.json` — 官方 CLI 2.151.0 的 22 个工具定义（抓包提取）
 - `official-system.json` — 官方系统提示词模板（`{{ENV}}`/`{{MODEL_NAME}}`/`{{MODEL_ID}}` 占位符）
-- `auth.json` — 本地凭证（gitignore，绝不入库）
+- 凭证存 **pi 原生库** `~/.pi/agent/auth.json`（`codebuddy` 条目，oauth 形状 + `userId`/`domain`/`nickname` 业务字段）——与 `/login`、自动刷新等原生流程同一存储，无扩展私有凭证文件
 
 ## 环境变量
 

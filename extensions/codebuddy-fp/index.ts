@@ -39,8 +39,15 @@ const BASE = "https://copilot.tencent.com";
 const CLI_VERSION = "2.151.0";
 const STAINLESS_PACKAGE_VERSION = "6.25.0"; // CLI 内嵌 OpenAI SDK 版本（抓包实证）
 const USER_AGENT = `CLI/${CLI_VERSION} CodeBuddy/${CLI_VERSION}`;
-const AUTH_FILE = path.join(__dirname, "auth.json");
 const STATE_FILE = path.join(__dirname, "login-state.json");
+// 凭证存 pi 原生库 ~/.pi/agent/auth.json（key: "codebuddy"，oauth 形状 + 业务字段），
+// 与 /login、--api-key 等原生流程同一存储，不另建私有凭证文件。
+function piAuthFile(): string {
+  try {
+    const { getAgentDir } = require("@earendil-works/pi-coding-agent");
+    return path.join(getAgentDir(), "auth.json");
+  } catch { return path.join(os.homedir(), ".pi/agent/auth.json"); }
+}
 
 // ── 工具 ─────────────────────────────────────────────────────────────────────
 
@@ -90,16 +97,33 @@ interface AuthState {
   nickname?: string;
 }
 
+// AuthState 兼容两种形状：pi 库（access/refresh/expires/userId/domain）与旧本地文件（accessToken/...）
 function loadAuth(): AuthState | null {
+  // 1) pi 原生库
   try {
-    const raw = JSON.parse(fs.readFileSync(AUTH_FILE, "utf8"));
-    if (raw?.accessToken) return raw as AuthState;
+    const store = JSON.parse(fs.readFileSync(piAuthFile(), "utf8"));
+    const c = store?.codebuddy;
+    if (c?.access && c?.refresh) {
+      return {
+        accessToken: c.access, refreshToken: c.refresh,
+        userId: c.userId ?? "", domain: c.domain ?? "www.codebuddy.cn",
+        nickname: c.nickname ?? "", expiresAt: c.expires ?? 0,
+      };
+    }
   } catch {}
   return null;
 }
 
 function saveAuth(a: AuthState) {
-  fs.writeFileSync(AUTH_FILE, JSON.stringify(a, null, 2), { mode: 0o600 });
+  const f = piAuthFile();
+  let store: Record<string, unknown> = {};
+  try { store = JSON.parse(fs.readFileSync(f, "utf8")); } catch {}
+  store.codebuddy = {
+    type: "oauth",
+    access: a.accessToken, refresh: a.refreshToken, expires: a.expiresAt,
+    userId: a.userId, domain: a.domain, nickname: a.nickname,
+  };
+  fs.writeFileSync(f, JSON.stringify(store, null, 2), { mode: 0o600 });
 }
 
 let refreshInFlight: Promise<AuthState> | null = null;
@@ -855,20 +879,75 @@ export default function (pi: ExtensionAPI) {
       "X-IDE-Version": CLI_VERSION,
     },
     auth: {
-      apiKey: {
-        name: "CodeBuddy login",
+      // 接 pi 原生 /login 流程：凭证由 pi 存入 ~/.pi/agent/auth.json（oauth 形状 + 业务字段）
+      oauth: {
+        name: "CodeBuddy (Tencent)",
         async login(interaction: any) {
-          const key = await interaction.prompt({
-            type: "secret",
-            message: "占位（请用 /codebuddy-login 登录后回车）",
-          });
-          return { type: "api_key", key: key || "codebuddy" };
+          // OAuth 设备授权：onAuth 展示 URL → 浏览器登录 → 轮询取 token
+          const res = await rawRequest(`${BASE}/v2/plugin/auth/state?platform=CLI`, "POST", [
+            ["Content-Type", "application/json"],
+            ["User-Agent", USER_AGENT],
+            ["X-Requested-With", "XMLHttpRequest"],
+            ["X-Product", "SaaS"],
+            ["X-Domain", "www.codebuddy.cn"],
+            ["Host", new URL(BASE).host],
+            ["Connection", "keep-alive"],
+          ], Buffer.from("{}"), undefined);
+          const st = (await res.json()) as any;
+          const state = st.state ?? st.data?.state;
+          const authUrl = st.authUrl ?? st.data?.authUrl;
+          if (!state || !authUrl) throw new Error("auth state: missing state/authUrl");
+          interaction.onAuth?.({ url: authUrl });
+          interaction.onPrompt?.({ message: `CodeBuddy 登录：浏览器打开并完成授权\n${authUrl}` });
+          // 轮询（3s × 100 次 = 5 分钟）
+          for (let i = 0; i < 100; i++) {
+            await new Promise((r) => setTimeout(r, 3000));
+            try {
+              const r = await rawRequest(`${BASE}/v2/plugin/auth/token?state=${encodeURIComponent(state)}`, "GET", [
+                ["User-Agent", USER_AGENT],
+                ["X-Requested-With", "XMLHttpRequest"],
+                ["X-Product", "SaaS"],
+                ["X-Domain", "www.codebuddy.cn"],
+                ["Host", new URL(BASE).host],
+                ["Connection", "keep-alive"],
+              ], Buffer.alloc(0), undefined);
+              if (!r.ok) continue;
+              const tok = (await r.json()) as any;
+              const accessToken = tok.accessToken ?? tok.data?.accessToken;
+              const refreshToken2 = tok.refreshToken ?? tok.data?.refreshToken;
+              if (!accessToken || !refreshToken2) continue;
+              // uid/nickname
+              let userId = "", nickname = "", domain = tok.domain ?? "www.codebuddy.cn";
+              try {
+                const ar = await rawRequest(`${BASE}/v2/plugin/login/account`, "GET", [
+                  ["Authorization", `Bearer ${accessToken}`],
+                  ["User-Agent", USER_AGENT],
+                  ["X-Requested-With", "XMLHttpRequest"],
+                  ["X-Product", "SaaS"],
+                  ["Host", new URL(BASE).host],
+                  ["Connection", "keep-alive"],
+                ], Buffer.alloc(0), undefined);
+                if (ar.ok) {
+                  const acct = (await ar.json()) as any;
+                  userId = String(acct.uid ?? acct.userId ?? acct.data?.uid ?? "");
+                  nickname = String(acct.nickname ?? acct.data?.nickname ?? "");
+                  domain = acct.domain ?? domain;
+                }
+              } catch {}
+              const expiresAt = Date.now() + (tok.expiresIn ?? tok.data?.expiresIn ?? 3600) * 1000;
+              const cred = { type: "oauth" as const, access: accessToken, refresh: refreshToken2, expires: expiresAt, userId, domain, nickname };
+              saveAuth({ accessToken, refreshToken: refreshToken2, userId, domain, nickname, expiresAt });
+              return cred;
+            } catch {}
+          }
+          throw new Error("CodeBuddy 登录超时（5 分钟未完成授权）");
         },
-        async resolve() {
-          const a = loadAuth();
-          if (a) return { auth: { apiKey: "codebuddy-cli-token" }, source: "CodeBuddy CLI OAuth token" };
-          return undefined;
+        async refresh(cred: any, _signal: AbortSignal) {
+          // pi 到期自动调用（store lock 下）；与请求内 401 兜底共用同一后端端点
+          const a = await refreshAuth({ accessToken: cred.access, refreshToken: cred.refresh, userId: cred.userId ?? "", domain: cred.domain ?? "www.codebuddy.cn", nickname: cred.nickname ?? "", expiresAt: cred.expires ?? 0 });
+          return { ...cred, access: a.accessToken, refresh: a.refreshToken, expires: a.expiresAt };
         },
+        async toAuth(cred: any) { return { apiKey: cred.access }; },
       },
     },
     models: [
@@ -1092,10 +1171,13 @@ export default function (pi: ExtensionAPI) {
     description: "Remove stored CodeBuddy credentials",
     handler: async (_args: string, ctx: any) => {
       try {
-        fs.unlinkSync(AUTH_FILE);
+        const f = piAuthFile();
+        const store = JSON.parse(fs.readFileSync(f, "utf8"));
+        delete store.codebuddy;
+        fs.writeFileSync(f, JSON.stringify(store, null, 2), { mode: 0o600 });
       } catch {}
       authCache = null;
-      ctx.ui.notify("CodeBuddy 凭证已删除", "info");
+      ctx.ui.notify("CodeBuddy 凭证已删除（pi auth.json）", "info");
     },
   });
 
