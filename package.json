@@ -45,6 +45,7 @@
 			"extensions/quota-footer.ts",
 			"extensions/siliconflow.ts",
 			"extensions/commandcode/index.ts",
+			"extensions/codebuddy-fp/index.ts",
 			"extensions/tokenspeed.ts",
 			"extensions/tool-duration.ts",
 			"extensions/web-reader-spa/index.ts",

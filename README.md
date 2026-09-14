@@ -26,6 +26,7 @@ pi install git:github.com/yu1745/pi-extensions
 | `deepseek-effort`（已禁用） | `extensions/deepseek-effort.ts` | 未在加载列表注册；DeepSeek V4.1 / `deepseek-flash`：`/effort` 支持 API 预设和实验性 1–100 系统前缀，两种模式明确分离，按会话分支保存 |
 | `clear-new-alias` | `extensions/clear-new-alias.ts` | Clears the new-version alias notice |
 | `zvec-grep` | `extensions/zvec-grep/` | MCP bridge for zvec-grep's official agent search tool; handles server startup and remote-embedding authorization internally |
+| `codebuddy` | `extensions/codebuddy-fp/` | CodeBuddy (Tencent) provider with full official-CLI fingerprint simulation: byte-identical round-1 headers/system/tools, OAuth login (`/codebuddy-login`), CLI credential import (`/codebuddy-import`), token auto-refresh, aligned telemetry (config/accounts/report/traces) with zero git-repo leakage |
 
 <details>
 <summary><strong>Shadowed</strong> (code in repo, not activated)</summary>
