@@ -3,7 +3,7 @@ import {
   DynamicBorder,
   type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent"
-import { SelectList, Text, matchesKey } from "@earendil-works/pi-tui"
+import { SelectList, Text, matchesKey, visibleWidth } from "@earendil-works/pi-tui"
 import { fetchCommandCodeQuota } from "./quota.ts"
 import type { CommandCodeQuotaResult, CommandCodeWindowLimit } from "./quota-types.ts"
 import type { AccountConfigDraft } from "./account-config.ts"
