@@ -340,6 +340,12 @@ function rateSuffix(credits?: string): string {
   return m ? ` (${m[1]})` : "";
 }
 
+/** 扒掉 id 里的倍率后缀，还原上游真实 model id（"deepseek-v4.1-flash (x0.03)" → "deepseek-v4.1-flash"） */
+const RATE_ID_RE = /\s*\(x[\d.]+\)$/;
+function stripRateId(id: string): string {
+  return id.replace(RATE_ID_RE, "");
+}
+
 function modelsFromConfig(cfg: any): Model2[] {
   const list: any[] = cfg?.data?.models ?? [];
   const out: Model2[] = [];
@@ -352,8 +358,9 @@ function modelsFromConfig(cfg: any): Model2[] {
       provider: "codebuddy",
       api: "openai-completions" as const,
       baseUrl: `${BASE}/v2`,
-      id,
-      name: `${m.name ?? id}${rateSuffix(m.credits)}`,
+      id: `${id}${rateSuffix(m.credits)}`, // id 带倍率 → footer / /models 全程可见
+      name: m.name ?? id,
+      upstreamId: id, // 上游真实 id
       reasoning: !!m.supportsReasoning,
       input: m.supportsImages ? ["text", "image"] : ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -376,7 +383,7 @@ type Model2 = {
   provider: string; api: "openai-completions"; baseUrl: string; id: string; name: string;
   reasoning: boolean; input: string[]; cost: Record<string, number>;
   contextWindow: number; maxTokens: number; samplingParams?: Record<string, unknown>;
-  thinkingLevelMap?: Record<string, string | null>; defaultEffort?: string;
+  thinkingLevelMap?: Record<string, string | null>; defaultEffort?: string; upstreamId?: string;
   compat: Record<string, unknown>;
 };
 
@@ -943,7 +950,7 @@ export default async function (pi: ExtensionAPI) {
           }
         }
         return {
-          model: p.model,
+          model: stripRateId(p.model), // id 里的倍率后缀不出网
           messages,
           tools,
           temperature: p.temperature ?? 1,
@@ -1105,7 +1112,7 @@ export default async function (pi: ExtensionAPI) {
       // 兜底静态表（config 抓取失败时用）；数值来自官方 /v3/config 抓包基线
       {
         provider: "codebuddy", api: "openai-completions" as const, baseUrl: `${BASE}/v2`,
-        id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash (x0.03)",
+        id: "deepseek-v4.1-flash (x0.03)", name: "DeepSeek V4.1 Flash", upstreamId: "deepseek-v4.1-flash",
         reasoning: true, input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 1_000_000, maxTokens: 128_000,
@@ -1115,7 +1122,7 @@ export default async function (pi: ExtensionAPI) {
       },
       {
         provider: "codebuddy", api: "openai-completions" as const, baseUrl: `${BASE}/v2`,
-        id: "hy4-preview", name: "Hy4 preview (x0.29)",
+        id: "hy4-preview (x0.29)", name: "Hy4 preview", upstreamId: "hy4-preview",
         reasoning: true, input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 1_000_000, maxTokens: 64_000,
@@ -1125,7 +1132,7 @@ export default async function (pi: ExtensionAPI) {
       },
       {
         provider: "codebuddy", api: "openai-completions" as const, baseUrl: `${BASE}/v2`,
-        id: "kimi-k3-1", name: "Kimi K3 (x1.62)",
+        id: "kimi-k3-1 (x1.62)", name: "Kimi K3", upstreamId: "kimi-k3-1",
         reasoning: true, input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 1_000_000, maxTokens: 32_000,
