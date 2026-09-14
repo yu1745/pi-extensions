@@ -306,6 +306,9 @@ export default async function (pi: ExtensionAPI) {
     createProviderConfig: (models) =>
       createProviderConfig(models, apiBase, stream, pool?.accounts[0]?.apiKey),
     getTransport: transport.getTransport,
+    // Background discovery must not write over the TUI's input line.
+    // Diagnostics remain in /commandcode-status; manual refresh notifies via UI.
+    logWarning: () => {},
   })
 
   const unregisterAccountManager = registerCommandCodeAccountManager(accountManager)
