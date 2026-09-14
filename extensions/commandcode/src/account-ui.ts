@@ -5,6 +5,8 @@ import type { CommandCodeAccountManager } from "./account-manager.ts"
 import {
   accountQuotaMetrics,
   accountQuotaText,
+  padEndVisible,
+  padStartVisible,
   refreshAccountDisplayQuota,
   resetLabel,
   selectAccountQuotaMenu,
@@ -174,21 +176,19 @@ export async function openCommandCodeAccounts(
         const quota = accountQuotaText(quotaEntry)
         const metrics = accountQuotaMetrics(quotaEntry)
 
-        // 格式化表格各列：名称、状态、近期可用、总余额、5h使用率、周使用率
+        // 格式化表格各列：名称(18)、状态(8)、近期可用(10)、总余额(10)、5h使用率(8)、周使用率(8)
         const idxStr = `${index + 1}.`.padEnd(3)
         const icon = current ? theme.fg("success", "●") : theme.fg("dim", "○")
         const namePart = `${idxStr} ${icon} ${id}`
-        const nameLen = visibleWidth(namePart)
-        const paddedName =
-          nameLen < 18 ? namePart + " ".repeat(18 - nameLen) : namePart.slice(0, 18)
+        const paddedName = padEndVisible(namePart, 18)
 
         let statusTag = ""
         if (cooldown) {
-          statusTag = theme.fg("error", "冷却中  ")
+          statusTag = theme.fg("error", padEndVisible("冷却中", 8))
         } else if (current) {
-          statusTag = theme.fg("accent", "活跃中  ")
+          statusTag = theme.fg("accent", padEndVisible("活跃中", 8))
         } else {
-          statusTag = theme.fg("dim", "就绪    ")
+          statusTag = theme.fg("dim", padEndVisible("就绪", 8))
         }
 
         let availCol = ""
@@ -206,8 +206,8 @@ export async function openCommandCodeAccounts(
               : metrics.available < 2
                 ? "warning"
                 : "success"
-          availCol = theme.fg(availColor, `$${availNum}`.padStart(10))
-          totalCol = theme.fg("muted", `$${totalNum}`.padStart(9))
+          availCol = theme.fg(availColor, padStartVisible(`$${availNum}`, 10))
+          totalCol = theme.fg("muted", padStartVisible(`$${totalNum}`, 10))
 
           const fiveColor =
             metrics.fivePct !== null && metrics.fivePct >= 90
@@ -217,7 +217,7 @@ export async function openCommandCodeAccounts(
                 : "muted"
           fiveCol = theme.fg(
             fiveColor,
-            metrics.fivePct !== null ? `${metrics.fivePct}%`.padStart(7) : "   未知".padStart(7),
+            padStartVisible(metrics.fivePct !== null ? `${metrics.fivePct}%` : "未知", 8),
           )
 
           const weekColor =
@@ -228,16 +228,16 @@ export async function openCommandCodeAccounts(
                 : "muted"
           weekCol = theme.fg(
             weekColor,
-            metrics.weekPct !== null ? `${metrics.weekPct}%`.padStart(7) : "   未知".padStart(7),
+            padStartVisible(metrics.weekPct !== null ? `${metrics.weekPct}%` : "未知", 8),
           )
         } else {
-          availCol = theme.fg("dim", "--".padStart(10))
-          totalCol = theme.fg("dim", "--".padStart(9))
-          fiveCol = theme.fg("dim", "--".padStart(7))
-          weekCol = theme.fg("dim", "--".padStart(7))
+          availCol = theme.fg("dim", padStartVisible("--", 10))
+          totalCol = theme.fg("dim", padStartVisible("--", 10))
+          fiveCol = theme.fg("dim", padStartVisible("--", 8))
+          weekCol = theme.fg("dim", padStartVisible("--", 8))
         }
 
-        const label = `${paddedName} ${statusTag} ${availCol}  ${totalCol}  ${fiveCol} ${weekCol}`
+        const label = `${paddedName} ${statusTag} ${availCol} ${totalCol} ${fiveCol} ${weekCol}`
         const stateLine = cooldown
           ? `冷却中：${resetLabel(cooldown.recheckAt).replace("后重置", "后可重新核验")}（不保证恢复）`
           : current

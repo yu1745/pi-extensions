@@ -121,6 +121,16 @@ export function accountQuotaMetrics(entry?: AccountDisplayQuota) {
   }
 }
 
+export function padEndVisible(str: string, targetWidth: number): string {
+  const w = visibleWidth(str)
+  return w < targetWidth ? str + " ".repeat(targetWidth - w) : str
+}
+
+export function padStartVisible(str: string, targetWidth: number): string {
+  const w = visibleWidth(str)
+  return w < targetWidth ? " ".repeat(targetWidth - w) + str : str
+}
+
 export function resetLabel(timestampMs?: number | null): string {
   if (!timestampMs || !Number.isFinite(timestampMs)) return "重置时间未知"
   const delta = timestampMs - Date.now()
@@ -215,18 +225,18 @@ export async function selectAccountQuotaMenu(
           "修改先保存在草稿中，选择“保存并生效”才会写入配置。",
         ]
         const tableHeader =
-          `   ` +
-          theme.fg("muted", "账号名称".padEnd(16)) +
+          `  ` +
+          theme.fg("muted", padEndVisible("账号名称", 18)) +
           " " +
-          theme.fg("muted", "状态".padEnd(8)) +
+          theme.fg("muted", padEndVisible("状态", 8)) +
           " " +
-          theme.fg("muted", "近期可用".padStart(10)) +
-          "  " +
-          theme.fg("muted", "总余额".padStart(9)) +
-          "  " +
-          theme.fg("muted", "5h已用".padStart(7)) +
+          theme.fg("muted", padStartVisible("近期可用", 10)) +
           " " +
-          theme.fg("muted", "周已用".padStart(7))
+          theme.fg("muted", padStartVisible("总余额", 10)) +
+          " " +
+          theme.fg("muted", padStartVisible("5h已用", 8)) +
+          " " +
+          theme.fg("muted", padStartVisible("周已用", 8))
 
         return [
           ...border.render(width),
