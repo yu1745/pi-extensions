@@ -84,6 +84,43 @@ export async function refreshAccountDisplayQuota(
 const amount = (value: number) => value.toFixed(2)
 const percent = (limit?: CommandCodeWindowLimit) =>
   limit && limit.cap > 0 ? `${Math.round((limit.used / limit.cap) * 100)}%` : "未知"
+
+export function accountQuotaMetrics(entry?: AccountDisplayQuota) {
+  if (!entry || !entry.result.ok || !entry.result.quota.credits) {
+    return {
+      available: null,
+      total: null,
+      fivePct: null,
+      weekPct: null,
+      five: undefined,
+      week: undefined,
+    }
+  }
+  const credits = entry.result.quota.credits
+  const five = credits.windowLimits.find((limit) => limit.window === "fiveHour")
+  const week = credits.windowLimits.find((limit) => limit.window === "weekly")
+
+  let available = credits.remainingCredits
+  if (five && five.cap > 0) {
+    available = Math.min(available, Math.max(0, five.cap - five.used))
+  }
+  if (week && week.cap > 0) {
+    available = Math.min(available, Math.max(0, week.cap - week.used))
+  }
+
+  const fivePct = five && five.cap > 0 ? Math.round((five.used / five.cap) * 100) : null
+  const weekPct = week && week.cap > 0 ? Math.round((week.used / week.cap) * 100) : null
+
+  return {
+    available,
+    total: credits.remainingCredits,
+    fivePct,
+    weekPct,
+    five,
+    week,
+  }
+}
+
 export function resetLabel(timestampMs?: number | null): string {
   if (!timestampMs || !Number.isFinite(timestampMs)) return "重置时间未知"
   const delta = timestampMs - Date.now()
@@ -161,10 +198,10 @@ export async function selectAccountQuotaMenu(
 ): Promise<string | undefined> {
   return ctx.ui.custom<string | undefined>((tui, theme, kb, done) => {
     const border = new DynamicBorder((text: string) => theme.fg("accent", text))
-    const select = new SelectList(items, Math.min(items.length, 8), {
+    const select = new SelectList(items, Math.min(items.length, 14), {
       selectedPrefix: (text) => theme.fg("accent", text),
-      selectedText: (text) => theme.fg("accent", text),
-      description: (text) => theme.fg("muted", text),
+      selectedText: (text) => text,
+      description: (text) => text,
       scrollInfo: (text) => theme.fg("dim", text),
       noMatch: (text) => theme.fg("warning", text),
     })
@@ -177,9 +214,25 @@ export async function selectAccountQuotaMenu(
         const detail = items.find((item) => item.value === current?.value)?.detail ?? [
           "修改先保存在草稿中，选择“保存并生效”才会写入配置。",
         ]
+        const tableHeader =
+          `   ` +
+          theme.fg("muted", "账号名称".padEnd(16)) +
+          " " +
+          theme.fg("muted", "状态".padEnd(8)) +
+          " " +
+          theme.fg("muted", "近期可用".padStart(10)) +
+          "  " +
+          theme.fg("muted", "总余额".padStart(9)) +
+          "  " +
+          theme.fg("muted", "5h已用".padStart(7)) +
+          " " +
+          theme.fg("muted", "周已用".padStart(7))
+
         return [
           ...border.render(width),
           ...new Text(theme.fg("accent", theme.bold(title)), 1, 0).render(width),
+          "",
+          ...new Text(tableHeader, 1, 0).render(width),
           ...select.render(width),
           "",
           ...new Text(detail.join("\n"), 1, 0).render(width),

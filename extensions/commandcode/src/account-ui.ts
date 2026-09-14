@@ -3,6 +3,7 @@ import { Container, Input, Text, matchesKey } from "@earendil-works/pi-tui"
 import { readAccountConfig, saveAccountConfig, type AccountConfigDraft } from "./account-config.ts"
 import type { CommandCodeAccountManager } from "./account-manager.ts"
 import {
+  accountQuotaMetrics,
   accountQuotaText,
   refreshAccountDisplayQuota,
   resetLabel,
@@ -160,6 +161,7 @@ export async function openCommandCodeAccounts(
     await refreshAccountDisplayQuota(ctx, draft.accounts, quotaCache, options)
     for (;;) {
       // The cache is keyed by the actual key, so replacing a key never reuses old quota.
+      const theme = ctx.ui.theme
       const accountItems = draft.accounts.map((account, index) => {
         let id = account.id
         for (const entry of draft.accounts) id = id.split(entry.apiKey).join("[隐藏]")
@@ -168,17 +170,82 @@ export async function openCommandCodeAccounts(
           (entry) => entry.id === account.id && entry.apiKey === account.apiKey,
         )
         const cooldown = unchangedKey ? runtimeState?.accounts[account.id]?.verification : undefined
-        const quota = accountQuotaText(quotaCache.get(account.apiKey))
-        const status = cooldown ? " · 冷却" : ""
-        const label = `${index + 1}. ${current ? "●" : "○"} ${id}${status}  |  ${quota.compact}`
+        const quotaEntry = quotaCache.get(account.apiKey)
+        const quota = accountQuotaText(quotaEntry)
+        const metrics = accountQuotaMetrics(quotaEntry)
+
+        // 格式化表格各列：名称、状态、近期可用、总余额、5h使用率、周使用率
+        const idxStr = `${index + 1}.`.padEnd(3)
+        const icon = current ? theme.fg("success", "●") : theme.fg("dim", "○")
+        const namePart = `${idxStr} ${icon} ${id}`
+        const nameLen = visibleWidth(namePart)
+        const paddedName =
+          nameLen < 18 ? namePart + " ".repeat(18 - nameLen) : namePart.slice(0, 18)
+
+        let statusTag = ""
+        if (cooldown) {
+          statusTag = theme.fg("error", "冷却中  ")
+        } else if (current) {
+          statusTag = theme.fg("accent", "活跃中  ")
+        } else {
+          statusTag = theme.fg("dim", "就绪    ")
+        }
+
+        let availCol = ""
+        let totalCol = ""
+        let fiveCol = ""
+        let weekCol = ""
+
+        if (metrics.available !== null && metrics.total !== null) {
+          const availNum = metrics.available.toFixed(2)
+          const totalNum = metrics.total.toFixed(2)
+
+          const availColor =
+            metrics.available <= draft.remainingCreditsThreshold
+              ? "error"
+              : metrics.available < 2
+                ? "warning"
+                : "success"
+          availCol = theme.fg(availColor, `$${availNum}`.padStart(10))
+          totalCol = theme.fg("muted", `$${totalNum}`.padStart(9))
+
+          const fiveColor =
+            metrics.fivePct !== null && metrics.fivePct >= 90
+              ? "error"
+              : metrics.fivePct !== null && metrics.fivePct >= 70
+                ? "warning"
+                : "muted"
+          fiveCol = theme.fg(
+            fiveColor,
+            metrics.fivePct !== null ? `${metrics.fivePct}%`.padStart(7) : "   未知".padStart(7),
+          )
+
+          const weekColor =
+            metrics.weekPct !== null && metrics.weekPct >= 90
+              ? "error"
+              : metrics.weekPct !== null && metrics.weekPct >= 70
+                ? "warning"
+                : "muted"
+          weekCol = theme.fg(
+            weekColor,
+            metrics.weekPct !== null ? `${metrics.weekPct}%`.padStart(7) : "   未知".padStart(7),
+          )
+        } else {
+          availCol = theme.fg("dim", "--".padStart(10))
+          totalCol = theme.fg("dim", "--".padStart(9))
+          fiveCol = theme.fg("dim", "--".padStart(7))
+          weekCol = theme.fg("dim", "--".padStart(7))
+        }
+
+        const label = `${paddedName} ${statusTag} ${availCol}  ${totalCol}  ${fiveCol} ${weekCol}`
         const stateLine = cooldown
           ? `冷却中：${resetLabel(cooldown.recheckAt).replace("后重置", "后可重新核验")}（不保证恢复）`
           : current
             ? "当前粘性账号"
             : "备用账号"
-        return { value: label, label, detail: [stateLine, ...quota.detail] }
+        return { value: account.id, label, detail: [stateLine, ...quota.detail] }
       })
-      const rows = accountItems.map((item) => item.value)
+      const rows = draft.accounts.map((a) => a.id)
       let totalBalance = 0,
         totalRecentAvailable = 0,
         knownBalances = 0
