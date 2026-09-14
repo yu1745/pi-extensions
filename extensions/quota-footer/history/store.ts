@@ -1,8 +1,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { QuotaHistoryPoint, QuotaHistoryStore } from "../types.js";
-import { shortHash } from "../utils.js";
+import type { QuotaHistoryPoint, QuotaHistoryStore } from "../types.ts";
+import { shortHash } from "../utils.ts";
 
 export function getHistoryFilePath(): string {
 	const dir = path.join(os.homedir(), ".pi", "agent");

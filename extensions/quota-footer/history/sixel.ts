@@ -1,4 +1,4 @@
-import type { QuotaHistoryPoint } from "../types.js";
+import type { QuotaHistoryPoint } from "../types.ts";
 
 export function formatShortDateTime(ts: number): string {
 	const d = new Date(ts);
@@ -19,7 +19,7 @@ export function formatDurationHrs(ms: number): string {
 export function generateSixelChart(
 	points: QuotaHistoryPoint[],
 	widthPx = 1120,
-	heightPx = 420,
+	heightPx = 540,
 ): string {
 	const buffer = new Uint8Array(widthPx * heightPx);
 	const minTime = points[0].timestamp;
@@ -77,11 +77,11 @@ export function generateSixelChart(
 		top + Math.round((1 - Math.max(0, Math.min(100, percent)) / 100) * plotHeight);
 
 	// Dashed grid underneath the curve; area fill preserves these pixels.
-	// Horizontal lines every 12.5%, vertical lines at quarter-time intervals.
+	// Horizontal lines every 10%, vertical lines at quarter-time intervals.
 	const dashLength = 8,
 		dashPeriod = 14;
-	for (let step = 1; step <= 8; step++) {
-		const y = yFor(step * 12.5);
+	for (let step = 1; step <= 9; step++) {
+		const y = yFor(step * 10);
 		for (let x = left + 1; x <= right; x++) {
 			if ((x - left) % dashPeriod < dashLength) pixel(x, y, 1);
 		}
@@ -130,7 +130,7 @@ export function generateSixelChart(
 	// Axes and tick labels are painted last so the area fill cannot cover them.
 	for (let y = top; y <= bottom; y++) pixel(left, y, 4);
 	for (let x = left; x <= right; x++) pixel(x, bottom, 4);
-	for (const percent of [0, 25, 50, 75, 100]) {
+	for (let percent = 0; percent <= 100; percent += 10) {
 		const y = yFor(percent);
 		for (let x = left - 4; x < left; x++) pixel(x, y, 4);
 		const label = `${percent}%`;

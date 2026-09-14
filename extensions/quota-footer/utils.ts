@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { FailureState, ProviderConfig } from "./types.js";
+import type { FailureState, ProviderConfig } from "./types.ts";
 
 export const REQUEST_TIMEOUT_MS = 5000;
 export const RATE_LIMIT_RETRY_TTL_MS = 180_000;

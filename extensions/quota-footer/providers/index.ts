@@ -1,10 +1,10 @@
-import type { ProviderConfig } from "../types.js";
-import { antigravityProviderConfig } from "./antigravity.js";
-import { codexProviderConfig } from "./codex.js";
-import { commandCodeProviderConfig } from "./commandcode.js";
-import { deepseekProviderConfig } from "./deepseek.js";
-import { glmProviderConfig } from "./glm.js";
-import { minimaxProviderConfig } from "./minimax.js";
+import type { ProviderConfig } from "../types.ts";
+import { antigravityProviderConfig } from "./antigravity.ts";
+import { codexProviderConfig } from "./codex.ts";
+import { commandCodeProviderConfig } from "./commandcode.ts";
+import { deepseekProviderConfig } from "./deepseek.ts";
+import { glmProviderConfig } from "./glm.ts";
+import { minimaxProviderConfig } from "./minimax.ts";
 
 export const CONFIGS: Record<string, ProviderConfig> = {
 	deepseek: deepseekProviderConfig,

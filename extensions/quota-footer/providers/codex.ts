@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { FetchResult, ProviderConfig } from "../types.js";
-import { asFiniteNumber, bar, calcDelta, clampPercent, colorFor, deltaColor, formatReset, REQUEST_TIMEOUT_MS } from "../utils.js";
+import type { FetchResult, ProviderConfig } from "../types.ts";
+import { asFiniteNumber, bar, calcDelta, clampPercent, colorFor, deltaColor, formatReset, REQUEST_TIMEOUT_MS } from "../utils.ts";
 
 const CODEX_URL = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_LOW_THRESHOLD = 30;

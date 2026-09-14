@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { FetchResult, ProviderConfig } from "../types.js";
-import { asFiniteNumber, bar, colorFor, REQUEST_TIMEOUT_MS } from "../utils.js";
+import type { FetchResult, ProviderConfig } from "../types.ts";
+import { asFiniteNumber, bar, colorFor, REQUEST_TIMEOUT_MS } from "../utils.ts";
 
 const DS_URLS = ["https://api.deepseek.com/user/balance"] as const;
 const DS_LOW_THRESHOLD_CNY = 1.0;

@@ -1,12 +1,12 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { resolveCommandCodeDisplayKey } from "../commandcode/src/active-account.ts";
-import { SixelChartEntryComponent } from "./history/chart-component.js";
-import { formatShortDateTime, generateSixelChart } from "./history/sixel.js";
-import { getStorageKey, loadHistory, recordQuotaChange } from "./history/store.js";
-import { CONFIGS } from "./providers/index.js";
-import type { FetchResult, ProviderConfig, SixelChartEntryData } from "./types.js";
-import { cacheKey, ERROR_RETRY_TTL_MS, formatReset, RATE_LIMIT_RETRY_TTL_MS, renderFailure } from "./utils.js";
+import { SixelChartEntryComponent } from "./history/chart-component.ts";
+import { formatShortDateTime, generateSixelChart } from "./history/sixel.ts";
+import { getStorageKey, loadHistory, recordQuotaChange } from "./history/store.ts";
+import { CONFIGS } from "./providers/index.ts";
+import type { FetchResult, ProviderConfig, SixelChartEntryData } from "./types.ts";
+import { cacheKey, ERROR_RETRY_TTL_MS, formatReset, RATE_LIMIT_RETRY_TTL_MS, renderFailure } from "./utils.ts";
 
 const STATUS_KEY = "quota";
 
@@ -171,7 +171,7 @@ export default function (pi: ExtensionAPI): void {
 		const footer = `   ${theme.fg("dim", `[100% ──── 0%]   时间范围: ${startLabel}  至  ${endLabel}`)}`;
 
 		// Leave room for the percentage axis and two-line date/time ticks.
-		const chartHeight = 420;
+		const chartHeight = 540;
 		const sixel = generateSixelChart(data.points, 1120, chartHeight);
 
 		return new SixelChartEntryComponent(sixel, header, footer, chartHeight);

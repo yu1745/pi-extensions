@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { FetchResult, ProviderConfig } from "../types.js";
+import type { FetchResult, ProviderConfig } from "../types.ts";
 import {
 	asFiniteNumber,
 	bar,
@@ -10,7 +10,7 @@ import {
 	FIVE_HOUR_WINDOW_MS,
 	formatReset,
 	WEEK_MS,
-} from "../utils.js";
+} from "../utils.ts";
 
 const CC_DEFAULT_BASE = "https://api.commandcode.ai";
 const CC_TIMEOUT_MS = 8000;

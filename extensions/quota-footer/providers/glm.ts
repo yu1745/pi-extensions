@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { FetchResult, ProviderConfig } from "../types.js";
+import type { FetchResult, ProviderConfig } from "../types.ts";
 import {
 	asFiniteNumber,
 	bar,
@@ -11,7 +11,7 @@ import {
 	formatReset,
 	REQUEST_TIMEOUT_MS,
 	WEEK_MS,
-} from "../utils.js";
+} from "../utils.ts";
 
 const GLM_URLS = [
 	"https://open.bigmodel.cn/api/monitor/usage/quota/limit",
