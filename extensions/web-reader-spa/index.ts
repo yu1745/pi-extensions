@@ -111,6 +111,12 @@ let context: AnyContext | null = null;
 let activeChannel = "";
 let viaCdp = false;
 let opening: Promise<void> | null = null;
+// Token for the launch that `opening` currently refers to (see ensureBrowser).
+let openingToken: object | null = null;
+// Bumped by closeBrowser(). A browser launch that was already in flight when a
+// session shut down must not publish its handles afterwards, or the process
+// would be orphaned with no reference left to close it.
+let generation = 0;
 
 function contextOpts() {
   return {
@@ -128,7 +134,19 @@ async function ensureBrowser(): Promise<AnyContext> {
     await opening;
     if (context) return context;
   }
-  opening = (async () => {
+  const myGeneration = generation;
+  // Unique token identifying this launch, so the finally block can tell whether
+  // `opening` still refers to us and avoid clobbering a newer launch.
+  const token = { generation: myGeneration };
+  let started: Promise<void>;
+  started = (async () => {
+    // Launch into locals and publish only at the end: if session_shutdown runs
+    // while we are starting up, the half-built browser is closed here instead of
+    // being written into the module-level handles.
+    let launched: AnyBrowser | null = null;
+    let launchedContext: AnyContext | null = null;
+    let channel = "";
+    let isCdp = false;
     try {
       let chromium: any;
       try {
@@ -142,49 +160,80 @@ async function ensureBrowser(): Promise<AnyContext> {
 
       if (CDP) {
         log("connecting over CDP:", CDP);
-        browser = (await chromium.connectOverCDP(CDP)) as AnyBrowser;
-        viaCdp = true;
-        activeChannel = "cdp";
-        context = browser.contexts()[0] || (await browser.newContext(contextOpts()));
+        launched = (await chromium.connectOverCDP(CDP)) as AnyBrowser;
+        isCdp = true;
+        channel = "cdp";
+        launchedContext = launched.contexts()[0] || (await launched.newContext(contextOpts()));
       } else {
         let lastErr: unknown;
         for (const ch of channelList()) {
           try {
             log("launching channel:", ch || "bundled-chromium", "headless:", !HEADED);
-            browser = (await chromium.launch({
+            launched = (await chromium.launch({
               ...(ch ? { channel: ch } : {}),
               headless: !HEADED,
               args: LAUNCH_ARGS,
             })) as AnyBrowser;
-            activeChannel = ch || "chromium";
+            channel = ch || "chromium";
             break;
           } catch (e) {
             lastErr = e;
             log("channel unavailable:", ch || "bundled", "=>", (e as Error).message);
           }
         }
-        if (!browser) throw lastErr;
-        context = await browser.newContext(contextOpts());
+        if (!launched) throw lastErr;
+        launchedContext = await launched.newContext(contextOpts());
       }
 
-      await context!.addInitScript(stealth);
+      await launchedContext!.addInitScript(stealth);
+
+      if (myGeneration !== generation) {
+        // The session that asked for this browser is gone; close it rather than
+        // leaking an unreferenced Chromium process.
+        await launched.close().catch(() => {});
+        return;
+      }
+
+      browser = launched;
+      context = launchedContext;
+      activeChannel = channel;
+      viaCdp = isCdp;
       log("ready. channel:", activeChannel, "cdp:", viaCdp);
     } finally {
-      opening = null;
+      // Only clear our own marker: closeBrowser() may have replaced it with a
+      // newer launch's promise, which must stay awaitable by other callers.
+      if (openingToken === token) {
+        opening = null;
+        openingToken = null;
+      }
     }
   })();
-  await opening;
+  opening = started;
+  openingToken = token;
+  await started;
   if (!context) throw new Error("Failed to start browser");
   return context;
 }
 
 async function closeBrowser() {
+  // Invalidate any in-flight launch BEFORE awaiting it: the starter sees the
+  // generation change and closes its own browser instead of publishing it.
+  generation += 1;
   const b = browser;
+  const inFlight = opening;
   context = null;
   browser = null;
   activeChannel = "";
   viaCdp = false;
   opening = null;
+  openingToken = null;
+  if (inFlight) {
+    try {
+      await inFlight;
+    } catch {
+      /* the launch failed; nothing to close */
+    }
+  }
   if (b) {
     try {
       await b.close();
