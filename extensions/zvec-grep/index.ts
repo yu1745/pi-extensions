@@ -88,9 +88,25 @@ const FallbackSearchParameters = Type.Object({
   autoUpdate: Type.Optional(Type.Boolean({ description: "Allow eventual search to schedule a background update." })),
 });
 
-let client: ZvecMcpClient | undefined;
-let clientPromise: Promise<ZvecMcpClient> | undefined;
-let registered = false;
+/**
+ * Per-session-generation state.
+ *
+ * pi re-invokes the extension factory for every session runtime (startup,
+ * /reload, /new, /resume, /fork), but only /reload clears the ESM module
+ * cache. Module-level mutable state therefore leaks across /new, /resume and
+ * /fork: a stale MCP session id would be reused (server replies 404 "Unknown
+ * or expired MCP session"), and the `registered` flag would suppress tool
+ * registration in the fresh runtime, making zvec_grep_search disappear.
+ * Keep this state in the factory closure and tear it down in session_shutdown.
+ */
+interface ZvecSessionState {
+  client?: ZvecMcpClient;
+  clientPromise?: Promise<ZvecMcpClient>;
+  registered: boolean;
+}
+
+// These caches are safe at module scope: they are keyed by workspace root and
+// hold idempotent, path-addressed facts (auth grants, rg type lists).
 const grantedWorkspaces = new Set<string>();
 const rgTypeMaps = new Map<string, Promise<Map<string, string[]>>>();
 
@@ -232,6 +248,29 @@ class ZvecMcpClient {
   async callTool(name: string, arguments_: JsonObject, signal: AbortSignal | undefined): Promise<JsonObject> {
     return await this.request("tools/call", { name, arguments: arguments_ }, signal) as JsonObject;
   }
+
+  /**
+   * Terminate this MCP session server-side so the daemon can release it.
+   * Without this the daemon keeps every session until its idle TTL expires,
+   * and repeated reloads eventually hit its session limit.
+   */
+  async close(): Promise<void> {
+    if (!this.sessionId) return;
+    // Build headers before clearing the id: they carry Mcp-Session-Id, which
+    // the daemon needs to identify the session being terminated.
+    const headers = await this.headers();
+    this.sessionId = "";
+    this.initialized = false;
+    try {
+      await fetch(MCP_ENDPOINT, {
+        method: "DELETE",
+        headers,
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch {
+      // The daemon may already be gone or have expired the session; nothing to do.
+    }
+  }
 }
 
 async function ensureServer(pi: ExtensionAPI, signal: AbortSignal | undefined): Promise<void> {
@@ -245,20 +284,41 @@ async function ensureServer(pi: ExtensionAPI, signal: AbortSignal | undefined): 
   if (started.code !== 0) throw new Error(`Unable to start zvec-grep server:\n${output(started)}`);
 }
 
-async function getClient(pi: ExtensionAPI, signal: AbortSignal | undefined): Promise<ZvecMcpClient> {
-  if (client) return client;
-  if (!clientPromise) {
-    clientPromise = (async () => {
+async function getClient(
+  pi: ExtensionAPI,
+  state: ZvecSessionState,
+  signal: AbortSignal | undefined,
+): Promise<ZvecMcpClient> {
+  if (state.client) return state.client;
+  let pending = state.clientPromise;
+  if (!pending) {
+    pending = (async () => {
       await ensureServer(pi, signal);
       const next = new ZvecMcpClient();
       await next.initializeWithHeaders(signal);
-      client = next;
+      state.client = next;
       return next;
-    })().finally(() => {
-      clientPromise = undefined;
-    });
+    })();
+    state.clientPromise = pending;
+    // Only clear the in-flight marker for the generation that owns it.
+    void pending.finally(() => {
+      if (state.clientPromise === pending) state.clientPromise = undefined;
+    }).catch(() => undefined);
   }
-  return clientPromise;
+  return pending;
+}
+
+/**
+ * Release every session-scoped MCP resource owned by one generation.
+ * Idempotent: safe to call when nothing was ever opened.
+ */
+async function disposeSession(state: ZvecSessionState): Promise<void> {
+  const pending = state.clientPromise;
+  const existing = state.client;
+  state.client = undefined;
+  state.clientPromise = undefined;
+  const client = existing ?? (await pending?.catch(() => undefined));
+  await client?.close().catch(() => undefined);
 }
 
 async function grantWorkspace(pi: ExtensionAPI, root: string, signal: AbortSignal | undefined): Promise<void> {
@@ -426,6 +486,7 @@ function hasMcpError(result: JsonObject): boolean {
 
 async function authorizeAndCall(
   pi: ExtensionAPI,
+  state: ZvecSessionState,
   params: unknown,
   signal: AbortSignal | undefined,
   ctxCwd: string,
@@ -439,13 +500,19 @@ async function authorizeAndCall(
   await grantWorkspace(pi, root, signal);
   onUpdate?.({ content: [{ type: "text", text: "zvec-grep MCP: searching…" }], details: {} });
 
-  const mcp = await getClient(pi, signal);
+  const mcp = await getClient(pi, state, signal);
   try {
     return await mcp.callTool("zvec_grep_search", args, signal);
   } catch (error) {
     // One reconnect handles a daemon restart or an expired MCP session.
-    client = undefined;
-    const recovered = await getClient(pi, signal);
+    // Retire the failed client first so it cannot be handed out again, and so
+    // its MCP session is released when the daemon is still reachable.
+    state.client = undefined;
+    state.clientPromise = undefined;
+    // Release the retired session, but never block recovery on it: the daemon
+    // may be unreachable or slow, and the search must not wait for cleanup.
+    void mcp.close();
+    const recovered = await getClient(pi, state, signal);
     return await recovered.callTool("zvec_grep_search", args, signal).catch(() => {
       throw error;
     });
@@ -478,9 +545,9 @@ function adaptMcpSchema(schema: JsonObject): JsonObject {
   return copy;
 }
 
-function registerSearch(pi: ExtensionAPI, tool: McpTool | undefined): void {
-  if (registered) return;
-  registered = true;
+function registerSearch(pi: ExtensionAPI, state: ZvecSessionState, tool: McpTool | undefined): void {
+  if (state.registered) return;
+  state.registered = true;
   const parameters = tool?.inputSchema
     ? Type.Unsafe(adaptMcpSchema(tool.inputSchema) as never)
     : FallbackSearchParameters;
@@ -498,7 +565,7 @@ function registerSearch(pi: ExtensionAPI, tool: McpTool | undefined): void {
     ],
     parameters,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      const result = await authorizeAndCall(pi, params, signal, ctx.cwd, onUpdate);
+      const result = await authorizeAndCall(pi, state, params, signal, ctx.cwd, onUpdate);
       if (hasMcpError(result)) throw new Error(mcpText(result));
       const bounded = await boundedMcpText(result);
       return {
@@ -515,18 +582,30 @@ function registerSearch(pi: ExtensionAPI, tool: McpTool | undefined): void {
 }
 
 export default function zvecGrepMcpExtension(pi: ExtensionAPI) {
+  // One state object per session generation. Because the factory is re-invoked
+  // for /new, /resume and /fork while the module cache survives, this is what
+  // keeps each generation's MCP session and tool registration independent.
+  const state: ZvecSessionState = { registered: false };
+
   // Discover the author's live MCP schema before the first agent turn. If the
   // daemon is temporarily unavailable, the compact documented schema keeps
   // the tool available and the call path retries the daemon later.
   pi.on("session_start", async (_event, ctx) => {
     try {
-      const mcp = await getClient(pi, ctx.signal);
+      const mcp = await getClient(pi, state, ctx.signal);
       const tools = await mcp.listTools(ctx.signal);
-      registerSearch(pi, tools.find((candidate) => candidate.name === "zvec_grep_search"));
+      registerSearch(pi, state, tools.find((candidate) => candidate.name === "zvec_grep_search"));
     } catch (error) {
-      registerSearch(pi, undefined);
+      registerSearch(pi, state, undefined);
       if (ctx.hasUI) ctx.ui.notify(`zvec-grep MCP unavailable at startup; will retry on search (${String(error).slice(0, 160)})`, "warning");
     }
+  });
+
+  // pi tears a session down on /reload, /new, /resume and /fork. Release this
+  // generation's MCP session so the daemon is not left holding it, and drop the
+  // per-generation state so nothing stale can be reused.
+  pi.on("session_shutdown", async () => {
+    await disposeSession(state);
   });
 
 }
