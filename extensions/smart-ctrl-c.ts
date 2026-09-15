@@ -10,9 +10,24 @@ const ALT_WHEEL_MULTIPLIER = 5;
 /** Guards against re-patching when the extension is reloaded (jiti uses moduleCache: false). */
 const WHEEL_PATCHED = Symbol.for("yu1745.pi-extensions.smart-ctrl-c.wheel");
 
+/**
+ * Same reload guard for the Ctrl+C patch below.
+ *
+ * It must live on the prototype, not in a module-level `let`: /reload re-evaluates
+ * this module (which resets module state) but keeps the shared CustomEditor
+ * prototype, so a module-level flag would let the wrapper be installed again on
+ * every reload, stacking one layer per reload.
+ */
+const CTRL_C_PATCHED = Symbol.for("yu1745.pi-extensions.smart-ctrl-c.ctrl-c");
+
 type WheelScrollProto = {
   getWheelScrollLines(button: number): number;
   [WHEEL_PATCHED]?: boolean;
+};
+
+type CtrlCProto = {
+  handleInput(data: string): unknown;
+  [CTRL_C_PATCHED]?: boolean;
 };
 
 /**
@@ -34,15 +49,14 @@ function installWheelScrollPatch(): void {
   proto[WHEEL_PATCHED] = true;
 }
 
-let patched = false;
-
 export default function (pi: ExtensionAPI) {
-  if (patched) return;
-  patched = true;
-
   // Install at load time: wheel input is consumed by TuiAltScreen's own input
   // listener, so it never reaches CustomEditor.handleInput.
   installWheelScrollPatch();
+
+  const proto = CustomEditor.prototype as unknown as CtrlCProto;
+  if (proto[CTRL_C_PATCHED]) return;
+  proto[CTRL_C_PATCHED] = true;
 
   const originalHandleInput = CustomEditor.prototype.handleInput;
 
