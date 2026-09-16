@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { Platform } from "../types/enums.js";
 import {
   getCurrentAvailableModels,
   getCurrentEndpoint,
@@ -60,36 +59,67 @@ export function endpointCandidates(): string[] {
   return explicit ? [assertSafeApiBaseUrl(explicit)] : ENDPOINT_FALLBACKS;
 }
 
-const DEFAULT_ANTIGRAVITY_VERSION = "2.8.0";
-const DEFAULT_ANTIGRAVITY_CL = "963137146";
+/**
+ * Client identity published by agy 1.2.4. Captured verbatim from the CLI's own traffic:
+ *   `antigravity/cli/1.2.4 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)`
+ * The CLI sends only User-Agent + Content-Type (+ auth); it has no X-Goog-Api-Client and
+ * no Client-Metadata header, so this provider no longer fabricates them.
+ */
+const DEFAULT_ANTIGRAVITY_CLI_VERSION = "1.2.4";
+const DEFAULT_ANTIGRAVITY_CL = "982146307";
+
+function platformOsType(): string {
+  if (process.platform === "darwin") return "darwin";
+  if (process.platform === "win32") return "windows";
+  return "linux";
+}
+
+function platformArch(): string {
+  if (process.arch === "arm64") return "arm64";
+  if (process.arch === "ia32") return "ia32";
+  return "amd64";
+}
 
 function defaultUserAgent(): string {
-  const version = antigravityEnv("HUB_VERSION") || DEFAULT_ANTIGRAVITY_VERSION;
-  const cl = antigravityEnv("HUB_CL") || DEFAULT_ANTIGRAVITY_CL;
-  const os = antigravityEnv("HUB_OS") || "darwin";
-  const arch = antigravityEnv("HUB_ARCH") || "arm64";
-  return `antigravity/hub/${version} (aidev_client; os_type=${os}; arch=${arch}; cl=${cl})`;
+  const version =
+    antigravityEnv("CLI_VERSION") ||
+    antigravityEnv("HUB_VERSION") ||
+    DEFAULT_ANTIGRAVITY_CLI_VERSION;
+  const cl = antigravityEnv("CL") || antigravityEnv("HUB_CL") || DEFAULT_ANTIGRAVITY_CL;
+  const os = antigravityEnv("OS_TYPE") || antigravityEnv("HUB_OS") || platformOsType();
+  const arch = antigravityEnv("ARCH") || antigravityEnv("HUB_ARCH") || platformArch();
+  return `antigravity/cli/${version} (aidev_client; os_type=${os}; arch=${arch}; cl=${cl}; auth_method=consumer)`;
 }
 
 export function antigravityHeaders(token: string): Record<string, string> {
-  const platform =
-    process.platform === "darwin"
-      ? Platform.Macos
-      : process.platform === "win32"
-        ? Platform.Windows
-        : Platform.Linux;
   return {
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
     Accept: "text/event-stream",
     "User-Agent": antigravityEnv("USER_AGENT") || defaultUserAgent(),
-    "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
-    "Client-Metadata": JSON.stringify({
-      ideType: "ANTIGRAVITY",
-      platform,
-      pluginType: "GEMINI",
-    }),
   };
+}
+
+/**
+ * agy 1.2.x registers the trajectory with the backend before streaming
+ * (`v1internal:writeTrajectoryAcls`, body `{"trajectoryId":"..."}`).
+ * Best-effort: the stream works without it, so failures are swallowed.
+ * Opt out with ANTIGRAVITY_NO_TRAJECTORY_ACLS=1.
+ */
+export async function writeTrajectoryAcls(token: string, trajectoryId: string): Promise<void> {
+  if (antigravityEnv("NO_TRAJECTORY_ACLS") === "1") return;
+  const endpoint = endpointCandidates()[0];
+  if (!endpoint) return;
+  try {
+    await antigravityFetch(`${endpoint}/v1internal:writeTrajectoryAcls`, {
+      method: "POST",
+      headers: antigravityHeaders(token),
+      body: JSON.stringify({ trajectoryId }),
+      signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
+    });
+  } catch {
+    // Discovery-class RPC: never block or fail the model call on it.
+  }
 }
 
 export function jsonOrTextError(text: string): string {
@@ -392,13 +422,8 @@ export function clearModelCache(): void {
 }
 
 async function loadCodeAssistUncached(token: string): Promise<string | undefined> {
-  const body = JSON.stringify({
-    metadata: {
-      ideType: "ANTIGRAVITY",
-      platform: "PLATFORM_UNSPECIFIED",
-      pluginType: "GEMINI",
-    },
-  });
+  // agy 1.2.x sends only ideType; platform/pluginType were dropped from the request.
+  const body = JSON.stringify({ metadata: { ideType: "ANTIGRAVITY" } });
 
   for (const endpoint of endpointCandidates()) {
     try {

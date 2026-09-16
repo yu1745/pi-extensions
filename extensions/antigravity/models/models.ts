@@ -8,11 +8,10 @@ export const PROVIDER_NAME = "Antigravity";
 /**
  * Public selectable model IDs → backend request model IDs by thinking effort.
  *
- * Catalog mirrors `agy models` (Antigravity CLI), which currently advertises:
+ * Catalog mirrors `agy models` (Antigravity CLI 1.2.4), which advertises:
  * - Gemini 3.8 Flash (Low / Medium / High)
  * - Gemini 3.7 Flash (Low / Medium / High)
  * - Gemini 3.6 Flash (Low / Medium / High)
- * - Gemini 3.5 Flash (Low / Medium / High)
  * - Gemini 3.1 Pro (Low / High)
  * - Claude Sonnet 4.6 (Thinking)
  * - Claude Opus 4.6 (Thinking)
@@ -90,17 +89,6 @@ export const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
     },
     defaultRequestId: "gemini-3.6-flash-low",
   },
-  "gemini-3.5-flash": {
-    off: "gemini-3.5-flash-extra-low",
-    routing: {
-      minimal: "gemini-3.5-flash-extra-low",
-      low: "gemini-3.5-flash-extra-low",
-      medium: "gemini-3.5-flash-low",
-      high: "gemini-3-flash-agent",
-      xhigh: "gemini-3-flash-agent",
-    },
-    defaultRequestId: "gemini-3.5-flash-extra-low",
-  },
   "gpt-oss-120b": {
     off: "gpt-oss-120b-medium",
     routing: {
@@ -166,7 +154,6 @@ export function getMaxOutputTokens(modelId: string, runtimeModel?: string): numb
 
 // Pricing per million tokens (matches official Google / Anthropic / OpenAI catalog rates)
 const costGeminiFlash = { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 };
-const costGemini35Flash = { input: 1.5, output: 9, cacheRead: 0.15, cacheWrite: 0 };
 const costGemini31Pro = { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 };
 const costClaudeOpus46 = { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 };
 const costClaudeSonnet46 = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 };
@@ -276,16 +263,6 @@ export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
     maxTokens: 65535,
   },
   {
-    id: "gemini-3.5-flash",
-    name: "Gemini 3.5 Flash (Antigravity)",
-    reasoning: true,
-    thinkingLevelMap: thinkingLevelMaps.lowMediumHigh,
-    input: ["text", "image"],
-    cost: costGemini35Flash,
-    contextWindow: 1048576,
-    maxTokens: 65536,
-  },
-  {
     id: "gpt-oss-120b",
     name: "GPT-OSS 120B (Antigravity)",
     reasoning: true,
@@ -363,19 +340,42 @@ export type ThinkingWire = {
   thinkingBudget?: number;
 };
 
+/**
+ * Runtime model id → backend `labels.model_enum`.
+ *
+ * Captured from agy 1.2.4 `v1internal:streamGenerateContent` traffic for every model
+ * `agy models` advertises. A runtime id that is absent here sends no `model_enum` rather
+ * than a guessed routing value.
+ */
 export const ANTIGRAVITY_MODEL_ENUM: Record<string, string> = {
-  "gemini-3.5-flash-extra-low": "MODEL_PLACEHOLDER_M187",
-  "gemini-3.5-flash-low": "MODEL_PLACEHOLDER_M20",
-  "gemini-3-flash-agent": "MODEL_PLACEHOLDER_M132",
+  "gemini-3.8-flash-low": "MODEL_PLACEHOLDER_M320",
+  "gemini-3.8-flash-medium": "MODEL_PLACEHOLDER_M319",
+  "gemini-3.8-flash-high": "MODEL_PLACEHOLDER_M318",
+  "gemini-3.7-flash-low": "MODEL_PLACEHOLDER_M300",
+  "gemini-3.7-flash-medium": "MODEL_PLACEHOLDER_M299",
+  "gemini-3.7-flash-high": "MODEL_PLACEHOLDER_M298",
+  "gemini-3.6-flash-low": "MODEL_PLACEHOLDER_M73",
+  "gemini-3.6-flash-medium": "MODEL_PLACEHOLDER_M72",
+  "gemini-3.6-flash-high": "MODEL_PLACEHOLDER_M71",
   "gemini-3.1-pro-low": "MODEL_PLACEHOLDER_M36",
   "gemini-pro-agent": "MODEL_PLACEHOLDER_M16",
+  "claude-sonnet-4-6": "MODEL_PLACEHOLDER_M35",
+  "claude-opus-4-6-thinking": "MODEL_PLACEHOLDER_M26",
+  "gpt-oss-120b-medium": "MODEL_OPENAI_GPT_OSS_120B_MEDIUM",
 };
 
-function googleLevel(effort: string | undefined): GeminiThinkingLevel {
-  if (effort === "high" || effort === "xhigh") return "HIGH";
-  if (effort === "medium") return "MEDIUM";
-  return "LOW";
-}
+/**
+ * Thinking budgets captured from agy 1.2.4 traffic per runtime model. The CLI drives
+ * Gemini 3.6/3.7/3.8 Flash and Gemini 3.1 Pro with `thinkingBudget` (not `thinkingLevel`);
+ * `-1` means dynamic/unbounded. Claude and GPT-OSS get a fixed budget.
+ */
+const GEMINI_FLASH_THINKING_BUDGET: Record<string, number> = {
+  minimal: 1000,
+  low: 1000,
+  medium: 4000,
+  high: -1,
+  xhigh: -1,
+};
 
 export function getThinkingConfig(
   modelId: string,
@@ -386,13 +386,10 @@ export function getThinkingConfig(
     modelId === "gemini-3.7-flash" ||
     modelId === "gemini-3.6-flash"
   ) {
-    return { includeThoughts: true, thinkingLevel: googleLevel(effort) };
-  }
-  if (modelId === "gemini-3.5-flash") {
-    if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
-    const thinkingBudget =
-      effort === "high" || effort === "xhigh" ? 10_000 : effort === "medium" ? 4_000 : 1_000;
-    return { includeThoughts: true, thinkingBudget };
+    return {
+      includeThoughts: true,
+      thinkingBudget: GEMINI_FLASH_THINKING_BUDGET[effort ?? "low"] ?? 1000,
+    };
   }
   if (modelId === "gemini-3.1-pro") {
     if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
@@ -400,6 +397,14 @@ export function getThinkingConfig(
       includeThoughts: true,
       thinkingBudget: effort === "high" || effort === "xhigh" ? 10_001 : 1_001,
     };
+  }
+  // Claude Sonnet/Opus 4.6 route through the "(Thinking)" variants: agy always asks for
+  // a small fixed budget, and the model decides how much of it to use.
+  if (modelId.startsWith("claude-")) {
+    return { includeThoughts: true, thinkingBudget: 1024 };
+  }
+  if (modelId === "gpt-oss-120b") {
+    return { includeThoughts: true, thinkingBudget: 8192 };
   }
   return undefined;
 }

@@ -31,17 +31,20 @@ export function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export function nowRequestId(): string {
-  return antigravityRequestEnvelope("unknown", false).requestId;
-}
-
 export type AntigravityRequestIdentity = {
   sessionId: string;
   trajectoryId: string;
-  step: number;
+  /** 1-based index of this model call inside the trajectory (agy's `request_id` suffix is callIndex - 1). */
+  callIndex: number;
+  /** True only for the first model call of a freshly created trajectory. */
+  isNewTrajectory: boolean;
 };
 
-type TrajectoryState = Omit<AntigravityRequestIdentity, "step"> & { lastStep: number };
+type TrajectoryState = {
+  sessionId: string;
+  trajectoryId: string;
+  lastCallIndex: number;
+};
 
 const contextStates = new WeakMap<Context, Map<string, TrajectoryState>>();
 const explicitStates = new Map<string, TrajectoryState>();
@@ -90,7 +93,7 @@ export function prepareAntigravityRequestIdentity(
     state = getExplicitState(key, () => ({
       sessionId: explicitSessionId,
       trajectoryId,
-      lastStep: 1,
+      lastCallIndex: 0,
     }));
   } else {
     let states = contextStates.get(context);
@@ -106,14 +109,19 @@ export function prepareAntigravityRequestIdentity(
       state = {
         sessionId: randomSessionId(),
         trajectoryId: explicitTrajectoryId || crypto.randomUUID(),
-        lastStep: 1,
+        lastCallIndex: 0,
       };
       states.set(key, state);
     }
   }
 
-  state.lastStep += 1;
-  return { sessionId: state.sessionId, trajectoryId: state.trajectoryId, step: state.lastStep };
+  state.lastCallIndex += 1;
+  return {
+    sessionId: state.sessionId,
+    trajectoryId: state.trajectoryId,
+    callIndex: state.lastCallIndex,
+    isNewTrajectory: state.lastCallIndex === 1,
+  };
 }
 
 /** Backward-compatible identity lookup; does not advance the trajectory step. */
@@ -128,41 +136,59 @@ export function deriveStableContextIds(context: Context): {
   }
   let state = states.get("default");
   if (!state) {
-    state = { sessionId: randomSessionId(), trajectoryId: crypto.randomUUID(), lastStep: 1 };
+    state = { sessionId: randomSessionId(), trajectoryId: crypto.randomUUID(), lastCallIndex: 0 };
     states.set("default", state);
   }
   return { sessionId: state.sessionId, trajectoryId: state.trajectoryId };
 }
 
+/**
+ * Build the per-request envelope exactly as agy 1.2.x does.
+ *
+ * Measured against agy 1.2.4 (`streamGenerateContent`, requestType=agent):
+ * ```
+ * requestId: agent/<conversationId>/<epoch_ms>/<trajectoryId>/<step>
+ * labels:    last_step_index = step - 1, request_id = <trajectoryId>-<callIndex-1>,
+ *            model_enum, trajectory_id, used_claude, used_claude_conservative,
+ *            used_non_gemini_model
+ * ```
+ * `step` is the number of `contents` entries the request carries (1 on the first turn,
+ * 3 after one tool round-trip, ...); callers pass that in.
+ */
 export function antigravityRequestEnvelope(
-  wireModelId: string,
-  isClaude: boolean,
-  options?: {
-    sessionId?: string;
-    trajectoryId?: string;
-    step?: number;
+  runtimeModel: string,
+  options: {
+    isClaude: boolean;
+    /** Claude *and* GPT-OSS requests are reported as non-Gemini in labels. */
+    isNonGeminiModel?: boolean;
+    sessionId: string;
+    trajectoryId: string;
+    callIndex: number;
+    /** Number of content entries carried by the request; the CLI's `step`. */
+    step: number;
+    /** Conversation id used in the requestId path; defaults to the session id. */
+    conversationId?: string;
   },
 ): { requestId: string; sessionId: string; labels: Record<string, string> } {
-  const agentId = crypto.randomUUID();
-  const trajectoryId = options?.trajectoryId || crypto.randomUUID();
-  const step = options?.step ?? 2;
-  let sessionId = options?.sessionId;
-  if (!sessionId) {
-    const bytes = crypto.getRandomValues(new Uint8Array(8));
-    sessionId = String(new DataView(bytes.buffer, bytes.byteOffset, 8).getBigInt64(0, true));
-  }
-  const usageLabel = isClaude ? "true" : "false";
+  const step = Math.max(1, Math.trunc(options.step) || 1);
+  const callIndex = Math.max(1, Math.trunc(options.callIndex) || 1);
+  const usedClaude = options.isClaude ? "true" : "false";
+  // Verified for every model advertised by `agy models` 1.2.4 (see ANTIGRAVITY_MODEL_ENUM).
+  // A runtime id we have no enum for omits the label instead of guessing a routing value.
+  const modelEnum = ANTIGRAVITY_MODEL_ENUM[runtimeModel];
   const labels: Record<string, string> = {
-    last_step_index: String(Math.max(1, step - 1)),
-    trajectory_id: trajectoryId,
-    used_claude: usageLabel,
-    used_claude_conservative: usageLabel,
+    last_step_index: String(step - 1),
+    ...(modelEnum ? { model_enum: modelEnum } : {}),
+    request_id: `${options.trajectoryId}-${callIndex - 1}`,
+    trajectory_id: options.trajectoryId,
+    used_claude: usedClaude,
+    used_claude_conservative: usedClaude,
+    used_non_gemini_model:
+      options.isClaude || options.isNonGeminiModel === true ? "true" : "false",
   };
-  const modelEnum = ANTIGRAVITY_MODEL_ENUM[wireModelId];
-  if (modelEnum) labels.model_enum = modelEnum;
   return {
-    requestId: `agent/${agentId}/${Date.now()}/${trajectoryId}/${step}`,
-    sessionId,
+    requestId: `agent/${options.conversationId || options.sessionId}/${Date.now()}/${options.trajectoryId}/${step}`,
+    sessionId: options.sessionId,
     labels,
   };
 }

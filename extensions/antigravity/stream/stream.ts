@@ -19,6 +19,7 @@ import {
   loadCodeAssist,
   parseApiKey,
   resolveProjectId,
+  writeTrajectoryAcls,
 } from "../client/client.js";
 import {
   getCurrentEndpoint,
@@ -72,8 +73,11 @@ import {
   sanitizeText,
 } from "../utils/util.js";
 import { antigravityFetch } from "../utils/http.js";
+import { convertTools } from "./schema.js";
 
 export { ANTIGRAVITY_API };
+
+export { convertTools };
 
 const ANTIGRAVITY_SYSTEM_INSTRUCTION =
   "You are Antigravity, a powerful agentic AI coding assistant designed by Google DeepMind. " +
@@ -88,15 +92,6 @@ function sanitizeToolCallId(id: string, fallbackName?: string): string {
   const cleaned = id.replace(/[^a-zA-Z0-9_-]/g, "_");
   const capped = cleaned.slice(0, 64);
   return capped || `${fallbackName || "tool"}_${++toolCallCounter}`;
-}
-
-function toolCallIdNeeded(modelId: string, runtimeModel: string): boolean {
-  return (
-    modelId.startsWith("claude-") ||
-    modelId.startsWith("gpt-oss-") ||
-    runtimeModel.startsWith("claude-") ||
-    runtimeModel.startsWith("gpt-oss-")
-  );
 }
 
 const base64SignaturePattern = /^[A-Za-z0-9+/]+={0,2}$/;
@@ -238,13 +233,12 @@ export function convertMessages(
               droppedToolCallIds.set(`empty:${block.name}`, argsText);
             }
           } else {
+            // agy echoes the backend-issued functionCall id for every model, Gemini included.
             parts.push({
               functionCall: {
                 name: block.name,
                 args: block.arguments ?? {},
-                ...(toolCallIdNeeded(model.id, runtimeModel)
-                  ? { id: sanitizeToolCallId(block.id || "", block.name) }
-                  : {}),
+                id: sanitizeToolCallId(block.id || "", block.name),
               },
               ...(block.thoughtSignature ? { thoughtSignature: block.thoughtSignature } : {}),
             });
@@ -260,9 +254,7 @@ export function convertMessages(
       const responseText = text || (msg.isError ? "Tool failed" : "");
       const imageParts = asImageParts(msg.content);
       const rawId = msg.toolCallId || "";
-      const sanitizedId = toolCallIdNeeded(model.id, runtimeModel)
-        ? sanitizeToolCallId(rawId, msg.toolName)
-        : rawId;
+      const sanitizedId = sanitizeToolCallId(rawId, msg.toolName);
       const droppedArgs = requiresSig
         ? (droppedToolCallIds.get(rawId) ??
           droppedToolCallIds.get(sanitizedId) ??
@@ -280,9 +272,7 @@ export function convertMessages(
           functionResponse: {
             name: msg.toolName,
             response: msg.isError ? { error: responseText } : { output: responseText },
-            ...(toolCallIdNeeded(model.id, runtimeModel)
-              ? { id: sanitizeToolCallId(msg.toolCallId || "", msg.toolName) }
-              : {}),
+            id: sanitizedId,
           },
         };
         appendTurn(contents, GeminiRole.User, [part, ...imageParts]);
@@ -303,162 +293,6 @@ export function convertMessages(
   return contents;
 }
 
-function dereferenceSchema(
-  schema: unknown,
-  rootDefs: Record<string, unknown> = {},
-  visited = new Set<unknown>(),
-): unknown {
-  if (!schema || typeof schema !== "object") return schema;
-  if (Array.isArray(schema)) {
-    return schema.map((item) => dereferenceSchema(item, rootDefs, visited));
-  }
-
-  const s = schema as Record<string, unknown>;
-  if (visited.has(s)) return s;
-  visited.add(s);
-
-  const defs: Record<string, unknown> = { ...rootDefs };
-  if (isRecord(s.$defs)) Object.assign(defs, s.$defs);
-  if (isRecord(s.definitions)) Object.assign(defs, s.definitions);
-
-  if (typeof s.$ref === "string") {
-    const ref = s.$ref;
-    const match = ref.match(/^#\/(?:\$defs|definitions)\/(.+)$/);
-    if (match && match[1] && defs[match[1]] !== undefined) {
-      const resolved = dereferenceSchema(defs[match[1]], defs, visited);
-      if (isRecord(resolved)) {
-        const { $ref: _, ...rest } = s;
-        const restCleaned = dereferenceSchema(rest, defs, visited);
-        return isRecord(restCleaned) ? { ...resolved, ...restCleaned } : resolved;
-      }
-      return resolved;
-    }
-  }
-
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(s)) {
-    out[key] = dereferenceSchema(value, defs, visited);
-  }
-  return out;
-}
-
-function ensureRootObjectSchema(schema: unknown): Record<string, unknown> {
-  if (!isRecord(schema)) {
-    return { type: "object", properties: {} };
-  }
-  if (!schema.type) {
-    return { ...schema, type: "object", properties: schema.properties || {} };
-  }
-  return schema;
-}
-
-function stripMetaSchema(schema: unknown): unknown {
-  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return schema;
-  const omit = new Set([
-    "$schema",
-    "$id",
-    "$anchor",
-    "$dynamicAnchor",
-    "$vocabulary",
-    "$comment",
-    "$defs",
-    "definitions",
-  ]);
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(schema)) {
-    if (!omit.has(key)) out[key] = stripMetaSchema(value);
-  }
-  return out;
-}
-
-/**
- * Protobuf `Schema` fields accepted by Cloud Code Assist's Claude/GPT custom-tool
- * bridge (`parameters` field). Anything else — `nullable`, `anyOf`, `format`,
- * `$ref`, etc. — returns `Unknown name "..."` / Invalid JSON payload (400).
- * Allowlist rather than denylist so new JSON Schema keywords cannot 400 the request.
- * Pi still validates tool args after the model calls them.
- */
-const CUSTOM_TOOL_SCHEMA_ALLOW = new Set([
-  "type",
-  "description",
-  "properties",
-  "required",
-  "items",
-  "enum",
-]);
-
-function normalizeCustomToolType(value: unknown): unknown {
-  if (typeof value === "string") return value;
-  if (!Array.isArray(value)) return undefined;
-  // JSON Schema union types like ["string","null"] → first non-null scalar type.
-  const entries = value as unknown[];
-  const scalar = entries.find(
-    (entry): entry is string => typeof entry === "string" && entry !== "null",
-  );
-  return scalar;
-}
-
-function normalizeCustomToolSchema(schema: unknown): unknown {
-  if (!schema || typeof schema !== "object") return schema;
-  if (Array.isArray(schema)) return schema.map(normalizeCustomToolSchema);
-
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(schema)) {
-    if (!CUSTOM_TOOL_SCHEMA_ALLOW.has(key)) continue;
-    if (key === "type") {
-      const normalizedType = normalizeCustomToolType(value);
-      if (normalizedType !== undefined) out.type = normalizedType;
-      continue;
-    }
-    if (key === "properties" && value && typeof value === "object" && !Array.isArray(value)) {
-      // Property names are user-defined, not Schema keywords — never allowlist-filter them.
-      const props: Record<string, unknown> = {};
-      for (const [propName, propSchema] of Object.entries(value as Record<string, unknown>)) {
-        props[propName] = normalizeCustomToolSchema(propSchema);
-      }
-      out.properties = props;
-      continue;
-    }
-    if (
-      key === "enum" &&
-      Array.isArray(value) &&
-      !value.every((entry) => typeof entry === "string")
-    ) {
-      continue;
-    }
-    out[key] = normalizeCustomToolSchema(value);
-  }
-  return out;
-}
-
-/**
- * Gemini accepts JSON Schema through parametersJsonSchema. Claude and GPT-OSS
- * use Cloud Code Assist's custom-tool bridge, which requires a compatible
- * Draft 2020-12 subset in the legacy parameters field.
- */
-export function convertTools(
-  tools: Tool[] | undefined,
-  useLegacyParameters = false,
-): { functionDeclarations: GeminiFunctionDeclaration[] }[] | undefined {
-  if (!tools?.length) return undefined;
-  return [
-    {
-      functionDeclarations: tools.map((tool) => {
-        const dereferenced = dereferenceSchema(tool.parameters);
-        const rootObject = ensureRootObjectSchema(dereferenced);
-        const schema = stripMetaSchema(rootObject);
-        return {
-          name: tool.name,
-          description: tool.description,
-          ...(useLegacyParameters
-            ? { parameters: normalizeCustomToolSchema(schema) }
-            : { parametersJsonSchema: schema }),
-        };
-      }),
-    },
-  ];
-}
-
 function mapToolChoiceMode(
   toolChoice: AntigravityStreamOptions["toolChoice"],
 ): GeminiToolCallingMode {
@@ -476,14 +310,20 @@ export function buildRequest(
   runtimeModel: string,
   identity?: AntigravityRequestIdentity,
 ): AntigravityGenerateRequest {
+  const contents = convertMessages(model, context, runtimeModel);
   const request: GeminiRequestBody = {
-    contents: convertMessages(model, context, runtimeModel),
+    contents,
+    // agy sends the persona as a single systemInstruction part.
     systemInstruction: {
       role: GeminiRole.User,
       parts: [
-        { text: ANTIGRAVITY_SYSTEM_INSTRUCTION },
-        { text: ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION },
-        ...(context.systemPrompt ? [{ text: sanitizeText(context.systemPrompt) }] : []),
+        {
+          text: [
+            ANTIGRAVITY_SYSTEM_INSTRUCTION,
+            ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION,
+            ...(context.systemPrompt ? [sanitizeText(context.systemPrompt)] : []),
+          ].join("\n\n"),
+        },
       ],
     },
   };
@@ -501,25 +341,34 @@ export function buildRequest(
   if (Object.keys(generationConfig).length) request.generationConfig = generationConfig;
 
   const isClaude = model.id.startsWith("claude-") || runtimeModel.startsWith("claude-");
-  const tools = convertTools(context.tools, isClaude || model.id.startsWith("gpt-oss-"));
+  const isNonGeminiModel =
+    isClaude ||
+    model.id.startsWith("gpt-oss-") ||
+    runtimeModel.startsWith("gpt-oss-");
+  const tools = convertTools(context.tools);
   if (tools) {
     request.tools = tools;
-    request.toolConfig = {
-      functionCallingConfig: {
-        mode:
-          options.toolChoice && options.toolChoice !== "auto"
-            ? mapToolChoiceMode(options.toolChoice)
-            : GeminiToolCallingMode.Validated,
-      },
-    };
-  } else if (isClaude) {
-    request.toolConfig = {
-      functionCallingConfig: { mode: GeminiToolCallingMode.Validated },
-    };
+    // agy sends no toolConfig (the backend default applies). Keep an explicit NONE only
+    // for the one case where pi asks for tools to be suppressed while still advertising
+    // their schemas.
+    if (options.toolChoice === "none") {
+      request.toolConfig = {
+        functionCallingConfig: { mode: mapToolChoiceMode(options.toolChoice) },
+      };
+    }
   }
 
   const callIdentity = identity ?? prepareAntigravityRequestIdentity(context, options);
-  const envelope = antigravityRequestEnvelope(runtimeModel, isClaude, callIdentity);
+  const envelope = antigravityRequestEnvelope(runtimeModel, {
+    isClaude,
+    isNonGeminiModel,
+    sessionId: callIdentity.sessionId,
+    trajectoryId: callIdentity.trajectoryId,
+    callIndex: callIdentity.callIndex,
+    // agy's `step` is the number of content entries (1 on the first turn, 3 after a
+    // tool round-trip, ...) and `last_step_index` is `step - 1`.
+    step: contents.length,
+  });
   request.sessionId = envelope.sessionId;
   request.labels = envelope.labels;
 
@@ -566,7 +415,7 @@ export function friendlyAntigravityError(status: number | undefined, text: strin
   }
   if (status === 404) {
     if (/Requested entity was not found/i.test(msg)) {
-      return "This model is not available right now. Next: switch to gemini-3.7-flash, gemini-3.6-flash, gemini-3.5-flash, gemini-3.1-pro, or another working model.";
+      return "This model is not available right now. Next: switch to gemini-3.8-flash, gemini-3.7-flash, gemini-3.6-flash, gemini-3.1-pro, or another working model.";
     }
     return `Antigravity could not find the requested resource. Next: retry or switch models. Backend said: ${msg}`;
   }
@@ -840,19 +689,21 @@ export function streamAntigravity(
         runtimeCandidates.push(fallback);
       }
 
-      const isClaudeReasoning = model.id.startsWith("claude-") && model.reasoning;
-      const requestHeaders: Record<string, string> = {
-        ...antigravityHeaders(creds.token),
-        ...(isClaudeReasoning ? { "anthropic-beta": "interleaved-thinking-2025-05-14" } : {}),
-      };
+      // agy 1.2.x registers the trajectory with the backend before the first stream call.
+      // Best-effort and fire-and-forget: the model call never waits on it.
+      const requestIdentity = prepareAntigravityRequestIdentity(context, opts);
+      if (requestIdentity.isNewTrajectory) {
+        void writeTrajectoryAcls(creds.token, requestIdentity.trajectoryId);
+      }
+
+      const requestHeaders: Record<string, string> = antigravityHeaders(creds.token);
 
       let response: Response | undefined;
       let lastText = "";
       let received = false;
       let runtimeModel = initialRuntimeModel;
-      // One logical call gets exactly one step. All transport and model retries
-      // below reuse it rather than advancing the trajectory.
-      const requestIdentity = prepareAntigravityRequestIdentity(context, opts);
+      // One logical call gets exactly one trajectory index. All transport and model retries
+      // below reuse it rather than advancing the counter.
 
       // Geo-block retry: "User location is not supported" fires when the local
       // proxy egress lands on a Gemini-unsupported region (e.g. HK). Swallow the
