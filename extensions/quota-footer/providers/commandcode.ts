@@ -14,6 +14,9 @@ import {
 
 const CC_DEFAULT_BASE = "https://api.commandcode.ai";
 const CC_TIMEOUT_MS = 8000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+// Monthly credits die with the billing period; warn once the end is close.
+const CC_EXPIRY_WARN_DAYS = 3;
 const CC_LOW_THRESHOLD = 20;
 const CC_MID_THRESHOLD = 50;
 const CC_CREDIT_LOW = 1;
@@ -38,6 +41,10 @@ export interface CCPayload {
 	plan?: string;
 	status?: string;
 	remaining?: number;
+	/** The monthly allotment inside `remaining`; the part that expires. */
+	monthlyRemaining?: number;
+	/** End of the current billing period: when `monthlyRemaining` expires. */
+	expiresAt?: number;
 	fiveHour?: CCWindow;
 	weekly?: CCWindow;
 }
@@ -96,6 +103,7 @@ export function parseCommandCodeQuota(body: any, subscription: any): FetchResult
 	const weekly = parseCCWindow(windowLimits?.weekly, WEEK_MS);
 
 	let remaining: number | undefined;
+	let monthlyRemaining: number | undefined;
 	if (credits && typeof credits === "object") {
 		const monthly = asFiniteNumber(credits.monthlyCredits);
 		const purchased = asFiniteNumber(credits.purchasedCredits);
@@ -103,6 +111,8 @@ export function parseCommandCodeQuota(body: any, subscription: any): FetchResult
 		if (monthly !== null || purchased !== null || free !== null) {
 			remaining = (monthly ?? 0) + (purchased ?? 0) + (free ?? 0);
 		}
+		// Only the monthly slice dies at period end; purchased credits carry over.
+		if (monthly !== null) monthlyRemaining = monthly;
 	}
 
 	if (!fiveHour && !weekly && remaining === undefined) {
@@ -110,6 +120,9 @@ export function parseCommandCodeQuota(body: any, subscription: any): FetchResult
 	}
 
 	const planId = typeof subscription?.planId === "string" ? subscription.planId : undefined;
+	// currentPeriodStart/currentPeriodEnd split the monthly allotment; the end is
+	// the moment any unspent monthly credits disappear.
+	const expiresAt = ccResetAtMs(subscription?.currentPeriodEnd);
 	return {
 		kind: "success",
 		fetchedAt: Date.now(),
@@ -117,6 +130,8 @@ export function parseCommandCodeQuota(body: any, subscription: any): FetchResult
 			...(planId ? { plan: shortCCPlan(planId) } : {}),
 			...(typeof subscription?.status === "string" ? { status: subscription.status } : {}),
 			...(remaining !== undefined ? { remaining } : {}),
+			...(monthlyRemaining !== undefined ? { monthlyRemaining } : {}),
+			...(expiresAt !== undefined ? { expiresAt } : {}),
 			...(fiveHour ? { fiveHour } : {}),
 			...(weekly ? { weekly } : {}),
 		},
@@ -215,6 +230,19 @@ export function renderCCWindow(
 	return seg;
 }
 
+// "expires in 23d" — rounded up, because a partial day still counts as demand
+// on the remaining balance. Returns null once the period is already over.
+export function ccExpiry(
+	expiresAt: number | undefined,
+	now = Date.now(),
+): { text: string; days: number } | null {
+	if (expiresAt === undefined) return null;
+	const msLeft = expiresAt - now;
+	if (msLeft <= 0) return null;
+	const days = Math.ceil(msLeft / DAY_MS);
+	return { text: `expires in ${days}d`, days };
+}
+
 export function renderCommandCode(payload: unknown, ctx: ExtensionContext): string {
 	const t = ctx.ui.theme;
 	const state = payload as CCPayload;
@@ -224,6 +252,13 @@ export function renderCommandCode(payload: unknown, ctx: ExtensionContext): stri
 	if (state.weekly) parts.push(renderCCWindow("W", state.weekly, ctx, 6, false));
 	if (state.remaining !== undefined) {
 		parts.push(t.fg(colorFor(state.remaining, CC_CREDIT_LOW, CC_CREDIT_MID), `$${state.remaining.toFixed(2)}`));
+	}
+	// Monthly credits vanish at period end; flag how long they are still spendable.
+	if ((state.monthlyRemaining ?? 0) > 0) {
+		const expiry = ccExpiry(state.expiresAt);
+		if (expiry) {
+			parts.push(t.fg(expiry.days <= CC_EXPIRY_WARN_DAYS ? "warning" : "dim", expiry.text));
+		}
 	}
 	if (state.status && state.status !== "active") parts.push(t.fg("error", state.status));
 

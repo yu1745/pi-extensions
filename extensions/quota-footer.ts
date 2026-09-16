@@ -11,6 +11,7 @@ export * from "./quota-footer/history/chart-component.ts";
 
 // Re-export CommandCode functions for existing tests/consumers
 export {
+	ccExpiry,
 	commandCodeBaseUrl,
 	commandCodeTtlFor,
 	parseCommandCodeQuota,

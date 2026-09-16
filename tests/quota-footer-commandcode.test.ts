@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+	ccExpiry,
 	commandCodeBaseUrl,
 	commandCodeTtlFor,
 	parseCommandCodeQuota,
@@ -89,6 +90,45 @@ test("sums monthly, purchased and free credits", () => {
 	assert.match(renderCommandCode(payload, fakeCtx), /\$4\.00/);
 });
 
+test("renders how long the expiring monthly credits are still spendable", () => {
+	const payload = parseOk(CREDITS_BODY);
+	assert.equal(payload.expiresAt, Date.parse("2026-10-10T11:56:39.000Z"));
+	assert.equal(payload.monthlyRemaining, 9.988082446);
+
+	const rendered = renderCommandCode(payload, fakeCtx);
+	assert.match(rendered, /\$9\.99/);
+	assert.match(rendered, /expires in \d+d/);
+
+	// The countdown is rounded up: a partial day still has to be spent today.
+	const now = Date.parse("2026-10-09T12:00:00Z");
+	assert.deepEqual(ccExpiry(Date.parse("2026-10-10T11:56:39Z"), now), {
+		text: "expires in 1d",
+		days: 1,
+	});
+	// An expired period has no expiry to advertise.
+	assert.equal(ccExpiry(now, now), null);
+	assert.equal(ccExpiry(now - 1000, now), null);
+});
+
+test("hides the expiry when nothing monthly is left to expire", () => {
+	// Purchased credits never expire, so a $0 monthly balance shows no countdown.
+	const purchasedOnly = parseOk({
+		credits: { monthlyCredits: 0, purchasedCredits: 5, freeCredits: 0 },
+	});
+	assert.equal(purchasedOnly.monthlyRemaining, 0);
+	const rendered = renderCommandCode(purchasedOnly, fakeCtx);
+	assert.match(rendered, /\$5\.00/);
+	assert.equal(rendered.includes("expires in"), false);
+
+	const withMonthly = parseOk({ credits: { monthlyCredits: 5, purchasedCredits: 5 } });
+	assert.match(renderCommandCode(withMonthly, fakeCtx), /\$10\.00.*expires in \d+d/);
+
+	// A monthly balance with no known period end cannot show a countdown either.
+	const noPeriod = parseOk({ credits: { monthlyCredits: 5 } }, { planId: "individual-go" });
+	assert.equal(noPeriod.expiresAt, undefined);
+	assert.equal(renderCommandCode(noPeriod, fakeCtx).includes("expires in"), false);
+});
+
 test("treats a zero cap as 'no such window' and keeps the rest", () => {
 	const payload = parseOk({
 		credits: { monthlyCredits: 1 },
@@ -117,7 +157,7 @@ test("suppresses the pace delta while one percent still spans more time than has
 		// delta would be rounding noise rather than pacing information.
 		windowLimits: { weekly: { used: 0.06, cap: 6, resetAt: now + WEEK_MS - 1000 } },
 	});
-	assert.equal(renderCommandCode(freshWindow, fakeCtx), "CC go | W ██████ 99% | $9.00");
+	assert.match(renderCommandCode(freshWindow, fakeCtx), /^CC go \| W ██████ 99% \| \$9\.00 \| expires in \d+d$/);
 
 	// Two days into the same window the resolution is real, so the delta shows.
 	const runningWindow = parseOk({
