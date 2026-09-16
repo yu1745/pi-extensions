@@ -10,6 +10,34 @@ import { cacheKey, ERROR_RETRY_TTL_MS, formatReset, RATE_LIMIT_RETRY_TTL_MS, ren
 
 const STATUS_KEY = "quota";
 
+/**
+ * pi invalidates every captured extension ctx once a session is disposed — the end of a
+ * `pi -p` run, a session switch, /new, or a reload all funnel into `session.dispose()` →
+ * `extensionRunner.invalidate(...)`. Reading a ctx getter (`ctx.model`, `ctx.ui`, ...)
+ * afterwards throws.
+ *
+ * This extension refreshes quota in the background, so its in-flight work can easily
+ * outlive the session it started in. That stale-ctx error means "nobody is left to paint
+ * a footer" and must be dropped: an escaped throw from a detached task becomes an
+ * unhandled rejection and terminates the whole pi process.
+ */
+export function isStaleCtxError(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error ?? "");
+	return /extension ctx is stale after session replacement or reload/i.test(message);
+}
+
+/**
+ * Run ctx-dependent work, treating an already-disposed session as a no-op.
+ * Exported for unit tests.
+ */
+export async function ignoreDisposedSession(work: () => Promise<void> | void): Promise<void> {
+	try {
+		await work();
+	} catch (error) {
+		if (!isStaleCtxError(error)) throw error;
+	}
+}
+
 async function quotaApiKey(ctx: ExtensionContext, provider: string): Promise<string | undefined> {
 	const fallback = () => ctx.modelRegistry.getApiKeyForProvider(provider);
 	return provider === "commandcode" ? resolveCommandCodeDisplayKey(fallback) : fallback();
@@ -56,30 +84,38 @@ async function refresh(
 
 	if (!force && entry && now - entry.lastAttemptAt < ttlFor(entry, cfg)) {
 		// Cache still fresh — re-render from cache, no network.
-		if (myEpoch === epoch) ctx.ui.setStatus(STATUS_KEY, renderEntry(entry, cfg, ctx));
+		if (myEpoch === epoch) {
+			await ignoreDisposedSession(() => {
+				ctx.ui.setStatus(STATUS_KEY, renderEntry(entry, cfg, ctx));
+			});
+		}
 		return;
 	}
 
 	const result = await cfg.fetch(apiKey);
-	// Account rotation can occur without a model switch. Drop a stale account's result.
-	if (ctx.model?.provider === "commandcode" && await quotaApiKey(ctx, "commandcode") !== apiKey) return;
-	if (myEpoch !== epoch) return; // model switched while we were fetching — drop
+	// A model switch while we were fetching invalidates the result before it touches ctx.
+	if (myEpoch !== epoch) return;
+	cache.set(key, { result, savedAt: Date.now(), lastAttemptAt: Date.now() });
 
-	if (result.kind === "success") {
-		cache.set(key, { result, savedAt: now, lastAttemptAt: now });
-		ctx.ui.setStatus(STATUS_KEY, cfg.render(result.payload, ctx));
+	await ignoreDisposedSession(async () => {
+		// Account rotation can occur without a model switch. Drop a stale account's result.
+		if (ctx.model?.provider === "commandcode" && (await quotaApiKey(ctx, "commandcode")) !== apiKey) return;
+		if (myEpoch !== epoch) return; // model switched while we resolved the key — drop
 
-		// Record week quota history if supported
-		if (cfg.extractWeekQuota && ctx.model?.provider) {
-			const weekQuota = cfg.extractWeekQuota(result.payload);
-			if (weekQuota) {
-				recordQuotaChange(ctx.model.provider, apiKey, weekQuota);
+		if (result.kind === "success") {
+			ctx.ui.setStatus(STATUS_KEY, cfg.render(result.payload, ctx));
+
+			// Record week quota history if supported
+			if (cfg.extractWeekQuota && ctx.model?.provider) {
+				const weekQuota = cfg.extractWeekQuota(result.payload);
+				if (weekQuota) {
+					recordQuotaChange(ctx.model.provider, apiKey, weekQuota);
+				}
 			}
+		} else {
+			ctx.ui.setStatus(STATUS_KEY, renderFailure(cfg, result, ctx));
 		}
-	} else {
-		cache.set(key, { result, savedAt: now, lastAttemptAt: now });
-		ctx.ui.setStatus(STATUS_KEY, renderFailure(cfg, result, ctx));
-	}
+	});
 }
 
 // Fire-and-forget refresh. Never awaited from model_select/tool_result, so
@@ -98,6 +134,11 @@ function scheduleRefresh(
 	void (async () => {
 		try {
 			await refresh(ctx, cfg, apiKey, key, myEpoch, force);
+		} catch (error) {
+			// Detached task: anything escaping here would kill the pi process. The stale-ctx
+			// case is handled inside refresh(); this is a last-resort net for real bugs.
+			const message = error instanceof Error ? error.message : String(error);
+			console.error(`[quota-footer] background refresh failed: ${message}`);
 		} finally {
 			if (activeFetch) activeFetch = null;
 		}
@@ -111,30 +152,33 @@ async function syncActivation(ctx: ExtensionContext): Promise<void> {
 	// widget must vanish immediately, and any in-flight fetch for it becomes
 	// stale the moment it resolves.
 	const myEpoch = ++epoch;
-	ctx.ui.setStatus(STATUS_KEY, undefined);
 
-	const provider = ctx.model?.provider;
-	const cfg = provider ? CONFIGS[provider] : undefined;
-	if (!cfg || !provider) return; // no monitor for this provider → stay invisible
+	await ignoreDisposedSession(async () => {
+		ctx.ui.setStatus(STATUS_KEY, undefined);
 
-	const apiKey = await quotaApiKey(ctx, provider);
-	if (!apiKey) {
-		if (myEpoch === epoch) {
-			ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("dim", `${cfg.label} ${cfg.noKeyLabel}`));
+		const provider = ctx.model?.provider;
+		const cfg = provider ? CONFIGS[provider] : undefined;
+		if (!cfg || !provider) return; // no monitor for this provider → stay invisible
+
+		const apiKey = await quotaApiKey(ctx, provider);
+		if (!apiKey) {
+			if (myEpoch === epoch) {
+				ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("dim", `${cfg.label} ${cfg.noKeyLabel}`));
+			}
+			return;
 		}
-		return;
-	}
 
-	const key = cacheKey(provider, apiKey);
+		const key = cacheKey(provider, apiKey);
 
-	// Show the cached value immediately (even if stale — better than a blank
-	// footer while the fetch runs), then refresh in the background.
-	const entry = cache.get(key);
-	if (entry && myEpoch === epoch) {
-		ctx.ui.setStatus(STATUS_KEY, renderEntry(entry, cfg, ctx));
-	}
+		// Show the cached value immediately (even if stale — better than a blank
+		// footer while the fetch runs), then refresh in the background.
+		const entry = cache.get(key);
+		if (entry && myEpoch === epoch) {
+			ctx.ui.setStatus(STATUS_KEY, renderEntry(entry, cfg, ctx));
+		}
 
-	scheduleRefresh(ctx, cfg, apiKey, key, myEpoch);
+		scheduleRefresh(ctx, cfg, apiKey, key, myEpoch);
+	});
 }
 
 // ─── extension entry ─────────────────────────────────────────────────────────
@@ -191,16 +235,20 @@ export default function (pi: ExtensionAPI): void {
 	// After each tool call completes: nudge a refresh so the widget reflects
 	// spend. The TTL cache inside refresh() prevents flooding the API.
 	pi.on("tool_result", async (_event, ctx) => {
-		const provider = ctx.model?.provider;
-		const cfg = provider ? CONFIGS[provider] : undefined;
-		if (!cfg || !provider) return;
-		const apiKey = await quotaApiKey(ctx, provider);
-		if (!apiKey) return;
-		scheduleRefresh(ctx, cfg, apiKey, cacheKey(provider, apiKey), epoch);
+		await ignoreDisposedSession(async () => {
+			const provider = ctx.model?.provider;
+			const cfg = provider ? CONFIGS[provider] : undefined;
+			if (!cfg || !provider) return;
+			const apiKey = await quotaApiKey(ctx, provider);
+			if (!apiKey) return;
+			scheduleRefresh(ctx, cfg, apiKey, cacheKey(provider, apiKey), epoch);
+		});
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
-		if (ctx.model?.provider === "commandcode") await syncActivation(ctx);
+		await ignoreDisposedSession(async () => {
+			if (ctx.model?.provider === "commandcode") await syncActivation(ctx);
+		});
 	});
 
 	const forceRefresh = async (_args: unknown, ctx: ExtensionContext) => {
