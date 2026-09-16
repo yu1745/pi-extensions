@@ -54,7 +54,6 @@
 			"extensions/web-search/index.ts",
 			"extensions/filter-image-reader.ts",
 			"extensions/antigravity/index.ts",
-			"extensions/zvec-grep/index.ts",
 			"extensions/subagents-cost.ts",
 			"extensions/deepseek-time-pricing.ts",
 			"extensions/codex-cost.ts",

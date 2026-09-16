@@ -25,7 +25,6 @@ pi install git:github.com/yu1745/pi-extensions
 | `deepseek-time-pricing` | `extensions/deepseek-time-pricing.ts` | DeepSeek 分时定价：按消息时间戳重算 `usage.cost`，成本统计跟随高峰/空闲价；`/deepseek-pricing` 查看当前档位。匹配 `deepseek-flash`、`deepseek-v4[.x]-flash*` 与 `deepseek-v4[.x]-pro`（provider 必须是 `deepseek`）；`tests/deepseek-time-pricing.test.ts` 覆盖各档位与边界 |
 | `deepseek-effort`（已禁用） | `extensions/deepseek-effort.ts` | 未在加载列表注册；DeepSeek V4.1 / `deepseek-flash`：`/effort` 支持 API 预设和实验性 1–100 系统前缀，两种模式明确分离，按会话分支保存 |
 | `clear-new-alias` | `extensions/clear-new-alias.ts` | Clears the new-version alias notice |
-| `zvec-grep` | `extensions/zvec-grep/` | MCP bridge for zvec-grep's official agent search tool; handles server startup and remote-embedding authorization internally |
 | `codebuddy` | `extensions/codebuddy-fp/` | CodeBuddy (Tencent) provider with full official-CLI fingerprint simulation: byte-identical round-1 headers/system/tools, OAuth login (`/codebuddy-login`), CLI credential import (`/codebuddy-import`), token auto-refresh, aligned telemetry (config/accounts/report/traces) with zero git-repo leakage |
 
 <details>
@@ -37,13 +36,9 @@ pi install git:github.com/yu1745/pi-extensions
 
 </details>
 
-> **17 extensions, one package.** Previously separate repos (`pi-web-reader-spa`) are merged here — uninstall the standalone packages before installing this one to avoid duplicate tool registration.
+> **25 extensions, one package.** Previously separate repos (`pi-web-reader-spa`) are merged here — uninstall the standalone packages before installing this one to avoid duplicate tool registration.
 > pi-smart-compact is provided separately by the fork `git:github.com/yu1745/pi-smart-compact` (upstream + `allowUnverifiedApply`).>
 > The `subagent` extension was **removed** in favor of [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents) (install with `pi install npm:@tintinweb/pi-subagents`).
-
-### zvec-grep configuration
-
-The `zvec-grep` extension assumes `zg` is installed and uses the model/provider/endpoint already configured by zg (for this setup, the remote LM Studio embedding model). Those implementation details are deliberately not exposed to the LLM. It starts the local MCP server and creates the workspace grant internally. The official MCP search tool expects an existing index; run `zg index` externally before semantic search.
 
 ### DeepSeek effort
 
