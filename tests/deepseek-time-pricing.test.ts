@@ -185,3 +185,139 @@ test("V41_FLASH_FROM boundary is exclusive of the old tier", async () => {
 	});
 	close(after.usage.cost.output, 4 / CNY_PER_USD); // Thu 12:00, off-peak (12–14), new tier
 });
+
+// ---------------------------------------------------------------------------
+// Command Code (`commandcode` provider): same peak windows, USD rate cards.
+// ---------------------------------------------------------------------------
+
+const COMMAND_CODE_MODEL = {
+	id: "deepseek/deepseek-v4.1-flash",
+	name: "DeepSeek V4.1 Flash (CC)",
+	provider: "commandcode",
+	api: "openai-completions",
+	reasoning: true,
+};
+
+/** Thu 2026-09-10 12:30 Beijing — outside both peak windows. */
+const OFF_PEAK_AT = at("2026-09-10T04:30:00Z");
+/** Thu 2026-09-10 15:00 Beijing — inside 14:00–18:00. */
+const PEAK_AT = at("2026-09-10T07:00:00Z");
+
+/** Full-unit cost for a Command Code message in USD per 1M tokens. */
+const commandCodeMessage = (model: string, timestamp: number) => ({
+	role: "assistant",
+	provider: "commandcode",
+	model,
+	timestamp,
+	usage: { ...usage },
+});
+
+test("Command Code flash family is repriced in USD, with no CNY conversion", async () => {
+	for (const id of [
+		"deepseek/deepseek-v4-flash",
+		"deepseek/deepseek-v4-flash-vision-exp",
+		"deepseek/deepseek-v4.1-flash",
+	]) {
+		const patched = await reprice(commandCodeMessage(id, OFF_PEAK_AT), COMMAND_CODE_MODEL);
+		assert.ok(patched, `${id} must match a Command Code pricing rule`);
+		// Off-peak list price, verbatim USD: 0.15 / 0.60 / 0.003 per 1M.
+		close(patched.usage.cost.input, 0.15);
+		close(patched.usage.cost.output, 0.6);
+		close(patched.usage.cost.cacheRead, 0.003);
+		close(patched.usage.cost.cacheWrite, 0);
+		close(patched.usage.cost.total, 0.753);
+	}
+});
+
+test("Command Code peak rates are the doubled off-peak USD rates", async () => {
+	const flash = await reprice(
+		commandCodeMessage("deepseek/deepseek-v4.1-flash", PEAK_AT),
+		COMMAND_CODE_MODEL,
+	);
+	assert.ok(flash, "Command Code flash must be repriced at peak");
+	close(flash.usage.cost.input, 0.3);
+	close(flash.usage.cost.output, 1.2);
+	close(flash.usage.cost.cacheRead, 0.006);
+
+	const pro = await reprice(
+		commandCodeMessage("deepseek/deepseek-v4-pro", PEAK_AT),
+		COMMAND_CODE_MODEL,
+	);
+	assert.ok(pro, "Command Code v4-pro must be repriced at peak");
+	close(pro.usage.cost.input, 1.32);
+	close(pro.usage.cost.output, 3.96);
+	close(pro.usage.cost.cacheRead, 0.044);
+});
+
+test("Command Code `deepseek-v4-pro` uses its own off-peak rate card", async () => {
+	const patched = await reprice(
+		commandCodeMessage("deepseek/deepseek-v4-pro", OFF_PEAK_AT),
+		COMMAND_CODE_MODEL,
+	);
+	assert.ok(patched, "Command Code v4-pro must match a pricing rule");
+	close(patched.usage.cost.input, 0.66);
+	close(patched.usage.cost.output, 1.98);
+	close(patched.usage.cost.cacheRead, 0.022);
+	close(patched.usage.cost.total, 2.662);
+});
+
+test("Command Code flat-priced `-flash-fast` keeps its provider MODEL_COSTS rate", async () => {
+	const patched = await reprice(
+		commandCodeMessage("deepseek/deepseek-v4-flash-fast", PEAK_AT),
+		COMMAND_CODE_MODEL,
+	);
+	assert.equal(patched, undefined, "-flash-fast has no peak window and must not be repriced");
+});
+
+test("Command Code and official DeepSeek rules stay provider-scoped", async () => {
+	// An official-endpoint ID on the Command Code provider matches nothing.
+	const officialId = await reprice(
+		commandCodeMessage("deepseek-flash", OFF_PEAK_AT),
+		COMMAND_CODE_MODEL,
+	);
+	assert.equal(officialId, undefined);
+
+	// A `deepseek/...` catalog ID on the official provider matches nothing.
+	const commandCodeId = await reprice({
+		role: "assistant",
+		provider: "deepseek",
+		model: "deepseek/deepseek-v4.1-flash",
+		timestamp: OFF_PEAK_AT,
+		usage: { ...usage },
+	});
+	assert.equal(commandCodeId, undefined);
+});
+
+test("status line renders the active rule in its own unit", async () => {
+	const statuses: (string | undefined)[] = [];
+	const handlers = new Map<string, Function>();
+	extension({
+		on: (name: string, handler: Function) => handlers.set(name, handler),
+		registerCommand: () => {},
+	} as any);
+
+	const ctx = {
+		model: COMMAND_CODE_MODEL,
+		ui: {
+			setStatus: (_key: string, value?: string) => statuses.push(value),
+			notify: () => {},
+		},
+	};
+	await handlers.get("model_select")!({ type: "model_select" }, ctx);
+
+	const status = statuses.at(-1);
+	assert.ok(status, "Command Code models must publish a status line");
+	// Either tier is valid here: the status reflects the current wall clock.
+	assert.match(
+		status!,
+		/^commandcode deepseek-v4-flash (?:高峰|空闲) \$(?:0\.15\/\$0\.6|0\.3\/\$1\.2) \/M$/,
+	);
+
+	// Official DeepSeek keeps the CNY rendering.
+	statuses.length = 0;
+	await handlers.get("model_select")!(
+		{ type: "model_select" },
+		{ ...ctx, model: MODEL },
+	);
+	assert.match(statuses.at(-1)!, /^deepseek-v4-flash (?:高峰|空闲) \d+(?:\.\d+)?\/\d+(?:\.\d+)? 元\/M$/);
+});
