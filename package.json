@@ -5,6 +5,7 @@
 	"type": "module",
 	"license": "MIT",
 	"author": "yu1745",
+	"packageManager": "pnpm@11.20.0",
 	"files": [
 		"extensions"
 	],
@@ -19,8 +20,8 @@
 		"undici": "^8.10.1"
 	},
 	"devDependencies": {
-		"@earendil-works/pi-coding-agent": "0.84.1",
-		"@earendil-works/pi-tui": "0.84.1",
+		"@earendil-works/pi-coding-agent": "0.85.1",
+		"@earendil-works/pi-tui": "0.85.1",
 		"@types/node": "^25.9.1",
 		"typebox": "1.1.38",
 		"typescript": "^6.0.3"

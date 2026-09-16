@@ -1,0 +1,8 @@
+# pnpm
+# Only these dependencies are allowed to run install scripts. Everything else
+# stays blocked (pnpm's default), which is what keeps `pi install`-style
+# production installs from executing unreviewed postinstall code.
+allowBuilds:
+  '@google/genai': false
+  protobufjs: false
+  esbuild: true

@@ -22,5 +22,5 @@ missing manifest entry means there is no discovery path that can pick it up.
 `tsconfig.json` includes this directory so `tsc --noEmit` still validates the code:
 
 ```sh
-npm run typecheck   # or: ./node_modules/.bin/tsc --noEmit
+pnpm run typecheck   # or: ./node_modules/.bin/tsc --noEmit
 ```

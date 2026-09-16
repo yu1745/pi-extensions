@@ -86,9 +86,9 @@ A provably dead PID's main `.lock` is recoverable. A crash inside the very short
 From repository root:
 
 ```sh
-npm run typecheck:commandcode
-npm run test:commandcode
-npm test
+pnpm run typecheck:commandcode
+pnpm run test:commandcode
+pnpm test
 ```
 
 `tests/commandcode-upstream/` contains 14 upstream unit suites with source import paths adjusted, plus the original fixtures/helpers. The command alias registration test allows the new alias. The abort test now waits for the first actual text event instead of racing a fixed timer, and the event collector clears its timeout. Upstream package-layout, CLI/live and GitHub metadata-check scripts are not blindly copied because their standalone package assumptions do not apply here. New tests exercise the real Pi CLI with an empty auth store, mock DeepSeek endpoints and verified rotation; separate minimal live tests use DeepSeek only.

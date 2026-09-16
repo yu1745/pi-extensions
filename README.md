@@ -89,9 +89,13 @@ Provider quota monitor (`quota-footer`) reads keys at runtime from `modelRegistr
 
 ## Development
 
+This repo uses **pnpm**. `package-lock.json` was removed in favor of
+`pnpm-lock.yaml`; the `pi.extensions` array and all scripts are unchanged.
+
 ```sh
-npm install          # types + typebox for local typecheck
-npx tsc --noEmit ... # typecheck an extension
+pnpm install          # types + typebox for local typecheck
+pnpm exec tsc --noEmit ... # typecheck an extension
+pnpm test             # full test suite
 ```
 
 Load a single extension without installing the package:
