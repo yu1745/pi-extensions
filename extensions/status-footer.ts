@@ -16,13 +16,9 @@
  */
 
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import * as fs from "node:fs";
-import * as path from "node:path";
-import * as os from "node:os";
-import * as https from "node:https";
-import { HttpsProxyAgent } from "https-proxy-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { fetchCodexUsage, loadCodexCredentials, parseCodexWindow } from "./shared/codex-api.ts";
 
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
@@ -119,7 +115,6 @@ function formatLatency(ms: number): string {
 }
 
 // ─── OpenAI-Codex 周期探测与缓存 ───────────────────────────────────────────────
-const CODEX_AUTH_FILE = path.join(os.homedir(), ".codex", "auth.json");
 let cachedCodexWindowStartMs: number | null = null;
 let lastWindowCheckAt = 0;
 const WINDOW_CHECK_INTERVAL_MS = 60_000; // 1 分钟检测一次窗口
@@ -130,54 +125,16 @@ async function resolveCodexCycleStartMs(): Promise<number | null> {
 		return cachedCodexWindowStartMs;
 	}
 
-	if (!fs.existsSync(CODEX_AUTH_FILE)) return null;
 	try {
-		const auth = JSON.parse(fs.readFileSync(CODEX_AUTH_FILE, "utf8"));
-		const token = auth.tokens?.access_token;
-		const accountId = auth.tokens?.account_id || "";
-		if (!token) return null;
-
-		const proxy = process.env.https_proxy || process.env.http_proxy || process.env.ALL_PROXY;
-		const agent = proxy ? new HttpsProxyAgent(proxy) : undefined;
-
-		const res = await new Promise<any>((resolve, reject) => {
-			const req = https.request(
-				"https://chatgpt.com/backend-api/wham/usage",
-				{
-					headers: {
-						Authorization: `Bearer ${token}`,
-						"chatgpt-account-id": accountId,
-						"User-Agent": "CodexDesktop",
-						Accept: "application/json",
-					},
-					agent,
-					timeout: 5000,
-				},
-				(resp) => {
-					let data = "";
-					resp.on("data", (chunk) => (data += chunk));
-					resp.on("end", () => {
-						try {
-							resolve(JSON.parse(data));
-						} catch (e) {
-							reject(e);
-						}
-					});
-				}
-			);
-			req.on("error", reject);
-			req.on("timeout", () => {
-				req.destroy();
-				reject(new Error("Timeout"));
-			});
-			req.end();
+		const credentials = loadCodexCredentials();
+		if (!credentials) return null;
+		const response = await fetchCodexUsage(credentials, {
+			maxAgeMs: WINDOW_CHECK_INTERVAL_MS,
+			timeoutMs: 5_000,
 		});
-
-		const pw = res?.rate_limit?.primary_window;
-		if (pw && pw.reset_at) {
-			const resetAtMs = Number(pw.reset_at) > 1e12 ? Number(pw.reset_at) : Number(pw.reset_at) * 1000;
-			const windowSec = Number(pw.limit_window_seconds || 604800);
-			cachedCodexWindowStartMs = resetAtMs - windowSec * 1000;
+		const window = parseCodexWindow(response.body?.rate_limit?.primary_window);
+		if (response.status >= 200 && response.status < 300 && window?.resetAtMs) {
+			cachedCodexWindowStartMs = window.resetAtMs - (window.windowSeconds ?? 604800) * 1000;
 			lastWindowCheckAt = now;
 			return cachedCodexWindowStartMs;
 		}

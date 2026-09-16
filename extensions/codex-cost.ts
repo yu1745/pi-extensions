@@ -1,9 +1,14 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import * as https from "https";
-import { HttpsProxyAgent } from "https-proxy-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	CODEX_AUTH_FILE,
+	fetchCodexUsage,
+	loadCodexCredentials,
+	parseCodexWindow,
+	requestCodexJson,
+} from "./shared/codex-api.ts";
 import {
 	matchesKey,
 	truncateToWidth,
@@ -13,7 +18,6 @@ import {
 	type TUI,
 } from "@earendil-works/pi-tui";
 
-const CODEX_AUTH_FILE = path.join(os.homedir(), ".codex", "auth.json");
 const CONFIG_FILE = path.join(os.homedir(), ".pi", "agent", "codex-cost-tracker.json");
 
 const USD_PER_CREDIT = 0.04;
@@ -95,49 +99,6 @@ function saveConfig(cfg: PluginConfig): void {
 	}
 }
 
-// 请求 ChatGPT 官方 backend-api
-async function callOfficialApi(endpoint: string, token: string, accountId: string): Promise<any> {
-	const proxy = process.env.https_proxy || process.env.http_proxy || process.env.ALL_PROXY;
-	const agent = proxy ? new HttpsProxyAgent(proxy) : undefined;
-
-	return new Promise((resolve, reject) => {
-		const req = https.request(
-			`https://chatgpt.com${endpoint}`,
-			{
-				headers: {
-					Authorization: `Bearer ${token}`,
-					"chatgpt-account-id": accountId,
-					"User-Agent": "CodexDesktop",
-					Accept: "application/json",
-				},
-				agent,
-				timeout: 8000,
-			},
-			(resp) => {
-				let body = "";
-				resp.on("data", (c) => (body += c));
-				resp.on("end", () => {
-					if (resp.statusCode && resp.statusCode >= 400) {
-						reject(new Error(`API Error ${resp.statusCode}: ${body.slice(0, 200)}`));
-						return;
-					}
-					try {
-						resolve(JSON.parse(body));
-					} catch (e) {
-						reject(e);
-					}
-				});
-			}
-		);
-		req.on("error", reject);
-		req.on("timeout", () => {
-			req.destroy();
-			reject(new Error("请求超时"));
-		});
-		req.end();
-	});
-}
-
 function formatUtcDayToLocalRange(utcDateStr: string, tz: string): { label: string; isCurrent: boolean } {
 	try {
 		const startMs = Date.parse(utcDateStr + "T00:00:00Z");
@@ -192,25 +153,27 @@ async function fetchOfficialData(
 		throw new Error(`找不到 ${CODEX_AUTH_FILE}，请先在本地登录 Codex Desktop 或 Codex CLI`);
 	}
 
-	const auth = JSON.parse(fs.readFileSync(CODEX_AUTH_FILE, "utf8"));
-	const token = auth.tokens?.access_token;
-	const accountId = auth.tokens?.account_id || "";
-
-	if (!token) {
+	const credentials = loadCodexCredentials();
+	if (!credentials) {
 		throw new Error("~/.codex/auth.json 中未找到有效的 access_token");
 	}
 
 	// 1. 查询当前配额窗口
-	const usage = await callOfficialApi("/backend-api/wham/usage", token, accountId);
+	const usageResponse = await fetchCodexUsage(credentials, { timeoutMs: 8_000 });
+	if (usageResponse.status < 200 || usageResponse.status >= 300) {
+		throw new Error(`API Error ${usageResponse.status}: ${usageResponse.rawBody.slice(0, 200)}`);
+	}
+	const usage = usageResponse.body;
 	const pw = usage?.rate_limit?.primary_window;
-	if (!pw) {
+	const parsedWindow = parseCodexWindow(pw);
+	if (!parsedWindow?.resetAtMs) {
 		throw new Error("未获取到当前账号的 7-Day 配额窗口信息");
 	}
 
-	const windowSec = Number(pw.limit_window_seconds || 604800);
-	const resetAtMs = Number(pw.reset_at) > 1e12 ? Number(pw.reset_at) : Number(pw.reset_at) * 1000;
+	const windowSec = parsedWindow.windowSeconds ?? 604800;
+	const resetAtMs = parsedWindow.resetAtMs;
 	const windowStartMs = resetAtMs - windowSec * 1000;
-	const usedPercent = Math.min(100, Math.max(0, Number(pw.used_percent) || 0));
+	const usedPercent = parsedWindow.usedPercent;
 
 	const officialStartUtcDate = new Date(windowStartMs).toISOString().slice(0, 10);
 	const queryStartUtcDate = customStartUtcDate || officialStartUtcDate;
@@ -218,15 +181,15 @@ async function fetchOfficialData(
 
 	// 2. 并行拉取整天消费数 (counts) 与模型分项占比 (breakdown)
 	const range = `start_date=${queryStartUtcDate}&end_date=${queryEndUtcDate}&group_by=day`;
-	const countsPromise = callOfficialApi(
+	const countsPromise = requestCodexJson<any>(
 		`/backend-api/wham/analytics/daily-workspace-usage-counts?${range}&workspace_user=true`,
-		token,
-		accountId
+		credentials,
+		{ timeoutMs: 8_000 },
 	);
-	const breakdownPromise = callOfficialApi(
+	const breakdownPromise = requestCodexJson<any>(
 		`/backend-api/wham/usage/daily-token-usage-breakdown?${range}`,
-		token,
-		accountId
+		credentials,
+		{ timeoutMs: 8_000 },
 	).catch(() => null);
 
 	const [countsData, breakdownData] = await Promise.all([countsPromise, breakdownPromise]);

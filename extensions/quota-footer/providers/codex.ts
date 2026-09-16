@@ -1,8 +1,12 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	credentialsFromToken,
+	fetchCodexUsage,
+	parseCodexWindow as parseSharedCodexWindow,
+} from "../../shared/codex-api.ts";
 import type { FetchResult, ProviderConfig } from "../types.ts";
-import { asFiniteNumber, bar, calcDelta, clampPercent, colorFor, deltaColor, formatReset, REQUEST_TIMEOUT_MS } from "../utils.ts";
+import { bar, calcDelta, clampPercent, colorFor, deltaColor, formatReset, REQUEST_TIMEOUT_MS } from "../utils.ts";
 
-const CODEX_URL = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_LOW_THRESHOLD = 30;
 const CODEX_MID_THRESHOLD = 60;
 const CODEX_REFRESH_TTL_MS = 5 * 60_000;
@@ -26,34 +30,15 @@ export function codexTtlFor(_payload: unknown): number {
 	return CODEX_REFRESH_TTL_MS;
 }
 
-export function decodeJwtPayload(token: string): any | null {
-	try {
-		const part = token.split(".")[1];
-		if (!part) return null;
-		return JSON.parse(Buffer.from(part, "base64url").toString("utf8"));
-	} catch {
-		return null;
-	}
-}
-
-export function getCodexAccountId(accessToken: string): string | null {
-	const payload = decodeJwtPayload(accessToken);
-	const accountId = payload?.["https://api.openai.com/auth"]?.chatgpt_account_id;
-	return typeof accountId === "string" && accountId.length > 0 ? accountId : null;
-}
-
 export function parseCodexWindow(value: any): CodexWindow | null {
-	if (!value || typeof value !== "object") return null;
-	const used = asFiniteNumber(value.used_percent);
-	if (used === null) return null;
-	const usedPercent = clampPercent(used) ?? 0;
-	const resetAt = asFiniteNumber(value.reset_at) ?? undefined;
-	const windowSeconds = asFiniteNumber(value.limit_window_seconds) ?? undefined;
+	const parsed = parseSharedCodexWindow(value);
+	if (!parsed) return null;
+	const usedPercent = clampPercent(parsed.usedPercent) ?? 0;
 	return {
 		usedPercent,
 		leftPercent: 100 - usedPercent,
-		...(resetAt !== undefined ? { resetAt } : {}),
-		...(windowSeconds !== undefined ? { windowSeconds } : {}),
+		...(parsed.resetAtMs !== undefined ? { resetAt: parsed.resetAtMs / 1000 } : {}),
+		...(parsed.windowSeconds !== undefined ? { windowSeconds: parsed.windowSeconds } : {}),
 	};
 }
 
@@ -76,27 +61,16 @@ export function parseCodexUsage(body: any): FetchResult {
 }
 
 export async function fetchCodex(accessToken: string): Promise<FetchResult> {
-	const accountId = getCodexAccountId(accessToken);
-	if (!accountId) return { kind: "auth_error", at: Date.now() };
+	const credentials = credentialsFromToken(accessToken);
+	if (!credentials) return { kind: "auth_error", at: Date.now() };
 	try {
-		const response = await fetch(CODEX_URL, {
-			method: "GET",
-			headers: {
-				Accept: "application/json",
-				Authorization: `Bearer ${accessToken}`,
-				"ChatGPT-Account-Id": accountId,
-				"User-Agent": "codex-cli",
-			},
-			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+		const response = await fetchCodexUsage(credentials, {
+			timeoutMs: REQUEST_TIMEOUT_MS,
+			userAgent: "codex-cli",
 		});
-		const text = await response.text();
-		let body: any = null;
-		try {
-			body = JSON.parse(text);
-		} catch {}
 		if (response.status === 401 || response.status === 403) return { kind: "auth_error", at: Date.now() };
 		if (response.status === 429) return { kind: "rate_limited", at: Date.now() };
-		return parseCodexUsage(body);
+		return parseCodexUsage(response.body);
 	} catch {
 		return { kind: "unavailable", at: Date.now() };
 	}
