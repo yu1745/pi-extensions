@@ -14,6 +14,7 @@ pi install git:github.com/yu1745/pi-extensions
 | `quota` | `extensions/quota-footer.ts` | Unified usage monitor in the footer: DeepSeek balance, GLM / MiniMax / Codex / Command Code quota (one widget, switch-dispatched). Command Code also shows when its monthly credits expire (`expires in Nd`, warning color in the last 3 days) |
 | `commandcode` | `extensions/commandcode/` | Command Code DeepSeek-only provider with verified sticky multi-account rotation (default low-balance threshold 0.1); [configuration](extensions/commandcode/README.md) |
 | `siliconflow` | `extensions/siliconflow.ts` | SiliconFlow (硅基流动) provider with native dynamic model refresh (`refreshModels` + persisted catalog) |
+| `typesafe-jev` | `extensions/typesafe-jev/` | Reusable typed TypeSafe Jev evaluation service. Credentials use Pi `/login typesafe-jev`; the provider intentionally exposes no chat models |
 | `openai-codex-fast` | `extensions/openai-codex-fast.ts` | `/fast` and `/ultrafast` toggle Codex `service_tier=priority` / `service_tier=ultrafast` |
 | `context-window` | `extensions/context-window.ts` | `/context-window` sets or overrides context window for the current model |
 | `append` | `extensions/append.ts` | `/append` queues user messages until the agent run stops (at `agent_end`), avoiding tool-call interruption |
@@ -36,7 +37,7 @@ pi install git:github.com/yu1745/pi-extensions
 
 </details>
 
-> **25 extensions, one package.** Previously separate repos (`pi-web-reader-spa`) are merged here — uninstall the standalone packages before installing this one to avoid duplicate tool registration.
+> **26 extensions, one package.** Previously separate repos (`pi-web-reader-spa`) are merged here — uninstall the standalone packages before installing this one to avoid duplicate tool registration.
 > pi-smart-compact is provided separately by the fork `git:github.com/yu1745/pi-smart-compact` (upstream + `allowUnverifiedApply`).>
 > The `subagent` extension was **removed** in favor of [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents) (install with `pi install npm:@tintinweb/pi-subagents`).
 
@@ -71,6 +72,16 @@ pi install git:github.com/yu1745/pi-extensions
 ```sh
 node --experimental-strip-types --test tests/deepseek-effort.test.ts
 ```
+
+## TypeSafe Jev service
+
+`typesafe-jev` registers a native Pi auth provider solely so its API key follows Pi's credential flow:
+
+```text
+/login typesafe-jev
+```
+
+It deliberately lists zero generative models. Other extensions can discover the authenticated, typed `JevServiceV1` through the `typesafe-jev:get-service:v1` event, or import the client/service/types from `extensions/shared/jev/`. Requests default to `jev-latest`, have a 20-second deadline and bounded retries for HTTP 429/529. `TYPESAFE_API_KEY` is supported for non-interactive development; normal interactive use should prefer `/login`.
 
 ## API keys
 

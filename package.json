@@ -44,6 +44,7 @@
 			"extensions/append.ts",
 			"extensions/quota-footer.ts",
 			"extensions/siliconflow.ts",
+			"extensions/typesafe-jev/index.ts",
 			"extensions/commandcode/index.ts",
 			"extensions/codebuddy-fp/index.ts",
 			"extensions/tokenspeed.ts",
