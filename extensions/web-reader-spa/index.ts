@@ -319,15 +319,17 @@ async function waitForReadableContentFallback(page: AnyPage, signal?: AbortSigna
   }
 }
 
-async function waitForReadableContent(page: AnyPage, url: string, signal?: AbortSignal) {
+async function waitForReadableContent(page: AnyPage, url: string, signal?: AbortSignal): Promise<{ jevScore?: number; fallback?: boolean }> {
   const jev = resolveJevService();
   if (!jev) {
-    return waitForReadableContentFallback(page, signal);
+    await waitForReadableContentFallback(page, signal);
+    return { fallback: true };
   }
 
   // Jev semantic recognition loop
   const deadline = Date.now() + 8000;
   let consecutiveHighConfidence = 0;
+  let lastJevScore: number | undefined;
 
   while (Date.now() < deadline && !signal?.aborted) {
     // 1. Snapshot lightweight DOM state
@@ -368,11 +370,12 @@ async function waitForReadableContent(page: AnyPage, url: string, signal?: Abort
       }, { timeoutMs: 1500, signal });
 
       const noul = res.answers?.is_ready?.type === "noul" ? res.answers.is_ready.noul : 0;
+      lastJevScore = noul;
       if (noul >= 0.8) {
         consecutiveHighConfidence++;
         if (consecutiveHighConfidence >= 1) {
           log(`Jev verified page loaded (noul: ${noul.toFixed(2)}, len: ${snapshot.textLength})`);
-          return;
+          return { jevScore: noul };
         }
       } else {
         consecutiveHighConfidence = 0;
@@ -380,12 +383,14 @@ async function waitForReadableContent(page: AnyPage, url: string, signal?: Abort
     } catch (e) {
       // If Jev throws (quota exhausted, network failure, 429, etc.), log and fall back to mechanical heuristics
       log("Jev evaluation failed or unavailable, falling back to heuristic wait:", (e as Error).message);
-      return waitForReadableContentFallback(page, signal);
+      await waitForReadableContentFallback(page, signal);
+      return { fallback: true, jevScore: lastJevScore };
     }
 
     // Poll interval between evaluations (~500ms)
     await page.waitForTimeout(500).catch(() => {});
   }
+  return { jevScore: lastJevScore };
 }
 
 async function fetchPage(p: FetchParams, signal?: AbortSignal) {
@@ -491,7 +496,7 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
     // 4. Extra wait (at least small pause for hydration if not specified)
     const extraWait = p.extraWaitMs ?? 400;
     if (extraWait > 0) await page.waitForTimeout(extraWait).catch(() => {});
-    await waitForReadableContent(page, p.url, signal);
+    const loadVerdict = await waitForReadableContent(page, p.url, signal);
 
     // Content extraction = Playwright ARIA accessibility snapshot (same source as
     // playwright-cli). Hidden/aria-hidden/hover-only nodes are excluded by design.
@@ -615,6 +620,7 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
       selection,
       screenshot: screenshotB64,
       screenshotPath,
+      loadVerdict,
     };
   } finally {
     if (signal) signal.removeEventListener("abort", onAbort);
@@ -1181,11 +1187,15 @@ export default function (pi: ExtensionAPI) {
           ? `  [full-page fallback: ${result.selection.candidate?.selector ?? "candidate"} covered ${Math.round((result.selection.coverage ?? 0) * 100)}%]`
           : `  [full-page fallback: ${result.selection.reason}]`
         : "";
+      const jevNote = result.loadVerdict?.jevScore !== undefined
+        ? `Jev Score: ${result.loadVerdict.jevScore.toFixed(2)}${result.loadVerdict.fallback ? " (fallback)" : ""}\n`
+        : "";
       const header =
         `URL: ${result.url}\n` +
         `Title: ${result.title}\n` +
         `HTTP: ${result.status ?? "?"}\n` +
         `Browser: ${activeChannel}${viaCdp ? " (cdp)" : ""}${result.effectiveSelector ? `  [scope: ${result.effectiveSelector}]` : ""}${selectionNote}${truncated ? "  [truncated]" : ""}\n` +
+        jevNote +
         (result.screenshotPath ? `Screenshot: ${result.screenshotPath}\n` : "") +
         spanLegend +
         `\n`;
@@ -1210,6 +1220,7 @@ export default function (pi: ExtensionAPI) {
           title: result.title,
           status: result.status,
           browser: activeChannel,
+          jevScore: result.loadVerdict?.jevScore,
           truncated,
           format,
           ariaBytes: result.aria?.length ?? 0,
