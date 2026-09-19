@@ -28,6 +28,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
+import { spawn } from "node:child_process";
 import { getGlobalJevService } from "../shared/jev/service.ts";
 import { fileURLToPath } from "node:url";
 import {
@@ -118,6 +119,24 @@ let openingToken: object | null = null;
 // session shut down must not publish its handles afterwards, or the process
 // would be orphaned with no reference left to close it.
 let generation = 0;
+let autoInstallTriggered = false;
+
+function triggerBackgroundChromiumInstall() {
+  if (autoInstallTriggered) return;
+  autoInstallTriggered = true;
+  try {
+    const cliPath = path.resolve(EXT_DIR, "node_modules/playwright-core/cli.js");
+    const child = spawn(process.execPath, [cliPath, "install", "chromium"], {
+      cwd: EXT_DIR,
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+    log("triggered background Playwright Chromium installation (pid:", child.pid, ")");
+  } catch (err) {
+    log("failed to trigger background chromium install:", (err as Error).message);
+  }
+}
 
 function contextOpts() {
   return {
@@ -179,7 +198,11 @@ async function ensureBrowser(): Promise<AnyContext> {
             break;
           } catch (e) {
             lastErr = e;
-            log("channel unavailable:", ch || "bundled", "=>", (e as Error).message);
+            const msg = (e as Error).message || String(e);
+            if (!ch && /Executable doesn't exist|browserType\.launch.*chromium|browser was not found|Looks like Playwright was installed/i.test(msg)) {
+              triggerBackgroundChromiumInstall();
+            }
+            log("channel unavailable:", ch || "bundled", "=>", msg);
           }
         }
         if (!launched) throw lastErr;
