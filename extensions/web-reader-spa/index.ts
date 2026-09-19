@@ -125,11 +125,11 @@ function triggerBackgroundChromiumInstall() {
   if (autoInstallTriggered) return;
   autoInstallTriggered = true;
   try {
-    let cliPath = path.resolve(EXT_DIR, "node_modules/playwright-core/cli.js");
+    let cliPath = path.resolve(EXT_DIR, "node_modules/playwright/cli.js");
     if (!require("node:fs").existsSync(cliPath)) {
-      cliPath = path.resolve(EXT_DIR, "../../node_modules/playwright-core/cli.js");
+      cliPath = path.resolve(EXT_DIR, "../../node_modules/playwright/cli.js");
     }
-    const child = spawn(process.execPath, [cliPath, "install", "chromium"], {
+    const child = spawn(process.execPath, [cliPath, "install", "chromium", "chromium-headless-shell"], {
       cwd: EXT_DIR,
       detached: true,
       stdio: "ignore",
