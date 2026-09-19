@@ -29,7 +29,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
-import { getGlobalJevService } from "../shared/jev/service.ts";
+import { resolveJevService } from "../shared/jev/service.ts";
 import { fileURLToPath } from "node:url";
 import {
   chooseScopeCandidate,
@@ -317,7 +317,7 @@ async function waitForReadableContentFallback(page: AnyPage, signal?: AbortSigna
 }
 
 async function waitForReadableContent(page: AnyPage, url: string, signal?: AbortSignal) {
-  const jev = getGlobalJevService();
+  const jev = resolveJevService();
   if (!jev) {
     return waitForReadableContentFallback(page, signal);
   }
