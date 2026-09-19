@@ -1,5 +1,5 @@
 /**
- * pi extension: web_reader_spa — SPA-aware companion to the built-in web_reader
+ * pi extension: web_reader — Full-featured web reader backed by Playwright & Jev
  * -------------------------
  * A SPA-aware, anti-WAF web reader backed by the Playwright library.
  *
@@ -40,7 +40,7 @@ import {
 
 const DEBUG = /^(1|true|yes)$/i.test(process.env.PI_WEBREADER_DEBUG || "");
 function log(...a: unknown[]) {
-  if (DEBUG) console.error("[web-reader-spa]", ...a);
+  if (DEBUG) console.error("[web-reader]", ...a);
 }
 
 // ---- environment-driven config -------------------------------------------
@@ -54,7 +54,7 @@ const MAX_URL = parseInt(process.env.PI_WEBREADER_MAXURL || "120", 10);
 // Resolve the extension's own directory (works for both local dev installs and
 // `pi install` git/npm packages, which land under different paths).
 const EXT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const SHOT_DIR = path.join(tmpdir(), "pi-web-reader-spa");
+const SHOT_DIR = path.join(tmpdir(), "pi-web-reader");
 
 const LAUNCH_ARGS = [
   "--disable-blink-features=AutomationControlled",
@@ -1033,8 +1033,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async () => {
     try {
       const active = pi.getActiveTools();
-      if (active.length > 0 && !active.includes("web_reader_spa"))
-        pi.setActiveTools([...active, "web_reader_spa"]);
+      if (active.length > 0 && !active.includes("web_reader"))
+        pi.setActiveTools([...active, "web_reader"]);
     } catch {
       /* ignore */
     }
@@ -1048,43 +1048,17 @@ export default function (pi: ExtensionAPI) {
     await closeBrowser();
   });
 
-  // Couple with the built-in web_reader: append a fallback hint to its tool
-  // description so the model reaches for web_reader_spa when web_reader can't
-  // render a JS/SPA page. Handles both Anthropic/Google ({name,description}) and
-  // OpenAI ({function:{name,description}}) tool shapes.
-  const WEBREADER_FALLBACK =
-    "\n\nIf this returns a network/connection error (e.g. timeout, connection reset, 403 Forbidden, 5xx, or SSL error), " +
-    "empty/garbled content, only a JS shell/skeleton (e.g. <div id=root>), a login/bot interstitial with no real content, " +
-    "OR the output is low-readability (e.g. a raw table dumped as rows of `| | |` with no readable text, huge base64 blobs, " +
-    "mostly metadata/boilerplate with no real body, or otherwise needs a human to clean up before it's usable), " +
-    "retry the SAME url with the `web_reader_spa` tool, which drives a real browser with anti-bot stealth patches and returns clean Markdown.";
-  pi.on("before_provider_request", (event) => {
-    const tools = (event.payload as { tools?: unknown })?.tools;
-    if (!Array.isArray(tools)) return;
-    for (const t of tools as Array<Record<string, any>>) {
-      const name = t?.name || t?.function?.name;
-      if (name !== "web_reader") continue;
-      if (typeof t?.description === "string") t.description += WEBREADER_FALLBACK;
-      else if (t?.function && typeof t.function.description === "string")
-        t.function.description += WEBREADER_FALLBACK;
-    }
-    return event.payload;
-  });
-
   pi.registerTool({
-    name: "web_reader_spa",
-    label: "Web Reader (SPA)",
+    name: "web_reader",
+    label: "Web Reader",
     description:
-      "SPA-aware companion to web_reader: fetch and fully render a page with a real headless browser (handles " +
-      "JavaScript / single-page apps and bot-blocking WAFs via a spoofed User-Agent + stealth patches). Content " +
-      "is extracted from Playwright's ARIA accessibility snapshot — the same source playwright-cli uses — so " +
-      "hidden/hover-only UI is excluded and the output is clean Markdown. Use this whenever web_reader can't " +
-      "handle a page: single-page apps, JS-rendered content, login-wall interstitials, or pages that block " +
-      "plain HTTP clients.",
-    promptSnippet: "Real-browser render for SPAs; clean Markdown via ARIA snapshot (use when web_reader fails)",
+      "Fetch and fully render web page content with a real headless browser (handles " +
+      "JavaScript / single-page apps, dynamic hydration, and bot-blocking WAFs via a spoofed User-Agent + stealth patches). Content " +
+      "is extracted from Playwright's ARIA accessibility snapshot and Jev semantic load verification — so " +
+      "hidden/hover-only UI is excluded and the output is clean, readable Markdown.",
+    promptSnippet: "Real-browser web reader; clean Markdown via ARIA snapshot and Jev semantic load verification",
     promptGuidelines: [
-      "Use web_reader_spa instead of web_reader for single-page apps, JavaScript-rendered sites, or pages where " +
-        "web_reader returns empty/blocked/garbled content or just a JS shell/skeleton.",
+      "Use web_reader to fetch and read web page content, including JavaScript-heavy SPAs, dynamic sites, and documentation.",
     ],
     parameters: Type.Object({
       url: Type.String({ description: "Absolute URL to render (http/https; protocol auto-added)." }),

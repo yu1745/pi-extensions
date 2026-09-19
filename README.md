@@ -10,7 +10,7 @@ pi install git:github.com/yu1745/pi-extensions
 
 | Extension | Path | What it does |
 |---|---|---|
-| `web_reader_spa` | `extensions/web-reader-spa/` | SPA-aware, anti-WAF web reader (Playwright + stealth + ARIA extraction) |
+| `web_reader` | `extensions/web-reader/` | Anti-WAF web reader with Playwright + stealth + ARIA extraction + Jev semantic load verification |
 | `quota` | `extensions/quota-footer.ts` | Unified usage monitor in the footer: DeepSeek balance, GLM / MiniMax / Codex / Command Code quota (one widget, switch-dispatched). Command Code also shows when its monthly credits expire (`expires in Nd`, warning color in the last 3 days) |
 | `commandcode` | `extensions/commandcode/` | Command Code DeepSeek-only provider with verified sticky multi-account rotation (default low-balance threshold 0.1); [configuration](extensions/commandcode/README.md) |
 | `siliconflow` | `extensions/siliconflow.ts` | SiliconFlow (硅基流动) provider with native dynamic model refresh (`refreshModels` + persisted catalog) |

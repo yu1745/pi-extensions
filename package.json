@@ -49,7 +49,7 @@
 			"extensions/codebuddy-fp/index.ts",
 			"extensions/tokenspeed.ts",
 			"extensions/tool-duration.ts",
-			"extensions/web-reader-spa/index.ts",
+			"extensions/web-reader/index.ts",
 			"extensions/working-bell.ts",
 			"extensions/web-search/index.ts",
 			"extensions/filter-image-reader.ts",
@@ -68,7 +68,7 @@
 		"zai",
 		"web-search",
 		"vision",
-		"web-reader-spa",
+		"web-reader",
 		"web-reader-local",
 		"playwright"
 	],
