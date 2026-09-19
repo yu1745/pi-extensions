@@ -28,6 +28,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
+import { getGlobalJevService } from "../shared/jev/service.ts";
 import { fileURLToPath } from "node:url";
 import {
   chooseScopeCandidate,
@@ -258,7 +259,7 @@ interface FetchParams {
   inlineImage?: boolean;
 }
 
-async function waitForReadableContent(page: AnyPage, signal?: AbortSignal) {
+async function waitForReadableContentFallback(page: AnyPage, signal?: AbortSignal) {
   let previous = -1;
   let stableSamples = 0;
   const deadline = Date.now() + 8000;
@@ -289,6 +290,75 @@ async function waitForReadableContent(page: AnyPage, signal?: AbortSignal) {
 
     previous = current;
     await page.waitForTimeout(350).catch(() => {});
+  }
+}
+
+async function waitForReadableContent(page: AnyPage, url: string, signal?: AbortSignal) {
+  const jev = getGlobalJevService();
+  if (!jev) {
+    return waitForReadableContentFallback(page, signal);
+  }
+
+  // Jev semantic recognition loop
+  const deadline = Date.now() + 8000;
+  let consecutiveHighConfidence = 0;
+
+  while (Date.now() < deadline && !signal?.aborted) {
+    // 1. Snapshot lightweight DOM state
+    const snapshot = await page.evaluate(() => {
+      const bodyText = (document.body?.innerText || "").trim();
+      const main = document.querySelector("main, [role=\"main\"], #main-content, #__next, #app") || document.body;
+      const mainText = (main ? main.innerText : "").trim();
+      return {
+        title: document.title,
+        readyState: document.readyState,
+        textSample: (mainText || bodyText).slice(0, 500).replace(/\s+/g, " "),
+        textLength: bodyText.length,
+      };
+    }).catch(() => null);
+
+    // Initial blank/connecting gate: don't waste Jev calls if completely empty
+    if (!snapshot || snapshot.textLength === 0) {
+      await page.waitForTimeout(300).catch(() => {});
+      continue;
+    }
+
+    // 2. Query Jev
+    try {
+      const res = await jev.evaluate({
+        state: {
+          url,
+          title: snapshot.title,
+          readyState: snapshot.readyState,
+          contentLength: snapshot.textLength,
+          contentExcerpt: snapshot.textSample,
+        },
+        questions: {
+          is_ready: {
+            type: "noul",
+            instructions: "Determine whether the target webpage content is fully loaded, rendered, and ready for reading, as opposed to displaying placeholders, skeletons, spinners, or loading messages.",
+          },
+        },
+      }, { timeoutMs: 1500, signal });
+
+      const noul = res.answers?.is_ready?.type === "noul" ? res.answers.is_ready.noul : 0;
+      if (noul >= 0.8) {
+        consecutiveHighConfidence++;
+        if (consecutiveHighConfidence >= 1) {
+          log(`Jev verified page loaded (noul: ${noul.toFixed(2)}, len: ${snapshot.textLength})`);
+          return;
+        }
+      } else {
+        consecutiveHighConfidence = 0;
+      }
+    } catch (e) {
+      // If Jev throws (quota exhausted, network failure, 429, etc.), log and fall back to mechanical heuristics
+      log("Jev evaluation failed or unavailable, falling back to heuristic wait:", (e as Error).message);
+      return waitForReadableContentFallback(page, signal);
+    }
+
+    // Poll interval between evaluations (~500ms)
+    await page.waitForTimeout(500).catch(() => {});
   }
 }
 
@@ -395,7 +465,7 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
     // 4. Extra wait (at least small pause for hydration if not specified)
     const extraWait = p.extraWaitMs ?? 400;
     if (extraWait > 0) await page.waitForTimeout(extraWait).catch(() => {});
-    await waitForReadableContent(page, signal);
+    await waitForReadableContent(page, p.url, signal);
 
     // Content extraction = Playwright ARIA accessibility snapshot (same source as
     // playwright-cli). Hidden/aria-hidden/hover-only nodes are excluded by design.
