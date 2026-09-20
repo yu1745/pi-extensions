@@ -46,8 +46,8 @@ export const DEFAULT_TOOL_RATIO = 3.5; // JSON arguments have higher chars-per-t
  * - Bucket size: 250ms batching to avoid tokenizing tiny deltas individually.
  */
 export const METER_HALF_LIVES_MS = [5_000, 20_000, 80_000];
-export const METER_MIN_TOKENS = 200;
-export const METER_MIN_TIME_MS = 4_000;
+export const METER_MIN_TOKENS = 8;
+export const METER_MIN_TIME_MS = 500;
 export const METER_BUCKET_MS = 250;
 export const METER_CARRY_MAX_CHARS = 32;
 export const METER_HIDDEN_DECAY = 0.8;

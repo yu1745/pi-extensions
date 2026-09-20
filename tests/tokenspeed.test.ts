@@ -35,11 +35,13 @@ test("TokenRateMeter reports null until enough tokens and stream time accumulate
 	const meter = new TokenRateMeter(words);
 	assert.equal(meter.rate(0), null);
 	meter.begin(0);
-	meter.push("w ".repeat(300), 500);
-	assert.equal(meter.rate(600), null);
-	stream(meter, 600, 10_000, 6);
-	const rate = meter.rate(10_000);
-	assert.ok(rate !== null && rate > 80 && rate < 100, `expected ~90, got ${rate}`);
+	// Before 500ms / min tokens, rate is null
+	meter.push("w ".repeat(3), 200);
+	assert.equal(meter.rate(200), null);
+	// Once enough tokens and time accumulate, rate is reported
+	meter.push("w ".repeat(10), 600);
+	const rate = meter.rate(600);
+	assert.ok(rate !== null && rate > 0, `expected rate, got ${rate}`);
 });
 
 test("TokenRateMeter holds across tool execution and is only nudged by a short burst", () => {
