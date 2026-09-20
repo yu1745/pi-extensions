@@ -11,6 +11,9 @@ importers:
       '@earendil-works/pi-ai':
         specifier: '*'
         version: 0.85.1(ws@8.21.3)
+      '@huggingface/tokenizers':
+        specifier: ^0.2.0
+        version: 0.2.0
       linkedom:
         specifier: ^0.18.13
         version: 0.18.13
@@ -339,6 +342,9 @@ packages:
     peerDependenciesMeta:
       '@modelcontextprotocol/sdk':
         optional: true
+
+  '@huggingface/tokenizers@0.2.0':
+    resolution: {integrity: sha512-LidMHe1FpcSYH4vcSjXooda34pC0M8m1gmDOv7SQi6Iv+ib1zX7J3sHBCC9/3FPCkn2k1b55FneVqMRxrr99pg==}
 
   '@mariozechner/clipboard-darwin-arm64@0.3.9':
     resolution: {integrity: sha512-BfgV7vCEWZwJwZJw03r6bP5+tf0iI/ANuQYCxi9RNn7FrWB3yzGuMKCrNLRl6V761vXRdL8+OqZ0wd4TqlsNOQ==}
@@ -1251,6 +1257,8 @@ snapshots:
       - bufferutil
       - supports-color
       - utf-8-validate
+
+  '@huggingface/tokenizers@0.2.0': {}
 
   '@mariozechner/clipboard-darwin-arm64@0.3.9':
     optional: true

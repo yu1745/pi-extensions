@@ -9,35 +9,121 @@
  *       ^^^     ^^^     ^^^
  *       short   mid     long
  *
- * - **Short**: real-time speed over a ~3s rolling window (current streaming)
- * - **Mid**:    average speed of the last 1 assistant message
- * - **Long**:   average speed of the last 5 assistant messages
+ * - **Short**: real-time kernel-smoothed speed (using Oh My Pi's TokenRateMeter
+ *              algorithm with multi-scale exponential decay and hidden token compensation)
+ * - **Mid**:    average speed of the last 1 assistant message (authoritative)
+ * - **Long**:   average speed of the last 5 assistant messages (authoritative)
+ *
+ * Suffix indicator:
+ * - Appends ` (estimate)` while downloading/using adaptive estimation.
+ * - Removes ` (estimate)` once the real tokenizer is loaded and active.
  *
  * Uses `ctx.ui.setStatus()`, so pi's native footer is untouched.
  * Toggle with the `/tokenspeed` command.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Tokenizer } from "@huggingface/tokenizers";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { createJevClient } from "./shared/jev/client.ts";
 
-const WINDOW_MS = 3000; // rolling window length for real-time speed
-const MIN_SAMPLES = 3; // need at least 3 samples (sample 0 dropped as initial burst, 1..N form span)
-const MIN_WINDOW_TIME_MS = 600; // minimum span in ms to prevent small-divisor spikes
 const STATUS_KEY = "tokenspeed";
 const HISTORY_LEN = 5; // how many past messages to keep for long-term average
 const RATIO_HISTORY = 10; // chars/token samples kept for the median
 
 /** Default fallback characters-per-token ratios if uncalibrated */
-const DEFAULT_TEXT_RATIO = 2.5; // blended default for CJK / English text & thinking
-const DEFAULT_TOOL_RATIO = 3.5; // JSON arguments have higher chars-per-token
+export const DEFAULT_TEXT_RATIO = 2.5; // blended default for CJK / English text & thinking
+export const DEFAULT_TOOL_RATIO = 3.5; // JSON arguments have higher chars-per-token
+
+/**
+ * Oh My Pi TokenRateMeter parameters:
+ * - Half-lives of the decayed-sum scales: [5s, 20s, 80s].
+ *   Short scale reacts quickly to speed changes; long scale provides stability against bursts.
+ * - Evidence gate: fewer decayed tokens than 200, or less stream time than 4s,
+ *   is noise, not a reliable rate.
+ * - Bucket size: 250ms batching to avoid tokenizing tiny deltas individually.
+ */
+export const METER_HALF_LIVES_MS = [5_000, 20_000, 80_000];
+export const METER_MIN_TOKENS = 200;
+export const METER_MIN_TIME_MS = 4_000;
+export const METER_BUCKET_MS = 250;
+export const METER_CARRY_MAX_CHARS = 32;
+export const METER_HIDDEN_DECAY = 0.8;
+export const METER_HIDDEN_PRIOR_MS = 10_000;
+const LN2 = Math.LN2;
+
+/**
+ * Tokenizer registry: Only remote URLs, zero JSON bundled in code.
+ * Uses hf-mirror.com for reliable high-speed downloads.
+ */
+export const TOKENIZER_REGISTRY: Record<string, { url: string; fallbackUrl?: string }> = {
+	minimax: {
+		url: "https://hf-mirror.com/MiniMaxAI/MiniMax-Text-01-hf/resolve/main/tokenizer.json",
+		fallbackUrl: "https://huggingface.co/MiniMaxAI/MiniMax-Text-01-hf/resolve/main/tokenizer.json",
+	},
+	qwen: {
+		url: "https://hf-mirror.com/Qwen/Qwen2.5-72B-Instruct/resolve/main/tokenizer.json",
+		fallbackUrl: "https://huggingface.co/Qwen/Qwen2.5-72B-Instruct/resolve/main/tokenizer.json",
+	},
+	deepseek: {
+		url: "https://hf-mirror.com/deepseek-ai/DeepSeek-V3/resolve/main/tokenizer.json",
+		fallbackUrl: "https://huggingface.co/deepseek-ai/DeepSeek-V3/resolve/main/tokenizer.json",
+	},
+	glm: {
+		url: "https://hf-mirror.com/zai-org/GLM-4.7-Flash/resolve/main/tokenizer.json",
+		fallbackUrl: "https://huggingface.co/zai-org/GLM-4.7-Flash/resolve/main/tokenizer.json",
+	},
+	openai: {
+		url: "https://hf-mirror.com/Xenova/gpt-4o/resolve/main/tokenizer.json",
+		fallbackUrl: "https://huggingface.co/Xenova/gpt-4o/resolve/main/tokenizer.json",
+	},
+	llama: {
+		url: "https://hf-mirror.com/unsloth/Meta-Llama-3.1-8B-Instruct/resolve/main/tokenizer.json",
+		fallbackUrl: "https://huggingface.co/unsloth/Meta-Llama-3.1-8B-Instruct/resolve/main/tokenizer.json",
+	},
+	claude: {
+		url: "https://hf-mirror.com/Xenova/claude-tokenizer/resolve/main/tokenizer.json",
+		fallbackUrl: "https://huggingface.co/Xenova/claude-tokenizer/resolve/main/tokenizer.json",
+	},
+	mistral: {
+		url: "https://hf-mirror.com/mistralai/Mistral-7B-Instruct-v0.3/resolve/main/tokenizer.json",
+		fallbackUrl: "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3/resolve/main/tokenizer.json",
+	},
+	gemma: {
+		url: "https://hf-mirror.com/unsloth/gemma-2-9b-it/resolve/main/tokenizer.json",
+		fallbackUrl: "https://huggingface.co/unsloth/gemma-2-9b-it/resolve/main/tokenizer.json",
+	},
+	yi: {
+		url: "https://hf-mirror.com/01-ai/Yi-1.5-34B-Chat/resolve/main/tokenizer.json",
+		fallbackUrl: "https://huggingface.co/01-ai/Yi-1.5-34B-Chat/resolve/main/tokenizer.json",
+	},
+	grok: {
+		url: "https://hf-mirror.com/Xenova/grok-1-tokenizer/resolve/main/tokenizer.json",
+		fallbackUrl: "https://huggingface.co/Xenova/grok-1-tokenizer/resolve/main/tokenizer.json",
+	},
+	phi: {
+		url: "https://hf-mirror.com/microsoft/Phi-3-mini-4k-instruct/resolve/main/tokenizer.json",
+		fallbackUrl: "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct/resolve/main/tokenizer.json",
+	},
+};
+
+const JEV_CRITERIA: Record<string, string> = {
+	minimax: "MiniMax models (e.g. MiniMax-M2.5, MiniMax-M3, abab, MiniMax-Text)",
+	qwen: "Qwen models (e.g. Qwen2, Qwen2.5, Qwen3, Qwen-Coder)",
+	deepseek: "DeepSeek models (e.g. DeepSeek-V3, V4, R1, deepseek-chat)",
+	glm: "Zhipu GLM models (e.g. GLM-4, GLM-5, GLM-5.3, GLM-5v)",
+	openai: "OpenAI models (e.g. GPT-4o, GPT-5, GPT-6, o1, o3, Codex, gpt-oss)",
+	claude: "Anthropic Claude models (e.g. Claude 3, 3.5, 4, Sonnet, Opus)",
+	gemini: "Google Gemini / Gemma models",
+	llama: "Meta Llama models (e.g. Llama-3, Llama-3.1, Llama-3.3)",
+	mistral: "Mistral / Mixtral models",
+	other: "Other or unknown models",
+};
 
 /** Which part of the message we're currently in — only affects the icon. */
 type Phase = "thinking" | "answering" | null;
-
-/** One streamed chunk: when it arrived, how many estimated tokens it carried. */
-interface Sample {
-	ts: number;
-	tokens: number;
-}
 
 /** Debug: full per-delta log for offline analysis (see /tokenspeed-debug). */
 interface DebugRow {
@@ -51,33 +137,195 @@ let debugRows: DebugRow[] = [];
 let debugUsage: { output?: number; reasoning?: number; chars?: number } = {};
 
 interface Tracker {
-	/** Timestamp of the first delta of this message. */
 	startTime: number | null;
-	/** Timestamp of the last delta of this message. */
 	endTime: number | null;
-	/** Current phase — icon only. */
 	phase: Phase;
-	/** Rolling window of recent samples (ts + estimated tokens of each delta). */
-	samples: Sample[];
-	/** Total chars across text and thinking deltas of this message. */
 	textChars: number;
-	/** Total chars across tool call deltas of this message. */
 	toolChars: number;
-	/** Total estimated tokens streamed so far. */
 	estimatedTokens: number;
-	/** Final `usage.output` from the provider, once it arrives. */
 	usageOutput: number;
-	/** Final combined speed (tok/s) for this message. */
 	lastSpeed: number | null;
-	/** Real-time speed (tok/s) while streaming. */
-	currentSpeed: number | null;
+}
+
+/**
+ * Exponentially decayed token and time sums on one half-life.
+ */
+export class DecayedSums {
+	tokens = 0;
+	time = 0;
+
+	constructor(readonly halfLifeMs: number) {}
+
+	advance(dtMs: number, inflight: boolean, hiddenRate: number): void {
+		if (dtMs <= 0) return;
+		const f = 2 ** (-dtMs / this.halfLifeMs);
+		this.tokens *= f;
+		this.time *= f;
+		if (inflight) {
+			const integral = (this.halfLifeMs / LN2) * (1 - f);
+			this.time += integral;
+			this.tokens += hiddenRate * integral;
+		}
+	}
+
+	reset(): void {
+		this.tokens = 0;
+		this.time = 0;
+	}
+}
+
+/**
+ * Live generation throughput meter ported from Oh My Pi.
+ */
+export class TokenRateMeter {
+	readonly #count: (text: string) => number;
+	readonly #history = METER_HALF_LIVES_MS.map((ms) => new DecayedSums(ms));
+	readonly #inflight = METER_HALF_LIVES_MS.map((ms) => new DecayedSums(ms));
+	#startedAt: number | null = null;
+	#advancedTo = 0;
+	#inflightLocal = 0;
+	#inflightHiddenRate = 0;
+	#pendingIndex = -1;
+	#pending = "";
+	#hiddenTokens = 0;
+	#hiddenSpanMs = 0;
+
+	constructor(count: (text: string) => number) {
+		this.#count = count;
+	}
+
+	begin(nowMs: number = Date.now()): void {
+		this.#clearInflight();
+		this.#startedAt = nowMs;
+		this.#advancedTo = nowMs;
+		this.#inflightHiddenRate = Math.max(
+			0,
+			this.#hiddenTokens / (this.#hiddenSpanMs + METER_HIDDEN_PRIOR_MS),
+		);
+	}
+
+	push(text: string, nowMs: number = Date.now()): void {
+		if (text.length === 0) return;
+		if (this.#startedAt === null) this.begin(nowMs);
+		const index = Math.floor((nowMs - (this.#startedAt ?? nowMs)) / METER_BUCKET_MS);
+		if (index !== this.#pendingIndex) {
+			this.#flushPending(true, nowMs);
+			this.#pendingIndex = index;
+		}
+		this.#pending += text;
+	}
+
+	end(outputTokens: number | undefined, nowMs: number = Date.now()): void {
+		if (this.#startedAt === null) return;
+		this.#flushPending(false, nowMs);
+		this.#advance(nowMs);
+		const spanMs = nowMs - this.#startedAt;
+		const billed =
+			outputTokens !== undefined && Number.isFinite(outputTokens) && outputTokens > 0;
+		let extra = 0;
+		if (billed) {
+			const hidden = outputTokens - this.#inflightLocal;
+			this.#hiddenTokens = this.#hiddenTokens * METER_HIDDEN_DECAY + hidden;
+			this.#hiddenSpanMs = this.#hiddenSpanMs * METER_HIDDEN_DECAY + spanMs;
+			extra = hidden - this.#inflightHiddenRate * spanMs;
+		}
+		for (let k = 0; k < this.#history.length; k++) {
+			const live = this.#inflight[k];
+			const corrected = live.tokens + (spanMs > 0 ? (extra * live.time) / spanMs : 0);
+			this.#history[k].tokens += Math.max(0, corrected);
+			this.#history[k].time += live.time;
+		}
+		this.#clearInflight();
+	}
+
+	reset(): void {
+		this.#clearInflight();
+		for (const sums of this.#history) sums.reset();
+	}
+
+	seed(outputTokens: number, durationMs: number): void {
+		if (
+			!Number.isFinite(outputTokens) ||
+			outputTokens <= 0 ||
+			!Number.isFinite(durationMs) ||
+			durationMs <= 0
+		) {
+			this.reset();
+			return;
+		}
+		this.#clearInflight();
+		const scale = Math.max(1, METER_MIN_TOKENS / outputTokens, METER_MIN_TIME_MS / durationMs);
+		for (const sums of this.#history) {
+			sums.tokens = outputTokens * scale;
+			sums.time = durationMs * scale;
+		}
+	}
+
+	rate(nowMs: number = Date.now()): number | null {
+		const dtMs = this.#startedAt === null ? 0 : nowMs - this.#advancedTo;
+		const pendingTokens = this.#pending.length > 0 ? this.#count(this.#pending) : 0;
+		let tokens = 0;
+		let time = 0;
+		let evidenceTokens = 0;
+		let evidenceTime = 0;
+		for (let k = 0; k < this.#history.length; k++) {
+			const f = 2 ** (-dtMs / METER_HALF_LIVES_MS[k]);
+			const integral = (METER_HALF_LIVES_MS[k] / LN2) * (1 - f);
+			evidenceTokens =
+				(this.#history[k].tokens + this.#inflight[k].tokens) * f +
+				this.#inflightHiddenRate * integral +
+				pendingTokens;
+			evidenceTime = (this.#history[k].time + this.#inflight[k].time) * f + integral;
+			tokens += evidenceTokens;
+			time += evidenceTime;
+		}
+		if (evidenceTokens < METER_MIN_TOKENS || evidenceTime < METER_MIN_TIME_MS) return null;
+		return (tokens * 1000) / time;
+	}
+
+	#advance(nowMs: number): void {
+		const dtMs = nowMs - this.#advancedTo;
+		if (dtMs <= 0) return;
+		this.#advancedTo = nowMs;
+		for (let k = 0; k < this.#history.length; k++) {
+			this.#history[k].advance(dtMs, false, 0);
+			this.#inflight[k].advance(dtMs, true, this.#inflightHiddenRate);
+		}
+	}
+
+	#clearInflight(): void {
+		for (const sums of this.#inflight) sums.reset();
+		this.#startedAt = null;
+		this.#inflightLocal = 0;
+		this.#inflightHiddenRate = 0;
+		this.#pendingIndex = -1;
+		this.#pending = "";
+	}
+
+	#flushPending(carry: boolean, nowMs: number): void {
+		if (this.#pendingIndex < 0 || this.#pending.length === 0) return;
+		let text = this.#pending;
+		let tail = "";
+		if (carry) {
+			const cut = Math.max(text.lastIndexOf(" "), text.lastIndexOf("\n"));
+			if (cut > 0 && text.length - cut <= METER_CARRY_MAX_CHARS) {
+				tail = text.slice(cut);
+				text = text.slice(0, cut);
+			}
+		}
+		this.#pending = tail;
+		if (text.length === 0) return;
+		this.#advance(nowMs);
+		const tokens = this.#count(text);
+		for (const sums of this.#inflight) sums.tokens += tokens;
+		this.#inflightLocal += tokens;
+	}
 }
 
 /**
  * Adaptive chars-per-token ratio estimator.
- * Distinguishes general text (including CJK/English/thinking) from JSON/code.
  */
-class CharRatio {
+export class CharRatio {
 	private history: number[] = [];
 
 	value(): number {
@@ -86,18 +334,13 @@ class CharRatio {
 		return sorted[Math.floor(sorted.length / 2)];
 	}
 
-	/**
-	 * Calibrate ratio after receiving authoritative usage.output at message_end.
-	 */
 	update(textChars: number, toolChars: number, totalTokens: number) {
 		if (totalTokens <= 0 || (textChars <= 0 && toolChars <= 0)) return;
 
-		// Deduct estimated tool tokens (using fixed JSON ratio) to isolate text ratio
 		const estToolTokens = toolChars / DEFAULT_TOOL_RATIO;
 		const textTokens = Math.max(1, totalTokens - estToolTokens);
 		if (textChars > 0) {
 			const ratio = textChars / textTokens;
-			// Sanity clamp: real tokenizers stay within ~0.6..6 chars/token.
 			if (isFinite(ratio) && ratio >= 0.6 && ratio <= 6) {
 				this.history.push(ratio);
 				if (this.history.length > RATIO_HISTORY) this.history.shift();
@@ -108,44 +351,272 @@ class CharRatio {
 
 /**
  * Fast character-level token estimation.
- * Takes into account CJK characters (~0.6-1 token/char) vs ASCII words (~0.25-0.3 token/char).
  */
-function estimateDeltaTokens(delta: string, baseRatio: number, isToolCall: boolean): number {
+export function estimateDeltaTokens(delta: string, baseRatio: number, isToolCall: boolean): number {
 	if (!delta || delta.length === 0) return 0;
 	if (isToolCall) {
 		return delta.length / DEFAULT_TOOL_RATIO;
 	}
 
-	// Count CJK characters for higher precision before/alongside calibration
 	let cjkCount = 0;
 	for (let i = 0; i < delta.length; i++) {
 		const code = delta.charCodeAt(i);
 		if (
-			(code >= 0x4e00 && code <= 0x9fff) || // CJK Unified Ideographs
-			(code >= 0x3400 && code <= 0x4dbf) || // CJK Extension A
-			(code >= 0x3000 && code <= 0x303f) || // CJK Symbols and Punctuation
-			(code >= 0xff00 && code <= 0xffef)    // Halfwidth and Fullwidth Forms
+			(code >= 0x4e00 && code <= 0x9fff) ||
+			(code >= 0x3400 && code <= 0x4dbf) ||
+			(code >= 0x3000 && code <= 0x303f) ||
+			(code >= 0xff00 && code <= 0xffef)
 		) {
 			cjkCount++;
 		}
 	}
 
 	const nonCjkCount = delta.length - cjkCount;
-	// CJK is typically ~1.4 chars/token (~0.7 tokens/char)
-	// Non-CJK uses calibrated base ratio (or default)
 	const cjkTokens = cjkCount * 0.7;
 	const nonCjkTokens = nonCjkCount / Math.max(1.5, baseRatio);
 
 	return cjkTokens + nonCjkTokens;
 }
 
+/**
+ * Fast-path rule classifier before invoking Jev.
+ */
+export function fastClassifyModel(modelId: string): string | null {
+	const lower = modelId.toLowerCase();
+	if (lower.includes("minimax") || lower.includes("abab")) return "minimax";
+	if (lower.includes("deepseek")) return "deepseek";
+	if (lower.includes("qwen")) return "qwen";
+	if (lower.includes("glm") || lower.includes("chatglm")) return "glm";
+	if (
+		lower.includes("gpt") ||
+		lower.includes("o1") ||
+		lower.includes("o3") ||
+		lower.includes("codex")
+	)
+		return "openai";
+	if (lower.includes("claude") || lower.includes("sonnet") || lower.includes("opus"))
+		return "claude";
+	if (lower.includes("gemini") || lower.includes("gemma")) return "gemma";
+	if (lower.includes("llama")) return "llama";
+	if (lower.includes("mistral") || lower.includes("mixtral") || lower.includes("codestral"))
+		return "mistral";
+	if (lower.includes("grok")) return "grok";
+	if (lower.includes("phi")) return "phi";
+	if (lower.includes("yi-") || lower.includes("01-ai")) return "yi";
+	return null;
+}
+
+/**
+ * Read Jev API key from ~/.pi/agent/auth.json
+ */
+function getJevApiKey(): string | null {
+	try {
+		const authPath = path.join(os.homedir(), ".pi", "agent", "auth.json");
+		if (!fs.existsSync(authPath)) return null;
+		const auth = JSON.parse(fs.readFileSync(authPath, "utf8"));
+		const jev = auth["typesafe-jev"];
+		if (!jev) return null;
+		if (typeof jev === "string") return jev;
+		return jev.key || jev.apiKey || jev.token || null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Tokenizer Manager: handles classification (Jev + cache), lazy downloading, and caching.
+ */
+class TokenizerManager {
+	private readonly cacheDir: string;
+	private readonly taxonomyCacheFile: string;
+	private taxonomyCache: Record<string, string> = {};
+	private tokenizerInstances = new Map<string, Tokenizer>();
+	private downloading = new Set<string>();
+
+	constructor() {
+		this.cacheDir = path.join(os.homedir(), ".pi", "agent", "cache", "tokenizers");
+		this.taxonomyCacheFile = path.join(os.homedir(), ".pi", "agent", "model-tokenizer-cache.json");
+		try {
+			fs.mkdirSync(this.cacheDir, { recursive: true });
+			if (fs.existsSync(this.taxonomyCacheFile)) {
+				this.taxonomyCache = JSON.parse(fs.readFileSync(this.taxonomyCacheFile, "utf8"));
+			}
+		} catch {
+			// ignore
+		}
+	}
+
+	/**
+	 * Classify model identifier into tokenizer family.
+	 * Fast-path -> Local Cache -> Jev.
+	 */
+	async resolveFamily(modelId: string): Promise<string> {
+		if (!modelId) return "generic";
+
+		// 1. Fast path
+		const fast = fastClassifyModel(modelId);
+		if (fast) return fast;
+
+		// 2. Local cache
+		if (this.taxonomyCache[modelId]) {
+			return this.taxonomyCache[modelId];
+		}
+
+		// 3. Jev evaluation
+		const apiKey = getJevApiKey();
+		if (apiKey) {
+			try {
+				const client = createJevClient({ apiKey });
+				const res = await client.evaluate({
+					state: { modelId },
+					questions: {
+						family: {
+							type: "choice",
+							instructions:
+								"Classify this deployed model identifier into its core base architecture/tokenizer family.",
+							criteria: JEV_CRITERIA,
+						},
+					},
+				});
+				const choice = res.answers.family?.choice;
+				if (choice && choice !== "other") {
+					const mapped = choice === "gemini" ? "gemma" : choice;
+					this.taxonomyCache[modelId] = mapped;
+					try {
+						fs.writeFileSync(
+							this.taxonomyCacheFile,
+							JSON.stringify(this.taxonomyCache, null, 2),
+							"utf8",
+						);
+					} catch {
+						// ignore
+					}
+					return mapped;
+				}
+			} catch {
+				// Fallback if Jev request fails
+			}
+		}
+
+		return "generic";
+	}
+
+	/**
+	 * Get loaded tokenizer for a family if available, or start background lazy download.
+	 */
+	getOrLoad(family: string, onLoaded?: () => void): Tokenizer | null {
+		if (family === "generic" || !TOKENIZER_REGISTRY[family]) {
+			return null;
+		}
+
+		// 1. In-memory loaded instance
+		if (this.tokenizerInstances.has(family)) {
+			return this.tokenizerInstances.get(family)!;
+		}
+
+		const localPath = path.join(this.cacheDir, `${family}.json`);
+
+		// 2. Local cached file exists -> load asynchronously
+		if (fs.existsSync(localPath)) {
+			fs.promises
+				.readFile(localPath, "utf8")
+				.then((text) => {
+					const json = JSON.parse(text);
+					const tok = new Tokenizer(json, {});
+					this.tokenizerInstances.set(family, tok);
+					onLoaded?.();
+				})
+				.catch(() => {
+					// Corrupt file, remove and re-download
+					try {
+						fs.unlinkSync(localPath);
+					} catch {
+						// ignore
+					}
+				});
+			return null;
+		}
+
+		// 3. Not downloaded yet -> start non-blocking background fetch
+		if (!this.downloading.has(family)) {
+			this.downloading.add(family);
+			const entry = TOKENIZER_REGISTRY[family];
+			this.downloadFile(entry.url, entry.fallbackUrl, localPath)
+				.then((json) => {
+					this.downloading.delete(family);
+					if (json) {
+						const tok = new Tokenizer(json, {});
+						this.tokenizerInstances.set(family, tok);
+						onLoaded?.();
+					}
+				})
+				.catch(() => {
+					this.downloading.delete(family);
+				});
+		}
+
+		return null;
+	}
+
+	private async downloadFile(
+		url: string,
+		fallbackUrl: string | undefined,
+		destPath: string,
+	): Promise<object | null> {
+		const tryFetch = async (targetUrl: string) => {
+			const res = await fetch(targetUrl, {
+				headers: { "User-Agent": "Mozilla/5.0" },
+				redirect: "follow",
+			});
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			return await res.text();
+		};
+
+		let text: string;
+		try {
+			text = await tryFetch(url);
+		} catch (err) {
+			if (fallbackUrl) {
+				text = await tryFetch(fallbackUrl);
+			} else {
+				throw err;
+			}
+		}
+
+		const tmpPath = `${destPath}.tmp-${Date.now()}`;
+		await fs.promises.writeFile(tmpPath, text, "utf8");
+		await fs.promises.rename(tmpPath, destPath);
+		return JSON.parse(text);
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	let enabled = true;
 	let streaming = false;
 	const charRatio = new CharRatio();
-	let tracker: Tracker = newTracker();
+	const tokenizerManager = new TokenizerManager();
 
-	// History of finalized per-message speeds (most recent first).
+	let currentFamily = "generic";
+	let activeTokenizer: Tokenizer | null = null;
+	let isEstimate = true;
+
+	let lastCtx: { ui: { setStatus(key: string, text?: string): void } } | null = null;
+
+	function countTokens(text: string): number {
+		if (!isEstimate && activeTokenizer) {
+			try {
+				return activeTokenizer.encode(text).ids.length;
+			} catch {
+				return estimateDeltaTokens(text, charRatio.value(), false);
+			}
+		}
+		return estimateDeltaTokens(text, charRatio.value(), false);
+	}
+
+	// Oh My Pi TokenRateMeter using the dynamic counter
+	const meter = new TokenRateMeter((text) => countTokens(text));
+
+	let tracker: Tracker = newTracker();
 	let messageSpeeds: number[] = [];
 
 	function newTracker(): Tracker {
@@ -153,22 +624,39 @@ export default function (pi: ExtensionAPI) {
 			startTime: null,
 			endTime: null,
 			phase: null,
-			samples: [],
 			textChars: 0,
 			toolChars: 0,
 			estimatedTokens: 0,
 			usageOutput: 0,
 			lastSpeed: null,
-			currentSpeed: null,
 		};
 	}
 
 	function pushStatus(ctx: { ui: { setStatus(key: string, text?: string): void } }) {
+		lastCtx = ctx;
 		if (!enabled) return;
 		ctx.ui.setStatus(STATUS_KEY, formatSpeed());
 	}
 
-	/** Record one streamed delta and refresh the real-time speed. */
+	/**
+	 * Switch model family and load its tokenizer non-blockingly.
+	 */
+	function updateActiveModel(modelId: string | undefined) {
+		if (!modelId) return;
+		tokenizerManager.resolveFamily(modelId).then((family) => {
+			currentFamily = family;
+			const tok = tokenizerManager.getOrLoad(family, () => {
+				// Called when tokenizer is loaded from disk or network
+				activeTokenizer = tokenizerManager.getOrLoad(family);
+				isEstimate = activeTokenizer === null;
+				if (lastCtx) pushStatus(lastCtx);
+			});
+			activeTokenizer = tok;
+			isEstimate = activeTokenizer === null;
+			if (lastCtx) pushStatus(lastCtx);
+		});
+	}
+
 	function recordDelta(delta: string, isToolCall: boolean, now: number) {
 		if (tracker.startTime === null) tracker.startTime = now;
 		tracker.endTime = now;
@@ -179,51 +667,20 @@ export default function (pi: ExtensionAPI) {
 			tracker.textChars += delta.length;
 		}
 
-		const tokens = estimateDeltaTokens(delta, charRatio.value(), isToolCall);
+		const tokens = isEstimate
+			? estimateDeltaTokens(delta, charRatio.value(), isToolCall)
+			: countTokens(delta);
 		tracker.estimatedTokens += tokens;
 
-		tracker.samples.push({ ts: now, tokens });
-
-		// Evict samples older than WINDOW_MS
-		const cutoff = now - WINDOW_MS;
-		while (tracker.samples.length > MIN_SAMPLES && tracker.samples[0].ts < cutoff) {
-			tracker.samples.shift();
-		}
-
-		if (tracker.samples.length >= MIN_SAMPLES) {
-			// Skip tracker.samples[0] (initial chunk burst / connection warm-up)
-			const baseSample = tracker.samples[1];
-			const lastSample = tracker.samples[tracker.samples.length - 1];
-			const windowSpanMs = lastSample.ts - baseSample.ts;
-
-			if (windowSpanMs >= MIN_WINDOW_TIME_MS) {
-				// Sum tokens generated from baseSample onwards
-				let windowTokens = 0;
-				for (let i = 2; i < tracker.samples.length; i++) {
-					windowTokens += tracker.samples[i].tokens;
-				}
-				const rawSpeed = (windowTokens / windowSpanMs) * 1000;
-				// Smooth with exponential moving average to avoid single-packet jitter
-				if (tracker.currentSpeed === null) {
-					tracker.currentSpeed = rawSpeed;
-				} else {
-					tracker.currentSpeed = tracker.currentSpeed * 0.7 + rawSpeed * 0.3;
-				}
-			}
-		}
+		meter.push(delta, now);
 	}
-
-	pi.on("session_start", async (_event, ctx) => {
-		tracker = newTracker();
-		messageSpeeds = [];
-		pushStatus(ctx);
-	});
 
 	function formatSpeed(): string {
 		const fs = (v: number | null) =>
 			v !== null && isFinite(v) && v > 0 ? v.toFixed(1) : "—";
 
-		const short = streaming ? tracker.currentSpeed : tracker.lastSpeed;
+		const liveRate = meter.rate();
+		const short = streaming ? liveRate : tracker.lastSpeed;
 		const mid = messageSpeeds.length >= 1 ? messageSpeeds[0] : null;
 		let long: number | null = null;
 		if (messageSpeeds.length >= 2) {
@@ -233,21 +690,80 @@ export default function (pi: ExtensionAPI) {
 			long = messageSpeeds[0];
 		}
 
+		const suffix = isEstimate ? " (estimate)" : "";
+
 		if (streaming) {
-			const tag = tracker.phase === "thinking" ? "💭" : "✍";
+			const tag = tracker.phase === "thinking" ? "🤔" : "✏️";
 			if (short === null && mid === null && long === null) {
-				return `${tag} generating…`;
+				return `${tag} generating…${suffix}`;
 			}
-			return `${tag} ${fs(short)} / ${fs(mid)} / ${fs(long)} tok/s`;
+			return `${tag} ${fs(short)} / ${fs(mid)} / ${fs(long)} tok/s${suffix}`;
 		}
 
-		return `⚡ ${fs(short)} / ${fs(mid)} / ${fs(long)} tok/s`;
+		return `⚡ ${fs(short)} / ${fs(mid)} / ${fs(long)} tok/s${suffix}`;
 	}
 
-	pi.on("message_start", async (event) => {
+	pi.on("session_start", async (_event, ctx) => {
+		lastCtx = ctx;
+		tracker = newTracker();
+		messageSpeeds = [];
+		meter.reset();
+
+		if (ctx.model) {
+			updateActiveModel(ctx.model.id);
+		}
+
+		// Seed from previous session entries if available
+		try {
+			const entries = ctx.sessionManager?.getEntries?.() ?? [];
+			for (let i = entries.length - 1; i >= 0; i--) {
+				const entry = entries[i];
+				if (entry.type === "message" && entry.message?.role === "assistant") {
+					const msg = entry.message;
+					const output = msg.usage?.output;
+					const duration = (msg as { duration?: number }).duration;
+					if (
+						typeof output === "number" &&
+						output > 0 &&
+						typeof duration === "number" &&
+						duration > 0
+					) {
+						const speed = (output * 1000) / duration;
+						messageSpeeds.push(speed);
+						if (messageSpeeds.length === 1) {
+							tracker.lastSpeed = speed;
+							meter.seed(output, duration);
+						}
+						if (messageSpeeds.length >= HISTORY_LEN) break;
+					}
+				}
+			}
+		} catch {
+			// Ignore if session entries are unavailable
+		}
+
+		pushStatus(ctx);
+	});
+
+	pi.on("model_select", async (event, ctx) => {
+		lastCtx = ctx;
+		if (event.model) {
+			updateActiveModel(event.model.id);
+		}
+	});
+
+	pi.on("message_start", async (event, ctx) => {
+		lastCtx = ctx;
 		if (event.message.role !== "assistant") return;
 		tracker = newTracker();
 		streaming = true;
+
+		const modelId = event.message.model || ctx.model?.id;
+		if (modelId) {
+			updateActiveModel(modelId);
+		}
+
+		meter.begin(Date.now());
 	});
 
 	pi.on("message_update", async (event, ctx) => {
@@ -273,7 +789,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (debugEnabled) {
-			const estTokens = estimateDeltaTokens(delta, charRatio.value(), ev.type === "toolcall_delta");
+			const estTokens = countTokens(delta);
 			debugRows.push({ ts: now, type: ev.type, chars: delta.length, tokens: estTokens });
 		}
 
@@ -284,24 +800,25 @@ export default function (pi: ExtensionAPI) {
 		if (event.message.role !== "assistant") return;
 		streaming = false;
 
+		const now = Date.now();
 		const usageOutput = event.message.usage?.output ?? 0;
 		if (usageOutput > 0) tracker.usageOutput = usageOutput;
 
-		// Finalized speed: total authoritative tokens divided by total generation duration
-		// from first chunk arrival to last chunk arrival.
-		const elapsed = tracker.startTime !== null && tracker.endTime !== null
-			? tracker.endTime - tracker.startTime
-			: null;
+		meter.end(tracker.usageOutput > 0 ? tracker.usageOutput : undefined, now);
+
+		const elapsed =
+			tracker.startTime !== null && tracker.endTime !== null
+				? tracker.endTime - tracker.startTime
+				: null;
 		if (elapsed !== null && elapsed > 0) {
-			const totalTokens = tracker.usageOutput > 0
-				? tracker.usageOutput
-				: tracker.estimatedTokens;
+			const totalTokens =
+				tracker.usageOutput > 0 ? tracker.usageOutput : tracker.estimatedTokens;
 			if (totalTokens > 0) {
 				tracker.lastSpeed = (totalTokens / elapsed) * 1000;
+				meter.seed(totalTokens, elapsed);
 			}
 		}
 
-		// Calibrate ratio for future message estimates
 		if (tracker.usageOutput > 0) {
 			charRatio.update(tracker.textChars, tracker.toolChars, tracker.usageOutput);
 		}
@@ -312,18 +829,24 @@ export default function (pi: ExtensionAPI) {
 				reasoning: event.message.usage?.reasoning ?? undefined,
 				chars: tracker.textChars + tracker.toolChars || undefined,
 			};
-			const fs = await import("node:fs");
-			const path = `/tmp/tokenspeed-debug-${Date.now()}.json`;
-			fs.writeFileSync(
-				path,
+			const fsModule = await import("node:fs");
+			const debugPath = `/tmp/tokenspeed-debug-${Date.now()}.json`;
+			fsModule.writeFileSync(
+				debugPath,
 				JSON.stringify(
-					{ usage: debugUsage, ratio: charRatio.value(), samples: debugRows },
+					{
+						usage: debugUsage,
+						ratio: charRatio.value(),
+						family: currentFamily,
+						isEstimate,
+						samples: debugRows,
+					},
 					null,
 					"\t",
 				),
 			);
 			debugRows = [];
-			ctx.ui.notify(`tokenspeed debug dump: ${path}`, "info");
+			ctx.ui.notify(`tokenspeed debug dump: ${debugPath}`, "info");
 		}
 
 		if (tracker.lastSpeed !== null) {
