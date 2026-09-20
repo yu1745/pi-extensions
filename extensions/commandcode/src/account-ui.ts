@@ -5,11 +5,13 @@ import type { CommandCodeAccountManager } from "./account-manager.ts"
 import {
   accountQuotaMetrics,
   accountQuotaText,
+  padCell,
   padEndVisible,
   padStartVisible,
   refreshAccountDisplayQuota,
   resetLabel,
   selectAccountQuotaMenu,
+  toEpochMs,
   type AccountQuotaCache,
 } from "./account-quota-ui.ts"
 
@@ -113,6 +115,152 @@ interface AccountUiOptions {
   saveConfig?: typeof saveAccountConfig
 }
 
+function formatAccountExpiryBadge(
+  accountEndMs: number | undefined,
+  allEndMs: Array<{ id: string; endMs: number }>,
+): string {
+  if (!accountEndMs) return "重置时间未知"
+  const date = new Date(accountEndMs)
+  const month = String(date.getMonth() + 1).padStart(2, "0")
+  const day = String(date.getDate()).padStart(2, "0")
+  const hour = String(date.getHours()).padStart(2, "0")
+  const min = String(date.getMinutes()).padStart(2, "0")
+  const shortDate = `${month}/${day} ${hour}:${min}`
+
+  const valid = allEndMs.filter((e) => e.endMs > 0)
+  if (valid.length > 1) {
+    const minEnd = Math.min(...valid.map((e) => e.endMs))
+    if (accountEndMs === minEnd) {
+      return `${shortDate} (先到期)`
+    }
+    return `${shortDate} (后到期)`
+  }
+  return shortDate
+}
+
+function buildAccountDetailCard(
+  account: { id: string; apiKey: string },
+  current: boolean,
+  cooldown: any,
+  quotaEntry: any,
+  draftThreshold: number,
+  expiryBadge: string,
+  theme: any,
+): string[] {
+  const result = quotaEntry?.result
+  const credits = result?.ok ? result.quota.credits : undefined
+  const sub = result?.ok ? result.quota.subscription : undefined
+  const time = quotaEntry
+    ? new Date(quotaEntry.fetchedAt).toLocaleTimeString("zh-CN", { hour12: false })
+    : "--"
+
+  let planName = "未知方案"
+  if (sub?.planId) {
+    if (sub.planId.includes("goat")) planName = "goat 账号 (individual-goat)"
+    else if (sub.planId.includes("go")) planName = "go 账号 (individual-go)"
+    else planName = `${sub.planId} 账号`
+  }
+
+  const roleText = current
+    ? theme.fg("success", theme.bold("当前活跃账号"))
+    : theme.fg("dim", "备用账号")
+
+  const statusText = cooldown
+    ? theme.fg(
+        "error",
+        theme.bold(`冷却中 (${resetLabel(cooldown.recheckAt).replace("后重置", "后可重新核验")})`),
+      )
+    : theme.fg("success", "正常可用")
+
+  const lines: string[] = [
+    theme.fg("muted", "方案: ") +
+      theme.fg("accent", theme.bold(planName)) +
+      "   " +
+      theme.fg("muted", "角色: ") +
+      roleText +
+      "   " +
+      theme.fg("muted", "状态: ") +
+      statusText,
+    "",
+    theme.fg("accent", theme.bold("额度余额")),
+  ]
+
+  if (credits) {
+    const availNum = credits.remainingCredits
+    const availColor = availNum <= draftThreshold ? "error" : availNum < 2 ? "warning" : "success"
+    lines.push(
+      theme.fg("muted", "  近期可用: ") +
+        theme.fg(availColor, theme.bold(`$${availNum.toFixed(2)}`)) +
+        "         " +
+        theme.fg("muted", "账户总额: ") +
+        theme.bold(`$${credits.remainingCredits.toFixed(2)}`),
+    )
+    lines.push(
+      theme.fg("muted", "  月度额度: ") +
+        theme.fg("accent", `$${credits.monthlyCredits.toFixed(2)}`) +
+        "         " +
+        theme.fg("muted", "购买额度: ") +
+        theme.fg(
+          credits.purchasedCredits > 0 ? "success" : "muted",
+          `$${credits.purchasedCredits.toFixed(2)}`,
+        ) +
+        "         " +
+        theme.fg("muted", "免费额度: ") +
+        theme.fg(credits.freeCredits > 0 ? "success" : "muted", `$${credits.freeCredits.toFixed(2)}`),
+    )
+  } else {
+    lines.push(theme.fg("dim", "  额度数据未返回或查询失败"))
+  }
+
+  lines.push("", theme.fg("accent", theme.bold("用量窗口")))
+  if (credits) {
+    const five = credits.windowLimits.find((l: any) => l.window === "fiveHour")
+    const week = credits.windowLimits.find((l: any) => l.window === "weekly")
+
+    const formatWin = (label: string, limit?: any) => {
+      if (!limit) return theme.fg("dim", `  ${label}: 未返回窗口数据`)
+      const pct = limit.cap > 0 ? Math.round((limit.used / limit.cap) * 100) : 0
+      const pctColor = pct >= 90 ? "error" : pct >= 70 ? "warning" : "muted"
+      const reset = resetLabel(limit.resetAt === null ? null : limit.resetAt * 1000)
+      return (
+        theme.fg("muted", `  ${label}: `) +
+        theme.fg(pctColor, `${limit.used.toFixed(2)} / ${limit.cap.toFixed(2)} (${pct}%)`) +
+        theme.fg("dim", ` · ${reset}`)
+      )
+    }
+
+    lines.push(formatWin("5小时窗口", five))
+    lines.push(formatWin("每周窗口 ", week))
+
+    if (sub?.currentPeriodEnd) {
+      const endMs = toEpochMs(sub.currentPeriodEnd)
+      if (endMs) {
+        const dateStr = new Date(endMs).toLocaleString("zh-CN", {
+          timeZone: "Asia/Shanghai",
+          hour12: false,
+        })
+        const reset = resetLabel(endMs)
+        const isEarliest = expiryBadge.includes("先到期")
+        const badgeColor = isEarliest ? "warning" : "muted"
+        lines.push(
+          theme.fg("muted", "  月度周期 : ") +
+            theme.fg(badgeColor, theme.bold(`${dateStr} 到期`)) +
+            theme.fg("dim", ` (${reset}${isEarliest ? " · ⭐ 先到期优先" : ""})`),
+        )
+      }
+    }
+  } else {
+    lines.push(theme.fg("dim", "  窗口数据未返回"))
+  }
+
+  lines.push(
+    "",
+    theme.fg("dim", `提示: 查询时间 ${time} · 百分比为已用比例 · 此处查询不改变轮换状态`),
+  )
+
+  return lines
+}
+
 const validId = (id: string) => /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id)
 const nextId = (draft: AccountConfigDraft) => {
   let i = 1
@@ -160,41 +308,93 @@ export async function openCommandCodeAccounts(
   const notify = (text: string, level: "info" | "warning" | "error" = "info") =>
     ctx.ui.notify(text, level)
   try {
-    await refreshAccountDisplayQuota(ctx, draft.accounts, quotaCache, options)
+    await refreshAccountDisplayQuota(ctx, draft.accounts, quotaCache, {
+      ...options,
+      remainingCreditsThreshold: draft.remainingCreditsThreshold,
+    })
+    await readRuntime()
     for (;;) {
       // The cache is keyed by the actual key, so replacing a key never reuses old quota.
       const theme = ctx.ui.theme
-      const accountItems = draft.accounts.map((account, index) => {
+
+      const allEndMs = draft.accounts
+        .map((a) => {
+          const q = quotaCache.get(a.apiKey)?.result
+          const sub = q?.ok ? q.quota.subscription : undefined
+          return { id: a.id, endMs: toEpochMs(sub?.currentPeriodEnd) ?? 0 }
+        })
+        .filter((e) => e.endMs > 0)
+
+      const cols = [
+        { header: "账号", width: 10, align: "left" as const },
+        { header: "方案", width: 11, align: "left" as const },
+        { header: "状态", width: 9, align: "left" as const },
+        { header: "近期可用", width: 9, align: "right" as const },
+        { header: "总余额", width: 9, align: "right" as const },
+        { header: "5h已用", width: 7, align: "right" as const },
+        { header: "周已用", width: 7, align: "right" as const },
+        { header: "月到期(北京)", width: 20, align: "left" as const },
+      ]
+
+      const borderLine = (charL: string, charM: string, charR: string) =>
+        theme.fg("dim", "  " + charL + cols.map((c) => "─".repeat(c.width + 2)).join(charM) + charR)
+
+      const tableTop = borderLine("┌", "┬", "┐")
+      const tableHeader =
+        theme.fg("dim", "  │ ") +
+        cols
+          .map((c) => theme.fg("accent", theme.bold(padCell(c.header, c.width, "center"))))
+          .join(theme.fg("dim", " │ ")) +
+        theme.fg("dim", " │")
+      const tableDivider = borderLine("├", "┼", "┤")
+      const tableBottom = borderLine("└", "┴", "┘")
+      const tableWidth = visibleWidth(tableTop)
+      const sep = theme.fg("dim", " │ ")
+
+      const accountItems = draft.accounts.map((account) => {
         let id = account.id
         for (const entry of draft.accounts) id = id.split(entry.apiKey).join("[隐藏]")
         const current = account.id === runtimeState?.activeAccountId
         const unchangedKey = options.manager?.accounts.some(
           (entry) => entry.id === account.id && entry.apiKey === account.apiKey,
         )
-        const cooldown = unchangedKey ? runtimeState?.accounts[account.id]?.verification : undefined
         const quotaEntry = quotaCache.get(account.apiKey)
-        const quota = accountQuotaText(quotaEntry)
         const metrics = accountQuotaMetrics(quotaEntry)
+        const isFreshlyAvailable =
+          metrics.available !== null &&
+          metrics.available > draft.remainingCreditsThreshold &&
+          (metrics.fivePct === null || metrics.fivePct < 100) &&
+          (metrics.weekPct === null || metrics.weekPct < 100)
+        const cooldown =
+          unchangedKey && !isFreshlyAvailable
+            ? runtimeState?.accounts[account.id]?.verification
+            : undefined
 
-        // 格式化表格各列：名称(18)、状态(8)、近期可用(10)、总余额(10)、5h使用率(8)、周使用率(8)
-        const idxStr = `${index + 1}.`.padEnd(3)
-        const icon = current ? theme.fg("success", "●") : theme.fg("dim", "○")
-        const namePart = `${idxStr} ${icon} ${id}`
-        const paddedName = padEndVisible(namePart, 18)
-
-        let statusTag = ""
-        if (cooldown) {
-          statusTag = theme.fg("error", padEndVisible("冷却中", 8))
-        } else if (current) {
-          statusTag = theme.fg("accent", padEndVisible("活跃中", 8))
-        } else {
-          statusTag = theme.fg("dim", padEndVisible("就绪", 8))
+        const sub = quotaEntry?.result.ok ? quotaEntry.result.quota.subscription : undefined
+        let planBadge = theme.fg("dim", padCell("--", 11, "left"))
+        if (sub?.planId) {
+          if (sub.planId.includes("goat")) {
+            planBadge = theme.fg("warning", padCell("goat 账号", 11, "left"))
+          } else if (sub.planId.includes("go")) {
+            planBadge = theme.fg("accent", padCell("go 账号", 11, "left"))
+          } else {
+            planBadge = theme.fg("muted", padCell(sub.planId, 11, "left"))
+          }
         }
 
-        let availCol = ""
-        let totalCol = ""
-        let fiveCol = ""
-        let weekCol = ""
+        let statusBadge = ""
+        if (cooldown) {
+          statusBadge = theme.fg("error", theme.bold(padCell("× 冷却中", 9, "left")))
+        } else if (current) {
+          statusBadge = theme.fg("success", theme.bold(padCell("● 活跃中", 9, "left")))
+        } else {
+          statusBadge = theme.fg("accent", padCell("○ 就绪", 9, "left"))
+        }
+
+        let availCol = theme.fg("dim", padCell("--", 9, "right"))
+        let totalCol = theme.fg("dim", padCell("--", 9, "right"))
+        let fiveCol = theme.fg("dim", padCell("--", 7, "right"))
+        let weekCol = theme.fg("dim", padCell("--", 7, "right"))
 
         if (metrics.available !== null && metrics.total !== null) {
           const availNum = metrics.available.toFixed(2)
@@ -206,8 +406,8 @@ export async function openCommandCodeAccounts(
               : metrics.available < 2
                 ? "warning"
                 : "success"
-          availCol = theme.fg(availColor, padStartVisible(`$${availNum}`, 10))
-          totalCol = theme.fg("muted", padStartVisible(`$${totalNum}`, 10))
+          availCol = theme.fg(availColor, padCell(`$${availNum}`, 9, "right"))
+          totalCol = theme.bold(padCell(`$${totalNum}`, 9, "right"))
 
           const fiveColor =
             metrics.fivePct !== null && metrics.fivePct >= 90
@@ -217,7 +417,7 @@ export async function openCommandCodeAccounts(
                 : "muted"
           fiveCol = theme.fg(
             fiveColor,
-            padStartVisible(metrics.fivePct !== null ? `${metrics.fivePct}%` : "未知", 8),
+            padCell(metrics.fivePct !== null ? `${metrics.fivePct}%` : "--", 7, "right"),
           )
 
           const weekColor =
@@ -228,22 +428,47 @@ export async function openCommandCodeAccounts(
                 : "muted"
           weekCol = theme.fg(
             weekColor,
-            padStartVisible(metrics.weekPct !== null ? `${metrics.weekPct}%` : "未知", 8),
+            padCell(metrics.weekPct !== null ? `${metrics.weekPct}%` : "--", 7, "right"),
           )
-        } else {
-          availCol = theme.fg("dim", padStartVisible("--", 10))
-          totalCol = theme.fg("dim", padStartVisible("--", 10))
-          fiveCol = theme.fg("dim", padStartVisible("--", 8))
-          weekCol = theme.fg("dim", padStartVisible("--", 8))
         }
 
-        const label = `${paddedName} ${statusTag} ${availCol} ${totalCol} ${fiveCol} ${weekCol}`
-        const stateLine = cooldown
-          ? `冷却中：${resetLabel(cooldown.recheckAt).replace("后重置", "后可重新核验")}（不保证恢复）`
-          : current
-            ? "当前粘性账号"
-            : "备用账号"
-        return { value: account.id, label, detail: [stateLine, ...quota.detail] }
+        const accountEndMs = toEpochMs(sub?.currentPeriodEnd)
+        const expiryBadgeStr = formatAccountExpiryBadge(accountEndMs, allEndMs)
+        let expiryCol = theme.fg("dim", padCell(expiryBadgeStr, 20, "left"))
+        if (expiryBadgeStr.includes("先到期")) {
+          expiryCol = theme.fg("warning", theme.bold(padCell(expiryBadgeStr, 20, "left")))
+        } else if (expiryBadgeStr.includes("后到期")) {
+          expiryCol = theme.fg("muted", padCell(expiryBadgeStr, 20, "left"))
+        }
+
+        const cells = [
+          theme.fg("accent", theme.bold(padCell(id, 10, "left"))),
+          planBadge,
+          statusBadge,
+          availCol,
+          totalCol,
+          fiveCol,
+          weekCol,
+          expiryCol,
+        ]
+
+        const label = theme.fg("dim", "│ ") + cells.join(sep) + theme.fg("dim", " │")
+        const detail = buildAccountDetailCard(
+          account,
+          current,
+          cooldown,
+          quotaEntry,
+          draft.remainingCreditsThreshold,
+          expiryBadgeStr,
+          theme,
+        )
+
+        return {
+          value: account.id,
+          label,
+          detail,
+          detailTitle: `账号详情 · ${id}`,
+        }
       })
       const rows = draft.accounts.map((a) => a.id)
       let totalBalance = 0,
@@ -275,17 +500,84 @@ export async function openCommandCodeAccounts(
       const summaryText = knownBalances
         ? `近期可用 $${totalRecentAvailable.toFixed(2)} / 总余 $${totalBalance.toFixed(2)}`
         : "余额未知"
+
+      const actionItems = [
+        {
+          value: refresh,
+          label: refresh,
+          detailTitle: "操作说明 · 刷新额度",
+          detail: [
+            theme.fg(
+              "muted",
+              "从 Command Code API 重新获取所有账号的最新余额、5小时/周用量与月度到期时间。",
+            ),
+            theme.fg("dim", "注意: 仅查询更新额度，不会切换当前活跃账号。"),
+          ],
+        },
+        {
+          value: add,
+          label: add,
+          detailTitle: "操作说明 · 添加 / 导入 Key",
+          detail: [
+            theme.fg(
+              "muted",
+              "添加新的 API Key 到账号池。支持直接粘贴多个 Key（以逗号或换行分隔）。",
+            ),
+            theme.fg("dim", "内容仅保存在本地配置文件，不进入聊天记录或模型上下文。"),
+          ],
+        },
+        {
+          value: threshold,
+          label: threshold,
+          detailTitle: "操作说明 · 耗尽阈值",
+          detail: [
+            theme.fg("muted", `修改低余额耗尽阈值（当前 ${draft.remainingCreditsThreshold}）。`),
+            theme.fg("dim", "当账号可用余额 ≤ 阈值时自动标记耗尽并轮换下一可用账号。"),
+          ],
+        },
+        {
+          value: save,
+          label: save,
+          detailTitle: "操作说明 · 保存配置",
+          detail: [
+            theme.fg(
+              "muted",
+              dirty()
+                ? "将当前草稿修改写入本地配置文件，并重新加载扩展生效。"
+                : "当前配置已保存，无未提交的修改。",
+            ),
+            theme.fg("dim", dirty() ? "保存后会自动触发扩展重载。" : "无需重复保存。"),
+          ],
+        },
+        {
+          value: exit,
+          label: exit,
+          detailTitle: "操作说明 · 关闭",
+          detail: [
+            theme.fg("muted", dirty() ? "放弃尚未保存的修改并退出。" : "退出账号管理界面，返回终端。"),
+          ],
+        },
+      ]
+
       const choice = await selectAccountQuotaMenu(
         ctx,
         `Command Code · DeepSeek | ${draft.accounts.length} 个账号 | ${summaryText} (${knownBalances}/${draft.accounts.length})${dirty() ? " · 未保存" : ""}`,
-        [
-          ...accountItems,
-          ...[refresh, add, threshold, save, exit].map((label) => ({ value: label, label })),
-        ],
+        [...accountItems, ...actionItems],
+        {
+          accountCount: draft.accounts.length,
+          tableTop,
+          tableHeader,
+          tableDivider,
+          tableBottom,
+          tableWidth,
+        },
       )
       if (choice === refresh) {
+        await refreshAccountDisplayQuota(ctx, draft.accounts, quotaCache, {
+          ...options,
+          remainingCreditsThreshold: draft.remainingCreditsThreshold,
+        })
         await readRuntime()
-        await refreshAccountDisplayQuota(ctx, draft.accounts, quotaCache, options)
         continue
       }
       if (choice === undefined || choice === exit) {

@@ -260,3 +260,64 @@ test("dead PID locks recover and concurrent managers preserve both marks", async
   assert.ok(state.accounts[a.accounts[0].id].verification)
   assert.ok(state.accounts[a.accounts[1].id].verification)
 })
+
+test("getActiveAccount prioritizes accounts whose quota expires earlier", async (t) => {
+  const f = fixture(t)
+  let now = 1000
+  const m = new CommandCodeAccountManager(f.config, {
+    statePath: f.statePath,
+    now: () => now,
+    verify: async () => ({ status: "available", observedAt: now }),
+  })
+  const [a, b] = m.accounts
+
+  // Case 1: Neither account has expiresAt, first account selected by default
+  assert.equal((await m.getActiveAccount()).id, a.id)
+
+  // Case 2: b expires at 2000, a expires at 5000 -> b is chosen because 2000 < 5000
+  await m.markAvailable(a, { expiresAt: 5000 })
+  await m.markAvailable(b, { expiresAt: 2000 })
+  assert.equal((await m.getActiveAccount()).id, b.id)
+
+  // Case 3: a expires at 1500, b expires at 2000 -> a is chosen because 1500 < 2000
+  await m.markAvailable(a, { expiresAt: 1500 })
+  assert.equal((await m.getActiveAccount()).id, a.id)
+
+  // Case 4: a has no expiration (Infinity), b expires at 3000 -> b is chosen
+  await m.markAvailable(a) // no expiresAt -> Infinity
+  await m.markAvailable(b, { expiresAt: 3000 })
+  assert.equal((await m.getActiveAccount()).id, b.id)
+
+  // Case 5: a was exhausted but its recheckAt has arrived; when rechecked and refreshed,
+  // if it expires earlier than b, it is selected!
+  now = 10000
+  await m.markExhausted(a, {
+    status: "exhausted",
+    reasons: ["rate limit"],
+    observedAt: 5000,
+    recheckAt: 8000, // already passed since now = 10000
+  })
+  await m.markAvailable(b, { expiresAt: 20000 })
+  // verify function sets a's expiresAt to 12000 (earlier than b's 20000)
+  m["verify"] = async () => ({ status: "available", observedAt: now, expiresAt: 12000 })
+  assert.equal((await m.getActiveAccount()).id, a.id)
+  // a's verification was cleared
+  assert.equal((await m.snapshot()).accounts[a.id].verification, undefined)
+})
+
+test("markAvailable clears verification and sets expiresAt in store", async (t) => {
+  const f = fixture(t)
+  const m = new CommandCodeAccountManager(f.config, {
+    statePath: f.statePath,
+    verify: async () => exhausted(),
+  })
+  const a = m.accounts[0]
+  await m.markExhausted(a, exhausted(5000))
+  assert.ok((await m.snapshot()).accounts[a.id].verification)
+
+  await m.markAvailable(a, { expiresAt: 12345 })
+  const snap = await m.snapshot()
+  assert.equal(snap.accounts[a.id].verification, undefined)
+  assert.equal(snap.accounts[a.id].expiresAt, 12345)
+})
+

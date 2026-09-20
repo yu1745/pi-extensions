@@ -203,6 +203,7 @@ export default async function (pi: ExtensionAPI) {
             baseUrl: legacyApiBase(apiBase),
             remainingCreditsThreshold: pool.remainingCreditsThreshold,
             extraHeaders: commandCodeHeaders(),
+            includeExpiresAt: true,
             signal,
           }),
       })

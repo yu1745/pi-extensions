@@ -66,7 +66,7 @@ export class CommandCodeAccountManager {
   }
   async snapshot(): Promise<{
     activeAccountId?: string
-    accounts: Record<string, { fingerprint: string; verification?: Exhausted }>
+    accounts: Record<string, { fingerprint: string; verification?: Exhausted; expiresAt?: number }>
   }> {
     return this.store.transaction((state) => ({
       activeAccountId: state.activeAccountId,
@@ -76,10 +76,31 @@ export class CommandCodeAccountManager {
           {
             fingerprint: entry.fingerprint,
             ...(entry.verification ? { verification: structuredClone(entry.verification) } : {}),
+            ...(entry.expiresAt !== undefined ? { expiresAt: entry.expiresAt } : {}),
           },
         ]),
       ),
     }))
+  }
+  async markAvailable(
+    account: CommandCodeAccount,
+    options?: { expiresAt?: number },
+  ): Promise<void> {
+    const a = this.account(account)
+    await this.store.transaction((state) => {
+      const entry = state.accounts[a.id]
+      delete entry.verification
+      if (
+        options?.expiresAt !== undefined &&
+        Number.isFinite(options.expiresAt) &&
+        options.expiresAt > 0
+      ) {
+        entry.expiresAt = options.expiresAt
+      } else {
+        delete entry.expiresAt
+      }
+      entry.revision++
+    })
   }
   async markExhausted(account: CommandCodeAccount, result: Exhausted): Promise<void> {
     const a = this.account(account),
@@ -88,6 +109,7 @@ export class CommandCodeAccountManager {
       const entry = state.accounts[a.id]
       if (!entry.verification || safe.observedAt >= entry.verification.observedAt)
         entry.verification = safe
+      delete entry.expiresAt
       // Even an older failure invalidates in-flight recovery observations.
       entry.revision++
     })
@@ -155,9 +177,15 @@ export class CommandCodeAccountManager {
       if (result.status === "available") {
         if (entry.verification && result.observedAt < entry.verification.observedAt) return false
         delete entry.verification
+        if (result.expiresAt !== undefined) {
+          entry.expiresAt = result.expiresAt
+        } else {
+          delete entry.expiresAt
+        }
       } else if (result.status === "exhausted") {
         if (entry.verification && result.observedAt < entry.verification.observedAt) return false
         entry.verification = result
+        delete entry.expiresAt
       } else if (entry.verification) {
         entry.verification = {
           ...entry.verification,
@@ -201,28 +229,63 @@ export class CommandCodeAccountManager {
     for (let i = 0; i <= this.accounts.length; i++) {
       signal?.throwIfAborted()
       const decision = await this.store.transaction((state) => {
-        const activeIndex = this.accounts.findIndex((a) => a.id === state.activeAccountId)
-        const ordered =
-          activeIndex >= 0
-            ? [...this.accounts.slice(activeIndex), ...this.accounts.slice(0, activeIndex)]
-            : [...this.accounts]
-        // Prefer an already usable global active even when another request has just failed.
-        for (const a of ordered) {
-          if (excluded.has(a.id)) continue
-          const mark = state.accounts[a.id].verification
-          if (!mark) {
-            state.activeAccountId = a.id
-            return { account: a }
+        // 1. Recheck any non-excluded account whose cooldown has expired
+        for (const a of this.accounts) {
+          if (excluded.has(a.id) || checked.has(a.id)) continue
+          const mark = state.accounts[a.id]?.verification
+          if (mark && mark.recheckAt <= this.now()) {
+            return { recheck: a }
           }
-          if (mark.recheckAt <= this.now() && !checked.has(a.id)) return { recheck: a }
         }
+
+        // 2. Gather available candidate accounts (not excluded, not in cooldown)
+        const candidates = this.accounts.filter(
+          (a) => !excluded.has(a.id) && !state.accounts[a.id]?.verification,
+        )
+
+        if (candidates.length > 0) {
+          const now = this.now()
+          const getExpiry = (acc: CommandCodeAccount) => {
+            const exp = state.accounts[acc.id]?.expiresAt
+            return exp !== undefined && exp > now ? exp : Infinity
+          }
+
+          const activeIndex = this.accounts.findIndex((a) => a.id === state.activeAccountId)
+          const cyclicDistance = (acc: CommandCodeAccount) => {
+            const idx = this.accounts.indexOf(acc)
+            if (activeIndex < 0) return idx
+            return (idx - activeIndex + this.accounts.length) % this.accounts.length
+          }
+
+          // Prioritize accounts whose quota expires earlier
+          candidates.sort((a, b) => {
+            const expA = getExpiry(a)
+            const expB = getExpiry(b)
+            if (expA !== expB) return expA - expB
+            return cyclicDistance(a) - cyclicDistance(b)
+          })
+
+          const best = candidates[0]
+          state.activeAccountId = best.id
+          return { account: best }
+        }
+
+        // 3. No candidate available; recheck any remaining exhausted accounts
+        for (const a of this.accounts) {
+          if (excluded.has(a.id) || checked.has(a.id)) continue
+          const mark = state.accounts[a.id]?.verification
+          if (mark && mark.recheckAt <= this.now()) {
+            return { recheck: a }
+          }
+        }
+
         const marks = this.accounts
-          .map((a) => state.accounts[a.id].verification)
+          .map((a) => state.accounts[a.id]?.verification)
           .filter((m): m is Exhausted => !!m)
         const earliest = marks.length ? Math.min(...marks.map((m) => m.recheckAt)) : undefined
         const details = this.accounts
           .flatMap((a) =>
-            state.accounts[a.id].verification
+            state.accounts[a.id]?.verification
               ? [`${a.id}: ${state.accounts[a.id].verification!.reasons.join("; ")}`]
               : [],
           )

@@ -32,6 +32,7 @@ export interface AccountState {
   fingerprint: string
   revision: number
   verification?: Exhausted
+  expiresAt?: number
 }
 export interface PoolState {
   version: number
@@ -291,6 +292,11 @@ export class AccountStore {
               throw 0
             if (entry.verification !== undefined)
               entry.verification = sanitizeVerification(entry.verification, this.config.accounts)
+            if (
+              entry.expiresAt !== undefined &&
+              (!Number.isFinite(entry.expiresAt) || entry.expiresAt < 0)
+            )
+              delete entry.expiresAt
           }
         }
       } catch (e: any) {
@@ -310,6 +316,7 @@ export class AccountStore {
                 fingerprint: prior.fingerprint,
                 revision: prior.revision,
                 ...(prior.verification ? { verification: prior.verification } : {}),
+                ...(prior.expiresAt !== undefined ? { expiresAt: prior.expiresAt } : {}),
               }
             : { fingerprint: a.fingerprint, revision: state.version + 1 }
       }

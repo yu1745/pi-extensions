@@ -5,8 +5,9 @@ import {
 } from "@earendil-works/pi-coding-agent"
 import { SelectList, Text, matchesKey, visibleWidth } from "@earendil-works/pi-tui"
 import { fetchCommandCodeQuota } from "./quota.ts"
-import type { CommandCodeQuotaResult, CommandCodeWindowLimit } from "./quota-types.ts"
+import type { CommandCodeQuota, CommandCodeQuotaResult, CommandCodeWindowLimit } from "./quota-types.ts"
 import type { AccountConfigDraft } from "./account-config.ts"
+import type { CommandCodeAccountManager } from "./account-manager.ts"
 
 export interface AccountDisplayQuota {
   result: CommandCodeQuotaResult
@@ -14,12 +15,50 @@ export interface AccountDisplayQuota {
 }
 export type AccountQuotaCache = Map<string, AccountDisplayQuota>
 
-/** Read-only display query. Never invokes manager.refresh/getActiveAccount or changes cooldowns. */
+export function getAccountEarliestExpiry(
+  quota?: CommandCodeQuota | null,
+  now: number = Date.now(),
+): number | undefined {
+  if (!quota) return undefined
+
+  // 最近到期指的是月额度到期（currentPeriodEnd）；5H和周窗口属于滑动用量限制，不属于额度过期
+  const credits = quota.credits
+  const sub = quota.subscription
+  if (sub?.currentPeriodEnd) {
+    const hasMonthly = credits ? credits.monthlyCredits > 0 : true
+    if (hasMonthly) {
+      const raw = sub.currentPeriodEnd
+      let endMs: number | undefined
+      if (typeof raw === "number" && Number.isFinite(raw)) {
+        endMs = raw >= 1e12 ? raw : raw * 1000
+      } else if (typeof raw === "string" && raw.trim()) {
+        const trimmed = raw.trim()
+        if (/^\d+(?:\.\d+)?$/.test(trimmed)) {
+          const num = Number(trimmed)
+          endMs = num >= 1e12 ? num : num * 1000
+        } else {
+          const parsed = Date.parse(trimmed)
+          if (Number.isFinite(parsed)) endMs = parsed
+        }
+      }
+      if (endMs !== undefined && endMs > now) return endMs
+    }
+  }
+
+  return undefined
+}
+
+/** Display query that refreshes quota cache and synchronizes available status with the account manager. */
 export async function refreshAccountDisplayQuota(
   ctx: ExtensionCommandContext,
   accounts: AccountConfigDraft["accounts"],
   cache: AccountQuotaCache,
-  options: { apiBase?: string; headers?: Record<string, string> },
+  options: {
+    apiBase?: string
+    headers?: Record<string, string>
+    manager?: CommandCodeAccountManager
+    remainingCreditsThreshold?: number
+  },
 ): Promise<void> {
   if (!accounts.length) return
   await ctx.ui.custom<void>((tui, theme, _kb, done) => {
@@ -56,7 +95,28 @@ export async function refreshAccountDisplayQuota(
         } catch {
           result = { ok: false, error: { kind: "network", message: "Quota query failed" } }
         }
-        if (!controller.signal.aborted) cache.set(account.apiKey, { result, fetchedAt: Date.now() })
+        if (!controller.signal.aborted) {
+          cache.set(account.apiKey, { result, fetchedAt: Date.now() })
+          if (options.manager && result.ok && result.quota.credits) {
+            const matched = options.manager.accounts.find(
+              (a) => a.id === account.id && a.apiKey === account.apiKey,
+            )
+            if (matched) {
+              const credits = result.quota.credits
+              const threshold = options.remainingCreditsThreshold ?? 0.1
+              const five = credits.windowLimits.find((limit) => limit.window === "fiveHour")
+              const week = credits.windowLimits.find((limit) => limit.window === "weekly")
+              const available =
+                credits.remainingCredits > threshold &&
+                (!five || five.cap <= 0 || five.used < five.cap) &&
+                (!week || week.cap <= 0 || week.used < week.cap)
+              const expiresAt = getAccountEarliestExpiry(result.quota)
+              if (available) {
+                await options.manager.markAvailable(matched, { expiresAt }).catch(() => {})
+              }
+            }
+          }
+        }
       }
     }
     void Promise.all(Array.from({ length: Math.min(2, accounts.length) }, worker)).then(
@@ -189,22 +249,110 @@ export function accountQuotaText(entry?: AccountDisplayQuota): {
     limit
       ? `${label}  已用 ${amount(limit.used)} / ${amount(limit.cap)} (${percent(limit)})  · ${resetLabel(limit.resetAt === null ? null : limit.resetAt * 1000)}`
       : `${label}  未返回窗口数据`
+  const detail = [
+    `近期可用 $${amount(available)}  ·  账户总余 $${amount(credits.remainingCredits)}（月度 ${amount(credits.monthlyCredits)} / 购买 ${amount(credits.purchasedCredits)} / 免费 ${amount(credits.freeCredits)}）`,
+    window("5小时", five),
+    window("周窗口", week),
+  ]
+  if (result.quota.subscription?.currentPeriodEnd) {
+    const raw = result.quota.subscription.currentPeriodEnd
+    let endMs: number | undefined
+    if (typeof raw === "number" && Number.isFinite(raw)) endMs = raw >= 1e12 ? raw : raw * 1000
+    else if (typeof raw === "string" && raw.trim()) {
+      const trimmed = raw.trim()
+      if (/^\d+(?:\.\d+)?$/.test(trimmed)) {
+        const num = Number(trimmed)
+        endMs = num >= 1e12 ? num : num * 1000
+      } else {
+        const parsed = Date.parse(trimmed)
+        if (Number.isFinite(parsed)) endMs = parsed
+      }
+    }
+    if (endMs !== undefined) {
+      detail.push(`月度周期  ${resetLabel(endMs)}`)
+    }
+  }
+  detail.push(`查询时间 ${time} · 百分比为已用比例 · 此处查询不改变轮换状态`)
   return {
     compact: `近期可用 $${amount(available)} (总余 $${amount(credits.remainingCredits)}) · 5h ${percent(five)} · 周 ${percent(week)}`,
-    detail: [
-      `近期可用 $${amount(available)}  ·  账户总余 $${amount(credits.remainingCredits)}（月度 ${amount(credits.monthlyCredits)} / 购买 ${amount(credits.purchasedCredits)} / 免费 ${amount(credits.freeCredits)}）`,
-      window("5小时", five),
-      window("周窗口", week),
-      `查询时间 ${time} · 百分比为已用比例 · 此处查询不改变轮换状态`,
-    ],
+    detail,
   }
+}
+
+export function toEpochMs(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return value >= 1e12 ? value : value * 1000
+  }
+  if (typeof value === "string" && value.trim()) {
+    const trimmed = value.trim()
+    if (/^\d+(?:\.\d+)?$/.test(trimmed)) {
+      const num = Number(trimmed)
+      return num >= 1e12 ? num : num * 1000
+    }
+    const parsed = Date.parse(trimmed)
+    if (Number.isFinite(parsed) && parsed > 0) return parsed
+  }
+  return undefined
+}
+
+export function padCell(
+  str: string,
+  targetWidth: number,
+  align: "left" | "right" | "center" = "left",
+): string {
+  const w = visibleWidth(str)
+  if (w >= targetWidth) return str
+  const pad = " ".repeat(targetWidth - w)
+  if (align === "right") return pad + str
+  if (align === "center") {
+    const left = " ".repeat(Math.floor((targetWidth - w) / 2))
+    const right = " ".repeat(targetWidth - w - left.length)
+    return left + str + right
+  }
+  return str + pad
+}
+
+export function renderDetailCard(
+  theme: any,
+  title: string,
+  lines: string[],
+  cardWidth: number,
+): string[] {
+  const innerWidth = Math.max(20, cardWidth - 6)
+  const topTitle = " " + title + " "
+  const topDashLen = Math.max(2, innerWidth + 1 - visibleWidth(topTitle))
+  const topBorder =
+    "  " +
+    theme.fg("accent", "╭─") +
+    theme.fg("accent", theme.bold(topTitle)) +
+    theme.fg("accent", "─".repeat(topDashLen) + "╮")
+  const botBorder =
+    "  " + theme.fg("accent", "╰" + "─".repeat(innerWidth + 2) + "╯")
+
+  const content = lines.map((line) => {
+    const w = visibleWidth(line)
+    const pad = w < innerWidth ? " ".repeat(innerWidth - w) : ""
+    return "  " + theme.fg("accent", "│") + " " + line + pad + " " + theme.fg("accent", "│")
+  })
+
+  return [topBorder, ...content, botBorder]
+}
+
+export interface AccountTableOptions {
+  accountCount: number
+  tableTop: string
+  tableHeader: string
+  tableDivider: string
+  tableBottom: string
+  tableWidth: number
 }
 
 /** Compact per-account quota rows; highlighted account gets a full detail panel. */
 export async function selectAccountQuotaMenu(
   ctx: ExtensionCommandContext,
   title: string,
-  items: Array<{ value: string; label: string; detail?: string[] }>,
+  items: Array<{ value: string; label: string; detail?: string[]; detailTitle?: string }>,
+  tableOptions?: AccountTableOptions,
 ): Promise<string | undefined> {
   return ctx.ui.custom<string | undefined>((tui, theme, kb, done) => {
     const border = new DynamicBorder((text: string) => theme.fg("accent", text))
@@ -221,31 +369,53 @@ export async function selectAccountQuotaMenu(
     return {
       render(width: number) {
         const current = select.getSelectedItem()
-        const detail = items.find((item) => item.value === current?.value)?.detail ?? [
+        const currentItem = items.find((item) => item.value === current?.value)
+        const detailLines = currentItem?.detail ?? [
           "修改先保存在草稿中，选择“保存并生效”才会写入配置。",
         ]
-        const tableHeader =
-          `  ` +
-          theme.fg("muted", padEndVisible("账号名称", 18)) +
-          " " +
-          theme.fg("muted", padEndVisible("状态", 8)) +
-          " " +
-          theme.fg("muted", padStartVisible("近期可用", 10)) +
-          " " +
-          theme.fg("muted", padStartVisible("总余额", 10)) +
-          " " +
-          theme.fg("muted", padStartVisible("5h已用", 8)) +
-          " " +
-          theme.fg("muted", padStartVisible("周已用", 8))
+        const detailTitle = currentItem?.detailTitle ?? "详情说明"
+
+        const selectLines = select.render(width)
+        const accountCount = tableOptions?.accountCount ?? 0
+        const accountLines = selectLines.slice(0, accountCount)
+        const actionLines = selectLines.slice(accountCount)
+
+        const cardWidth = Math.min(width - 4, tableOptions?.tableWidth ?? width - 4)
+        const card = renderDetailCard(theme, detailTitle, detailLines, cardWidth)
+
+        if (tableOptions && accountCount > 0) {
+          const table = [
+            tableOptions.tableTop,
+            tableOptions.tableHeader,
+            tableOptions.tableDivider,
+            ...accountLines,
+            tableOptions.tableBottom,
+          ]
+          return [
+            ...border.render(width),
+            ...new Text(theme.fg("accent", theme.bold(title)), 1, 0).render(width),
+            "",
+            ...table,
+            "",
+            ...actionLines,
+            "",
+            ...card,
+            "",
+            ...new Text(theme.fg("dim", "↑↓ 选择账号查看详情 · Enter 管理 · Esc 关闭"), 1, 0).render(
+              width,
+            ),
+            ...border.render(width),
+          ]
+        }
 
         return [
           ...border.render(width),
           ...new Text(theme.fg("accent", theme.bold(title)), 1, 0).render(width),
           "",
-          ...new Text(tableHeader, 1, 0).render(width),
-          ...select.render(width),
+          ...selectLines,
           "",
-          ...new Text(detail.join("\n"), 1, 0).render(width),
+          ...card,
+          "",
           ...new Text(theme.fg("dim", "↑↓ 选择账号查看详情 · Enter 管理 · Esc 关闭"), 1, 0).render(
             width,
           ),

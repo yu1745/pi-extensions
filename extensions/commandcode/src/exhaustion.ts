@@ -6,7 +6,7 @@ export type ExhaustionVerification =
       knownResetAt?: number
       recheckAt: number
     }
-  | { status: "available"; observedAt: number }
+  | { status: "available"; observedAt: number; expiresAt?: number }
   | { status: "unknown"; reason: string }
 
 export interface VerifyOptions {
@@ -17,6 +17,8 @@ export interface VerifyOptions {
   timeoutMs?: number
   extraHeaders?: Record<string, string>
   remainingCreditsThreshold?: number
+  includeExpiresAt?: boolean
+  subscription?: unknown
   now?: () => number
 }
 
@@ -42,7 +44,12 @@ function resetTime(value: unknown): number | undefined {
 /** Accepts the raw /alpha/billing/credits response, never the display parser's defaults. */
 export function verifyCreditsSnapshot(
   raw: unknown,
-  options: { remainingCreditsThreshold?: number; now?: () => number } = {},
+  options: {
+    remainingCreditsThreshold?: number
+    now?: () => number
+    subscription?: unknown
+    includeExpiresAt?: boolean
+  } = {},
 ): ExhaustionVerification {
   const threshold =
     options.remainingCreditsThreshold === undefined ? 0.1 : options.remainingCreditsThreshold
@@ -80,10 +87,31 @@ export function verifyCreditsSnapshot(
       else unknownReset = true
     }
   }
-  if (!reasons.length)
-    return incomplete
-      ? unknown("Incomplete or invalid credits/window data")
-      : { status: "available", observedAt }
+  if (!reasons.length) {
+    if (incomplete) return unknown("Incomplete or invalid credits/window data")
+    let expiresAt: number | undefined
+    if (options.includeExpiresAt) {
+      const sub = record(options.subscription)
+        ? options.subscription
+        : record(raw) && record(raw.subscription)
+          ? raw.subscription
+          : undefined
+      const subData = sub && record(sub.data) ? sub.data : sub
+      if (subData && record(subData)) {
+        const monthly = record(raw) && record(raw.credits) ? raw.credits.monthlyCredits : undefined
+        const hasMonthly = numeric(monthly) ? monthly > 0 : true
+        if (hasMonthly) {
+          const end = resetTime(subData.currentPeriodEnd)
+          if (end !== undefined && end > observedAt) expiresAt = end
+        }
+      }
+    }
+    return {
+      status: "available",
+      observedAt,
+      ...(expiresAt !== undefined ? { expiresAt } : {}),
+    }
+  }
   const knownResetAt = resets.length ? Math.max(...resets) : undefined
   const recheckAt = Math.max(
     knownResetAt ?? 0,
