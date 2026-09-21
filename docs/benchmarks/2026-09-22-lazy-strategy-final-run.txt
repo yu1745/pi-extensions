@@ -1,0 +1,27 @@
+# Raw output of: BENCH_TRIALS=3 BENCH_CONCURRENCY=8 node tests/lazy-strategy-bench.mjs all
+# (Chromium GPU/DBus stderr noise filtered out; nothing else altered)
+
+
+=== per-fixture (3 trials, cap 8 rounds) ===
+fixture           DOM pass/n  avgR  avgMs DOM+ pass/n  avgR  avgMsJEV pass/n  avgR  avgMs JEV-ADAPT pass/n  avgR  avgMs desc
+fast-infinite     3/3  8.0r  12553ms      3/3  8.0r  12667ms      3/3  7.0r  14171ms      3/3  8.0r  3761ms        appends 3 on scroll, done at 18
+inner-scroll      3/3  6.0r  9563ms       3/3  6.0r  9562ms       3/3  6.0r  11977ms      3/3  7.0r  6026ms        loads in an INNER scroller; body.scrollHeight frozen
+loadmore-button   0/3  3.0r  5059ms       3/3  8.0r  12601ms      3/3  8.0r  17674ms      0/3  8.0r  7506ms        scroll does nothing; a button must be clicked
+slow-4s           3/3  8.0r  12529ms      3/3  8.0r  12608ms      0/3  2.0r  3367ms       3/3  8.0r  8659ms        appends every 4s after reaching the bottom
+end-marker        3/3  5.0r  8068ms       3/3  5.0r  8035ms       3/3  3.0r  5570ms       3/3  6.0r  5722ms        appends then shows an explicit 没有更多了 marker
+icon-expander     0/3  3.0r  4956ms       0/3  3.0r  5080ms       0/3  8.0r  17789ms      0/3  8.0r  9957ms        expander has NO visible text (aria-label only) -> regex blind
+pager-is-expander 0/3  3.0r  4999ms       0/3  3.0r  5061ms       0/3  2.0r  3337ms       0/3  4.0r  5232ms        button says 下一页 but appends IN PLACE (regex would skip it)
+very-slow-8s      0/3  3.0r  4997ms       0/3  3.0r  5036ms       0/3  2.0r  3585ms       0/3  4.0r  5285ms        appends 8s after bottom: defeats a 3x1.5s stability window
+static            3/3  3.0r  5004ms       3/3  3.0r  5034ms       3/3  2.0r  3322ms       3/3  4.0r  5193ms        8 items, nothing more ever (must stop fast)
+explicit-paged    3/3  3.0r  5059ms       3/3  3.0r  5029ms       3/3  2.0r  3210ms       3/3  4.0r  5203ms        page 1 of N with a next link (pagination: do NOT follow)
+
+=== totals ===
+jevadaptive: 18/30 (60%) | avg rounds/fixture 6.1
+dom: 18/30 (60%) | avg rounds/fixture 4.5
+domplus: 21/30 (70%) | avg rounds/fixture 5.0
+jev: 18/30 (60%) | avg rounds/fixture 4.2
+
+Jev cost: 153 calls, 100.3s API time (655ms/call)
+  jev: 126 calls, 83.4s in API (662ms/call)
+  jevadaptive: 27 calls, 16.9s in API (626ms/call)
+WALL_CLOCK=41s EXIT=0
