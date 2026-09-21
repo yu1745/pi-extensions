@@ -31,9 +31,6 @@ import * as path from "node:path";
 import { gzipSync } from "node:zlib";
 import { randomBytes } from "node:crypto";
 import { createProvider } from "@earendil-works/pi-ai";
-// pi-ai moved its per-API helpers out of the root entry: the old `openAICompletionsApi()`
-// factory is gone, and each API module now exports `stream`/`streamSimple` directly.
-import { stream as openAICompletionsStream, streamSimple as openAICompletionsStreamSimple } from "@earendil-works/pi-ai/api/openai-completions";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ── 常量（对齐抓包） ─────────────────────────────────────────────────────────
@@ -943,11 +940,57 @@ async function fingerprintFetch(input: RequestInfo | URL, init?: RequestInit): P
   return resp;
 }
 
+// ── OpenAI-completions streams, tolerant of the installed pi-ai layout ───────
+//
+// pi-ai is a peer dependency, so its layout is decided by the host install and differs
+// across versions:
+//   old layout: the root entry IS ./compat and exports `openAICompletionsApi()`
+//   new layout: the root no longer exports it; each API module exposes stream/streamSimple,
+//               reachable via the "./api/*" export map
+// A static import of any single path therefore breaks on the other layout, so probe at
+// runtime, most specific first, and fall back. Resolved once and cached.
+let completionsBase: { stream: any; streamSimple: any } | null = null;
+
+async function resolveCompletionsBase(): Promise<{ stream: any; streamSimple: any }> {
+  if (completionsBase) return completionsBase;
+  const candidates = [
+    "@earendil-works/pi-ai/compat",
+    "@earendil-works/pi-ai",
+    "@earendil-works/pi-ai/api/openai-completions",
+  ];
+  const problems: string[] = [];
+  for (const spec of candidates) {
+    try {
+      const m: any = await import(spec);
+      // Preferred: the factory that the previous code used.
+      if (typeof m.openAICompletionsApi === "function") {
+        const api = m.openAICompletionsApi();
+        if (typeof api?.stream === "function") {
+          completionsBase = { stream: api.stream, streamSimple: api.streamSimple };
+          return completionsBase;
+        }
+      }
+      // Fallback: the module's own stream/streamSimple pair.
+      if (typeof m.stream === "function" && typeof m.streamSimple === "function") {
+        completionsBase = { stream: m.stream, streamSimple: m.streamSimple };
+        return completionsBase;
+      }
+      problems.push(`${spec}: no usable exports`);
+    } catch (e) {
+      problems.push(`${spec}: ${(e as Error).message.split("\n")[0]}`);
+    }
+  }
+  throw new Error(
+    "codebuddy: no usable OpenAI-completions stream found in the installed pi-ai.\n  " +
+      problems.join("\n  "),
+  );
+}
+
 // ── 扩展主体 ─────────────────────────────────────────────────────────────────
 
 export default async function (pi: ExtensionAPI) {
-  // Same shape the removed openAICompletionsApi() factory returned.
-  const base = { stream: openAICompletionsStream, streamSimple: openAICompletionsStreamSimple };
+  // Resolve the pi-ai entry that this install actually provides (see above).
+  const base = await resolveCompletionsBase();
   // onPayload：1) 补官方 CLI 独有字段 verbosity/reasoning_summary；
   // 2) 按官方抓包基线的 JSON 字段顺序重建 body（model,messages,tools,temperature,max_tokens,stream,stream_options,reasoning_effort,verbosity,reasoning_summary）
   const wrapOptions = (o: any) => {
