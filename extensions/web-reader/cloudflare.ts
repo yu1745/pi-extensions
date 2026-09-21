@@ -26,6 +26,8 @@ const CF_TITLE_RE =
   /just a moment|请稍候|checking your browser|正在验证|attention required|安全验证|verify you are human|ddos protection|one more step/i;
 const CF_TEXT_RE = /cloudflare|ray id|cf-chl|安全验证|恶意自动程序|verify you are human/i;
 
+const CF_FRAME_RE = /challenges\.cloudflare\.com|cdn-cgi\/challenge-platform/i;
+
 const MAX_CANDIDATES = 40;
 const MAX_DESC = 180;
 
@@ -70,6 +72,8 @@ interface Candidate {
   tag: string;
   attrs: Record<string, string>;
   rect: { x: number; y: number; w: number; h: number };
+  /** The node was reached through a challenges.cloudflare.com frame subtree. */
+  insideChallengeFrame?: boolean;
 }
 
 interface Snapshot {
@@ -133,10 +137,13 @@ function looksLikeChallenge(snap: Snapshot, headerHint: boolean): boolean {
   // real content yet. The length guard keeps a long article that merely mentions
   // Cloudflare from being mistaken for a challenge.
   if (snap.textLength < 1500 && CF_TEXT_RE.test(`${snap.title} ${snap.text}`)) return true;
-  // A Turnstile widget is already in the DOM (cheap to detect, very high precision).
+  // A Turnstile widget is already in the DOM (cheap to detect).
+  //
+  // NOTE: this only sees *open* shadow roots. Cloudflare normally mounts the widget in a
+  // CLOSED root, which is why element enumeration has to go through CDP `pierce:true`.
+  // So this signal is a useful bonus, not a reliable one — detection must not depend on it.
   return snap.hasChallengeFrame;
 }
-
 // ---------------------------------------------------------------------------
 // CDP element enumeration (pierces closed shadow roots + frames)
 // ---------------------------------------------------------------------------
@@ -163,28 +170,34 @@ async function enumerate(cdp: CfCdp): Promise<Candidate[]> {
   }
   if (!root) return [];
 
-  const raw: { nodeId: number; tag: string; attrs: Record<string, string> }[] = [];
-  const stack: CdpNode[] = [root];
+  const raw: { nodeId: number; tag: string; attrs: Record<string, string>; insideCf: boolean }[] = [];
+  // Track whether each node sits under a Cloudflare challenge frame. `pierce` + the
+  // contentDocument hop mean a control inside the widget shows up as a descendant, so the
+  // flag has to be carried down the walk rather than inferred from the node itself.
+  const stack: { node: CdpNode; insideCf: boolean }[] = [{ node: root, insideCf: false }];
   while (stack.length) {
-    const n = stack.pop()!;
+    const { node: n, insideCf } = stack.pop()!;
     const tag = n.nodeName || "";
+    let childInsideCf = insideCf;
     if (tag && tag !== "#text" && tag !== "#comment" && tag !== "#document" && tag !== "#document-fragment") {
       const attrs: Record<string, string> = {};
       const a = n.attributes || [];
       for (let i = 0; i + 1 < a.length; i += 2) attrs[a[i]] = a[i + 1];
       const role = attrs.role || "";
+      // Entering a CF frame marks everything below it as challenge-widget territory.
+      if (tag === "IFRAME" && CF_FRAME_RE.test(attrs.src || "")) childInsideCf = true;
       const hay = `${attrs.id || ""} ${attrs.class || ""} ${attrs.src || ""} ${attrs["aria-label"] || ""}`;
       if (
         INTERACTIVE_TAGS.has(tag) ||
         INTERACTIVE_ROLES.has(role) ||
         INTERESTING_ATTRS.test(hay)
       ) {
-        if (typeof n.nodeId === "number") raw.push({ nodeId: n.nodeId, tag, attrs });
+        if (typeof n.nodeId === "number") raw.push({ nodeId: n.nodeId, tag, attrs, insideCf });
       }
     }
-    if (n.children) stack.push(...n.children);
-    if (n.shadowRoots) stack.push(...n.shadowRoots);
-    if (n.contentDocument) stack.push(n.contentDocument);
+    if (n.children) for (const c of n.children) stack.push({ node: c, insideCf: childInsideCf });
+    if (n.shadowRoots) for (const c of n.shadowRoots) stack.push({ node: c, insideCf: childInsideCf });
+    if (n.contentDocument) stack.push({ node: n.contentDocument, insideCf: childInsideCf });
   }
 
   const out: Candidate[] = [];
@@ -206,7 +219,13 @@ async function enumerate(cdp: CfCdp): Promise<Candidate[]> {
     const h = Math.max(box[1], box[3], box[5], box[7]) - y;
     if (w < 4 || h < 4) continue;
     if (w > 1600 || h > 1000) continue; // whole-page containers
-    out.push({ nodeId: c.nodeId, tag: c.tag, attrs: c.attrs, rect: { x, y, w, h } });
+    out.push({
+      nodeId: c.nodeId,
+      tag: c.tag,
+      attrs: c.attrs,
+      rect: { x, y, w, h },
+      insideChallengeFrame: c.insideCf,
+    });
   }
   return out;
 }
@@ -231,6 +250,18 @@ function clickPoint(c: Candidate): { x: number; y: number } {
   const { x, y, w, h } = c.rect;
   if (c.tag === "IFRAME" && w >= 180 && h >= 36) return { x: x + 29, y: y + h / 2 };
   return { x: x + w / 2, y: y + h / 2 };
+}
+
+/**
+ * True when the node is (or came from inside) Cloudflare's challenge frame.
+ *
+ * The candidate list and the text Jev reasons over are both page-controlled, so a hostile
+ * page could dress an arbitrary link up as "Verify you are human". Requiring the CF frame
+ * origin stops the clicker from being aimed at the site's own controls.
+ */
+function isCloudflareWidget(c: Candidate): boolean {
+  if (c.tag === "IFRAME") return CF_FRAME_RE.test(c.attrs.src || "");
+  return c.insideChallengeFrame === true || CF_FRAME_RE.test(c.attrs.src || "");
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +330,7 @@ async function askJev(
   snap: Snapshot,
   candidates: Candidate[],
   signal?: AbortSignal,
+  timeoutMs = 4000,
 ): Promise<Verdict> {
   const actionCriteria: Record<string, string> = {
     wait: "No bot-verification control is on screen yet — just wait",
@@ -336,7 +368,7 @@ async function askJev(
         },
       },
     },
-    { timeoutMs: 4000, signal },
+    { timeoutMs, signal },
   );
 
   const st = res.answers?.state;
@@ -369,8 +401,12 @@ export async function handleCloudflareChallenge(opts: {
     return { detected: false, solved: false, rounds: 0, reason: "disabled" };
   }
 
-  const maxRounds = opts.maxRounds ?? parseInt(process.env.PI_WEBREADER_CF_ROUNDS || "8", 10);
-  const deadlineMs = opts.deadlineMs ?? parseInt(process.env.PI_WEBREADER_CF_TIMEOUT_MS || "40000", 10);
+  const maxRoundsRaw = opts.maxRounds ?? parseInt(process.env.PI_WEBREADER_CF_ROUNDS || "8", 10);
+  const deadlineRaw = opts.deadlineMs ?? parseInt(process.env.PI_WEBREADER_CF_TIMEOUT_MS || "40000", 10);
+  // A malformed env value would otherwise give NaN: maxRounds=NaN skips the loop entirely,
+  // and deadline=NaN makes every deadline comparison false (effectively unbounded).
+  const maxRounds = Number.isFinite(maxRoundsRaw) && maxRoundsRaw > 0 ? maxRoundsRaw : 8;
+  const deadlineMs = Number.isFinite(deadlineRaw) && deadlineRaw > 0 ? deadlineRaw : 40_000;
 
   // --- cheap pre-gate: don't spend a Jev call on ordinary pages ---------------
   const first = await snapshot(page);
@@ -393,16 +429,30 @@ export async function handleCloudflareChallenge(opts: {
   let rounds = 0;
   let last: Verdict | undefined;
   let sawChallenge = false;
+  const remaining = () => deadline - Date.now();
 
   for (let round = 0; round < maxRounds; round++) {
     if (signal?.aborted) return { detected: sawChallenge, solved: false, rounds, reason: "aborted" };
+    // Check the budget at the top as well: one round costs several seconds (enumerate +
+    // Jev + a human-paced click), so checking only at the bottom could overshoot ~2x.
+    if (remaining() <= 0) {
+      return {
+        detected: sawChallenge,
+        solved: false,
+        rounds,
+        state: last?.state,
+        confidence: last?.stateConfidence,
+        reason: "deadline",
+      };
+    }
 
     const snap = await snapshot(page);
     const candidates = cdp ? await enumerate(cdp) : [];
 
     let verdict: Verdict;
     try {
-      verdict = await askJev(jev, snap, candidates, signal);
+      // Let Jev use only what is left of our budget, never more than its own limit.
+      verdict = await askJev(jev, snap, candidates, signal, Math.max(500, Math.min(4000, remaining())));
     } catch (e) {
       log("Jev evaluation failed during challenge handling:", (e as Error).message);
       return {
@@ -451,12 +501,15 @@ export async function handleCloudflareChallenge(opts: {
     }
 
     // --- click the element Jev chose ----------------------------------------
-    // Gated on state === "challenge" AND a Jev-chosen element: never click a site's
-    // own controls just because the model named one.
+    // Gated three ways: state must be "challenge", Jev must have named a candidate, and
+    // that candidate must actually belong to Cloudflare's challenge frame. The last check
+    // matters because both the candidate list and the text Jev reads are page-controlled.
     const m = verdict.state === "challenge" ? /^e(\d+)$/.exec(verdict.action || "") : null;
     if (m) {
       const target = candidates[parseInt(m[1], 10)];
-      if (target && page.mouse) {
+      if (target && !isCloudflareWidget(target)) {
+        log(`refusing to click ${verdict.action}: not a Cloudflare challenge widget`);
+      } else if (target && page.mouse) {
         try {
           await humanClick(page, clickPoint(target), log);
           rounds++;
@@ -478,7 +531,7 @@ export async function handleCloudflareChallenge(opts: {
         reason: "deadline",
       };
     }
-    await sleep(page, 900 + Math.random() * 700);
+    await sleep(page, Math.max(0, Math.min(900 + Math.random() * 700, remaining())));
   }
 
   return {

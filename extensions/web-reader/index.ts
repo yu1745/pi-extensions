@@ -172,49 +172,99 @@ function displayWorks(display: string): boolean {
   }
 }
 
-/** Ensure some usable X display exists for a headed browser; start Xvfb if needed. */
+/** Ensure some usable display exists for a headed browser; start Xvfb if needed. */
 async function ensureDisplay(): Promise<void> {
+  // Windows and macOS have a native compositor, so a headed browser just works and
+  // there is no Xvfb to run. Bail out before touching any X11 concept.
+  if (process.platform !== "linux") return;
   if (process.env.PI_WEBREADER_NO_XVFB === "1") return;
   // An explicitly working DISPLAY (including a forwarded one) wins.
   if (process.env.DISPLAY && displayWorks(process.env.DISPLAY)) return;
 
   if (virtualDisplay) {
-    process.env.DISPLAY = virtualDisplay;
-    return;
+    // Trust it only if its socket still exists: a crashed Xvfb would otherwise make
+    // every later launch fail with a confusing browser error.
+    if (displayWorks(virtualDisplay)) {
+      process.env.DISPLAY = virtualDisplay;
+      return;
+    }
+    log("previous Xvfb", virtualDisplay, "is gone; starting a new one");
+    xvfbProc = null;
+    virtualDisplay = null;
   }
 
   // Pick a free display number.
   for (let n = 90; n < 130; n++) {
     if (existsSync(`/tmp/.X11-unix/X${n}`)) continue;
     const display = `:${n}`;
+    const started = await spawnXvfb(display);
+    if (started) {
+      virtualDisplay = display;
+      process.env.DISPLAY = display;
+      return;
+    }
+  }
+  log("could not obtain an X display; headed browser will likely fail");
+}
+
+/**
+ * Start Xvfb, resolving false if it cannot be started.
+ *
+ * `spawn` reports a missing binary (and EACCES) through an async 'error' event, which a
+ * surrounding try/catch cannot capture. Without an 'error' listener that becomes an
+ * uncaught exception and takes the whole agent process down, so every failure mode is
+ * funnelled through this promise instead.
+ */
+function spawnXvfb(display: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    installDisplayCleanup();
+    const n = display.slice(1);
+    let child: ReturnType<typeof spawn>;
     try {
-      const child = spawn("Xvfb", [display, "-screen", "0", "1920x1080x24", "-nolisten", "tcp"], {
+      child = spawn("Xvfb", [display, "-screen", "0", "1920x1080x24", "-nolisten", "tcp"], {
         stdio: "ignore",
         detached: false,
       });
-      child.unref?.();
-      // Wait briefly for the socket to appear.
+    } catch (e) {
+      log("Xvfb is not available:", (e as Error).message);
+      resolve(false);
+      return;
+    }
+
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (ok) xvfbProc = child as unknown as { pid?: number; kill(): void };
+      resolve(ok);
+    };
+
+    child.on("error", (e) => {
+      log("Xvfb could not be started:", (e as NodeJS.ErrnoException).code || (e as Error).message);
+      finish(false);
+    });
+    child.unref?.();
+
+    // Wait briefly for the X socket to appear.
+    (async () => {
       for (let i = 0; i < 40; i++) {
         if (existsSync(`/tmp/.X11-unix/X${n}`)) {
-          xvfbProc = child as unknown as { pid?: number; kill(): void };
-          virtualDisplay = display;
-          process.env.DISPLAY = display;
           log("started Xvfb on", display, "(pid:", child.pid, ")");
+          finish(true);
           return;
         }
+        if (settled) return;
         await new Promise((r) => setTimeout(r, 50));
       }
+      log("Xvfb did not create a socket for", display);
       try {
         child.kill();
       } catch {
         /* ignore */
       }
-    } catch (e) {
-      log("Xvfb launch failed:", (e as Error).message);
-      return;
-    }
-  }
-  log("could not obtain an X display; headed browser will likely fail");
+      finish(false);
+    })();
+  });
 }
 
 function stopDisplay() {
@@ -226,6 +276,28 @@ function stopDisplay() {
   }
   xvfbProc = null;
   virtualDisplay = null;
+}
+
+// The Xvfb is a child of this process, so if we die without a session_shutdown (crash,
+// SIGTERM, hot reload, Ctrl-C) it would be reparented to init and the X socket left
+// behind, slowly leaking daemons until the display-number scan is exhausted. Kill it on
+// the way out, and on the signals that would otherwise skip cleanup.
+let displayCleanupInstalled = false;
+function installDisplayCleanup() {
+  if (displayCleanupInstalled) return;
+  displayCleanupInstalled = true;
+  process.once("exit", () => stopDisplay());
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    try {
+      process.once(sig, () => {
+        stopDisplay();
+        // Re-raise with the handler consumed so the default action still applies.
+        process.kill(process.pid, sig);
+      });
+    } catch {
+      /* signal not supported on this platform */
+    }
+  }
 }
 
 function triggerBackgroundChromiumInstall() {
@@ -582,8 +654,15 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
         log("cloudflare challenge branch threw:", (e as Error).message);
       }
     } else {
-      // No Jev available: fall back to the cheap structural signal so we at least warn.
-      cfMitigated = cfMitigated || /just a moment|请稍候|安全验证/i.test(await page.title().catch(() => ""));
+      // No Jev: we cannot drive the challenge, but still surface it in the header so a
+      // bare 403 with empty content is not mistaken for an ordinary failure. Previously
+      // this only mutated a local that was never read again.
+      const looksCf =
+        cfMitigated || /just a moment|请稍候|安全验证/i.test(await page.title().catch(() => ""));
+      if (looksCf) {
+        cf = { detected: true, solved: false, rounds: 0, reason: "jev-unconfigured" };
+        log("cloudflare challenge detected but Jev is unavailable; cannot solve it");
+      }
     }
     
     // 2. Custom wait selector if provided
