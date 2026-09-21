@@ -30,7 +30,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { gzipSync } from "node:zlib";
 import { randomBytes } from "node:crypto";
-import { createProvider, openAICompletionsApi } from "@earendil-works/pi-ai";
+import { createProvider } from "@earendil-works/pi-ai";
+// pi-ai moved its per-API helpers out of the root entry: the old `openAICompletionsApi()`
+// factory is gone, and each API module now exports `stream`/`streamSimple` directly.
+import { stream as openAICompletionsStream, streamSimple as openAICompletionsStreamSimple } from "@earendil-works/pi-ai/api/openai-completions";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ── 常量（对齐抓包） ─────────────────────────────────────────────────────────
@@ -725,8 +728,8 @@ async function sendTracesRaw(a: AuthState, spans: any[], proxyUrl?: string) {
         str("extName", "@tencent-ai/codebuddy-code"), str("ideType", "CLI"),
         str("platform", "CLI"), str("platformVersion", CLI_VERSION), str("extVersion", CLI_VERSION),
         str("uid", a.userId), str("userId", a.userId),
-        str("userNickname", a.userNickname ?? os.userInfo().username),
-        str("gen_ai.user.id", a.userNickname ?? os.userInfo().username),
+        str("userNickname", a.nickname ?? os.userInfo().username),
+        str("gen_ai.user.id", a.nickname ?? os.userInfo().username),
         str("enterpriseId", ""), str("workspacePath", process.cwd()),
       ]},
       scopeSpans: [{ scope: { name: `CodeBuddy-CLI-${CLI_VERSION}`, version: "1.0.0" }, spans }],
@@ -759,8 +762,8 @@ async function sendTraces(a: AuthState, m: ChatMeta2, model: string, status: num
         str("extName", "@tencent-ai/codebuddy-code"), str("ideType", "CLI"),
         str("platform", "CLI"), str("platformVersion", CLI_VERSION), str("extVersion", CLI_VERSION),
         str("uid", a.userId), str("userId", a.userId),
-        str("userNickname", a.userNickname ?? os.userInfo().username),
-        str("gen_ai.user.id", a.userNickname ?? os.userInfo().username),
+        str("userNickname", a.nickname ?? os.userInfo().username),
+        str("gen_ai.user.id", a.nickname ?? os.userInfo().username),
         str("enterpriseId", ""), str("workspacePath", process.cwd()),
       ]},
       scopeSpans: [{ scope: { name: `CodeBuddy-CLI-${CLI_VERSION}`, version: "1.0.0" }, spans: [
@@ -943,7 +946,8 @@ async function fingerprintFetch(input: RequestInfo | URL, init?: RequestInit): P
 // ── 扩展主体 ─────────────────────────────────────────────────────────────────
 
 export default async function (pi: ExtensionAPI) {
-  const base = openAICompletionsApi();
+  // Same shape the removed openAICompletionsApi() factory returned.
+  const base = { stream: openAICompletionsStream, streamSimple: openAICompletionsStreamSimple };
   // onPayload：1) 补官方 CLI 独有字段 verbosity/reasoning_summary；
   // 2) 按官方抓包基线的 JSON 字段顺序重建 body（model,messages,tools,temperature,max_tokens,stream,stream_options,reasoning_effort,verbosity,reasoning_summary）
   const wrapOptions = (o: any) => {

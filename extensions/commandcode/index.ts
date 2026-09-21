@@ -70,9 +70,6 @@ function providerModelCost(id: string) {
   return { ...cost, tiers: cost.tiers ? [...cost.tiers] : undefined }
 }
 
-// This migration intentionally supports only the DeepSeek family.
-const supportedModels = (models: readonly CommandCodeModel[]) =>
-  models.filter((model) => /^deepseek(?:[/-]|$)/i.test(model.id))
 
 const COMMAND_CODE_API = "commandcode-custom"
 const COMPAT_SOURCE_ID = "pi-commandcode-provider"
@@ -300,10 +297,10 @@ export default async function (pi: ExtensionAPI) {
         timeoutMs: modelsTimeoutMs,
         signal,
       })
-      return { ...loaded, models: supportedModels(loaded.models) }
+      return loaded
     },
     loadCachedModels: async () =>
-      supportedModels(await loadCachedCommandCodeModels(modelsCachePath)),
+      await loadCachedCommandCodeModels(modelsCachePath),
     createProviderConfig: (models) =>
       createProviderConfig(models, apiBase, stream, pool?.accounts[0]?.apiKey),
     getTransport: transport.getTransport,

@@ -478,7 +478,8 @@ class TokenizerManager {
 						},
 					},
 				});
-				const choice = res.answers.family?.choice;
+				const ans = res.answers.family;
+				const choice = ans?.type === "choice" ? ans.choice : undefined;
 				if (choice && choice !== "other") {
 					const mapped = choice === "gemini" ? "gemma" : choice;
 					this.taxonomyCache[modelId] = mapped;
@@ -774,6 +775,10 @@ export default function (pi: ExtensionAPI) {
 		if (!ev) return;
 		const now = Date.now();
 
+		// Only the *_delta variants carry `delta`; narrow on `type` before reading it.
+		if (ev.type !== "thinking_delta" && ev.type !== "text_delta" && ev.type !== "toolcall_delta") {
+			return;
+		}
 		const delta = ev.delta ?? "";
 		if (ev.type === "thinking_delta") {
 			tracker.phase = "thinking";
@@ -781,11 +786,10 @@ export default function (pi: ExtensionAPI) {
 		} else if (ev.type === "text_delta") {
 			tracker.phase = "answering";
 			recordDelta(delta, false, now);
-		} else if (ev.type === "toolcall_delta") {
+		} else {
+			// toolcall_delta
 			tracker.phase = "answering";
 			recordDelta(delta, true, now);
-		} else {
-			return;
 		}
 
 		if (debugEnabled) {

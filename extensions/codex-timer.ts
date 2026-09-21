@@ -13,7 +13,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
-const STATUS_KEY = "codex-timer";
+const STATUS_KEY = "z-codex-timer";
 
 function fmt(secs: number): string {
 	const s = Math.floor(secs);

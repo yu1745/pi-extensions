@@ -24,6 +24,9 @@
  *   PI_WEBREADER_LOCALE   Locale / Accept-Language base (default: zh-CN).
  *   PI_WEBREADER_HEADED   "1" to show the browser window (headed is the default).
  *   PI_WEBREADER_HEADLESS "1" to force headless (challenges will usually fail).
+ *   PI_WEBREADER_VISIBLE  "1" to keep the headed window on screen instead of moving it
+ *                         offscreen/minimised (the window is never removed from the
+ *                         taskbar; see the note on windowArgs).
  *   PI_WEBREADER_NO_XVFB  "1" to never auto-start Xvfb for headed mode.
  *   PI_WEBREADER_CDP      Connect to an external browser over CDP instead of launching
  *                         the bundled Chromium, e.g. "http://localhost:9222".
@@ -86,6 +89,24 @@ const LAUNCH_ARGS = [
   "--no-first-run",
   "--no-default-browser-check",
 ];
+
+// Keep the headed window out of the user's way.
+//
+// This does NOT remove the taskbar / Alt-Tab entry: moving a window offscreen still leaves
+// a real top-level window, and Windows keeps showing it. A truly windowless browser is not
+// an option here — `--headless=new` (with or without a patched UA) is rejected by
+// Cloudflare, so a real window is precisely what makes the challenge pass. Moving it away
+// is the most we can do while keeping that property; verified not to affect the pass rate
+// or the fingerprint (plugins/brands/WebGL are unchanged).
+//
+// Set PI_WEBREADER_VISIBLE=1 to keep the window on screen (useful when watching a
+// challenge, or debugging).
+const OFFSCREEN_POSITION = "-32000,-32000";
+function windowArgs(): string[] {
+  if (/^(1|true|yes)$/i.test(process.env.PI_WEBREADER_VISIBLE || "")) return [];
+  if (!HEADED) return []; // headless has no window to move
+  return [`--window-position=${OFFSCREEN_POSITION}`, "--start-minimized"];
+}
 
 // Playwright's BUNDLED Chromium only. We deliberately do not fall back to a system
 // chrome/msedge: the plugin must work on a machine that has nothing but its own
@@ -385,7 +406,7 @@ async function ensureBrowser(): Promise<AnyContext> {
           log("launching bundled chromium, headless:", !HEADED);
           launched = (await chromium.launch({
             headless: !HEADED,
-            args: LAUNCH_ARGS,
+            args: [...LAUNCH_ARGS, ...windowArgs()],
           })) as AnyBrowser;
           channel = "chromium";
         } catch (e) {
@@ -533,7 +554,7 @@ async function waitForReadableContent(page: AnyPage, url: string, signal?: Abort
     // 1. Snapshot lightweight DOM state
     const snapshot = await page.evaluate(() => {
       const bodyText = (document.body?.innerText || "").trim();
-      const main = document.querySelector("main, [role=\"main\"], #main-content, #__next, #app") || document.body;
+      const main = document.querySelector<HTMLElement>("main, [role=\"main\"], #main-content, #__next, #app") || document.body;
       const mainText = (main ? main.innerText : "").trim();
       return {
         title: document.title,

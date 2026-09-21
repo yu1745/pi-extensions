@@ -12,7 +12,12 @@
 		],
 		"strict": true,
 		"noEmit": true,
-		"skipLibCheck": true
+		"skipLibCheck": true,
+		// Extensions import each other with explicit ".ts" specifiers because pi loads
+		// them through jiti at runtime (no build step). Required so `tsc --noEmit` can
+		// typecheck the same sources without erroring on every such import.
+		"allowImportingTsExtensions": true,
+		"verbatimModuleSyntax": true
 	},
 	"include": [
 		"extensions",

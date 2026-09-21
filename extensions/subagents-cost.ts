@@ -105,19 +105,26 @@ function collectSubagents(ctx: ExtensionContext): { items: SubagentCostItem[]; t
 	for (const entry of branch) {
 		if (entry.type !== "message") continue;
 
-		for (const content of entry.message.content || []) {
-			if (content && typeof content === "object" && content.type === "toolCall") {
-				const args = content.arguments || {};
-				if (content.name === "Agent" && args.model) {
-					callModelMap.set(content.id, cleanModelName(args.model));
+		// AgentMessage is a union that includes BashExecutionMessage (role "bashExecution"),
+		// which has no `content` field, so narrow by role before reading it.
+		const msg = entry.message;
+		const content = "content" in msg ? msg.content : undefined;
+
+		for (const part of content || []) {
+			if (part && typeof part === "object" && part.type === "toolCall") {
+				const args = (part.arguments || {}) as { model?: string };
+				const model = cleanModelName(args.model);
+				// cleanModelName returns undefined for a missing model; only record real ones.
+				if (part.name === "Agent" && model) {
+					callModelMap.set(part.id, model);
 				}
 			}
 		}
 
-		if (entry.message.role === "toolResult") {
-			const text = extractText(entry.message.content);
-			const details = entry.message.details || {};
-			const callId = entry.message.toolCallId;
+		if (msg.role === "toolResult") {
+			const text = extractText(content);
+			const details = msg.details || {};
+			const callId = msg.toolCallId;
 			const requestedModel = callId ? callModelMap.get(callId) : undefined;
 
 			// "Agent started in background.\nAgent ID: <id>"
@@ -319,13 +326,22 @@ export default function (pi: ExtensionAPI) {
 			const titleText = new Text("", 1, 0);
 			const hintText = new Text("", 1, 0);
 
-			const selectList = new SelectList(buildSelectItems(currentSort), Math.min(originalItems.length, 12), {
-				selectedPrefix: (t) => theme.fg("accent", t),
-				selectedText: (t) => theme.fg("accent", t),
-				description: (t) => theme.fg("muted", t),
-				scrollInfo: (t) => theme.fg("dim", t),
-				noMatch: (t) => theme.fg("warning", t),
-			});
+			const selectTheme = {
+				selected: (s: string) => theme.fg("accent", s),
+				unselected: (s: string) => s,
+				selectedPrefix: (t: string) => theme.fg("accent", t),
+				selectedText: (t: string) => theme.fg("accent", t),
+				description: (t: string) => theme.fg("muted", t),
+				scrollInfo: (t: string) => theme.fg("dim", t),
+				noMatch: (t: string) => theme.fg("warning", t),
+			};
+			// SelectList exposes no way to replace its items (items/filteredItems are private),
+			// so re-sorting builds a fresh list and swaps it into the container using the
+			// public Container API rather than writing through private fields.
+			const makeSelectList = (sortMode: SortMode) =>
+				new SelectList(buildSelectItems(sortMode), Math.min(originalItems.length, 12), selectTheme);
+
+			let selectList = makeSelectList(currentSort);
 
 			const updateHeaders = () => {
 				const sortLabel = currentSort === "cost" ? "花费由高到低 (Cost ↓)" : "启动时间顺序 (Time ↑)";
@@ -353,9 +369,13 @@ export default function (pi: ExtensionAPI) {
 					if (matchesKey(data, Key.tab)) {
 						currentSort = currentSort === "cost" ? "time" : "cost";
 						updateHeaders();
-						const newItems = buildSelectItems(currentSort);
-						selectList.items = newItems;
-						selectList.filteredItems = newItems;
+						// Swap in a freshly built list (items cannot be reassigned: they are private).
+						const nextList = makeSelectList(currentSort);
+						nextList.onSelect = () => done(null);
+						nextList.onCancel = () => done(null);
+						container.removeChild(selectList);
+						selectList = nextList;
+						container.addChild(selectList);
 						selectList.setSelectedIndex(0);
 						container.invalidate();
 						tui.requestRender();

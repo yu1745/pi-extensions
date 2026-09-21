@@ -100,8 +100,8 @@ test("registered provider rotates through native SDK and remains sticky without 
     assert.ok(selected)
     assert.deepEqual(
       config.models?.map((model) => model.id),
-      ["deepseek/deepseek-v4-flash"],
-      "register DeepSeek only",
+      ["deepseek/deepseek-v4-flash", "gpt-5.4-mini"],
+      "register all models without filtering",
     )
     const model = {
       ...selected,
