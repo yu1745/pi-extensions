@@ -17,7 +17,7 @@
 	"dependencies": {
 		"@huggingface/tokenizers": "^0.2.0",
 		"linkedom": "^0.18.13",
-		"playwright": "^1.62.1",
+		"playwright": "1.61.0",
 		"undici": "^8.10.1"
 	},
 	"devDependencies": {

@@ -4,20 +4,29 @@
  * A SPA-aware, anti-WAF web reader backed by the Playwright library.
  *
  * It drives a REAL browser (prefers your installed Chrome/Edge so the fingerprint
- * is genuine), spoofs a realistic User-Agent, injects a stealth init script, and
- * then extracts content from Playwright's **ARIA accessibility snapshot** — the
- * exact same data source `playwright-cli` uses for its snapshots. Using the
- * accessibility tree means hidden/hover-only UI (menus, "not interested" buttons,
- * aria-hidden clutter) is naturally excluded, so the output is clean.
+ * is genuine) and extracts content from Playwright's **ARIA accessibility snapshot** — the
+ * exact same data source `playwright-cli` uses for its snapshots. Using the accessibility
+ * tree means hidden/hover-only UI (menus, "not interested" buttons, aria-hidden clutter)
+ * is naturally excluded, so the output is clean.
+ *
+ * Cloudflare challenges ("Just a moment" / 安全验证 / Turnstile) are handled by a dedicated
+ * branch in ./cloudflare.ts, which uses Jev to decide both whether the page really is a
+ * challenge and which element to click, then clicks it with a human-like mouse path.
  *
  * Config (env vars):
- *   PI_WEBREADER_UA       Override User-Agent (default: recent Windows Chrome).
+ *   PI_WEBREADER_UA       Override User-Agent. UNSET by default — spoofing one that
+ *                         contradicts the real platform is itself a bot signal.
+ *   PI_WEBREADER_STEALTH  "1" to inject stealth patches. Off by default for the same
+ *                         reason: overriding native navigator values is inconsistent.
+ *   PI_WEBREADER_CF       "off" to disable the Cloudflare challenge branch.
+ *   PI_WEBREADER_CF_ROUNDS     Max click/verify rounds (default 8).
+ *   PI_WEBREADER_CF_TIMEOUT_MS Challenge branch deadline (default 40000).
  *   PI_WEBREADER_LOCALE   Locale / Accept-Language base (default: zh-CN).
- *   PI_WEBREADER_HEADED   "1" to show the browser window (default: headless).
- *   PI_WEBREADER_CHANNEL  Comma list, e.g. "chrome,msedge" or "chromium" for the
- *                         bundled headless shell. Default: chrome,msedge,chromium.
- *   PI_WEBREADER_CDP      Connect to a real browser over CDP, e.g.
- *                         "http://localhost:9222" (strongest anti-detection).
+ *   PI_WEBREADER_HEADED   "1" to show the browser window (headed is the default).
+ *   PI_WEBREADER_HEADLESS "1" to force headless (challenges will usually fail).
+ *   PI_WEBREADER_NO_XVFB  "1" to never auto-start Xvfb for headed mode.
+ *   PI_WEBREADER_CDP      Connect to an external browser over CDP instead of launching
+ *                         the bundled Chromium, e.g. "http://localhost:9222".
  *   PI_WEBREADER_MAXURL  Max URL length kept in markdown output (default: 120;
  *                         longer URLs — typically ad/tracking — are dropped).
  *   PI_WEBREADER_DEBUG    "1" to print debug logs to stderr.
@@ -26,6 +35,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { mkdir, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
@@ -37,6 +47,7 @@ import {
   type ScopeCandidate,
   type ScopeDecision,
 } from "./selection.js";
+import { handleCloudflareChallenge, type CfOutcome } from "./cloudflare.js";
 
 const DEBUG = /^(1|true|yes)$/i.test(process.env.PI_WEBREADER_DEBUG || "");
 function log(...a: unknown[]) {
@@ -44,11 +55,21 @@ function log(...a: unknown[]) {
 }
 
 // ---- environment-driven config -------------------------------------------
-const UA =
-  process.env.PI_WEBREADER_UA ||
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+// NOTE: we deliberately do NOT spoof a User-Agent by default. Spoofing while the real
+// browser reports a different platform (e.g. claiming Windows on a Linux Chrome) creates a
+// self-contradictory fingerprint that Cloudflare's challenge rejects outright — verified
+// empirically: spoofing alone turns a passing challenge into a failing one. Use
+// PI_WEBREADER_UA only if you genuinely run a browser matching that UA.
+const UA = process.env.PI_WEBREADER_UA?.trim() || "";
 const LOCALE = process.env.PI_WEBREADER_LOCALE || "zh-CN";
-const HEADED = /^(1|true|yes)$/i.test(process.env.PI_WEBREADER_HEADED || "");
+// Headed by default: Cloudflare's stronger challenges reject headless browsers. In a
+// headless environment ensureBrowser() starts an Xvfb so "headed" still works.
+// Set PI_WEBREADER_HEADLESS=1 to force headless (or PI_WEBREADER_HEADED=0).
+const HEADLESS_ENV = process.env.PI_WEBREADER_HEADLESS;
+const HEADED =
+  HEADLESS_ENV !== undefined
+    ? !/^(1|true|yes)$/i.test(HEADLESS_ENV)
+    : !/^(0|false|no)$/i.test(process.env.PI_WEBREADER_HEADED || "");
 const CDP = process.env.PI_WEBREADER_CDP?.trim() || "";
 const MAX_URL = parseInt(process.env.PI_WEBREADER_MAXURL || "120", 10);
 // Resolve the extension's own directory (works for both local dev installs and
@@ -66,18 +87,19 @@ const LAUNCH_ARGS = [
   "--no-default-browser-check",
 ];
 
-function channelList(): string[] {
-  const env = process.env.PI_WEBREADER_CHANNEL?.trim();
-  if (env) {
-    return env
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .map((c) => (c.toLowerCase() === "chromium" ? "" : c));
-  }
-  // Try fast headless chromium first, fall back to installed system channels
-  return ["", "msedge", "chrome"];
-}
+// Playwright's BUNDLED Chromium only. We deliberately do not fall back to a system
+// chrome/msedge: the plugin must work on a machine that has nothing but its own
+// dependencies installed.
+//
+// Version pinning is load-bearing, not cosmetic. Cloudflare rejects Chromium builds that
+// are newer than the current stable channel (Playwright ships dev-channel "Chrome for
+// Testing"). Measured on a live Turnstile challenge, 3/3 passes each:
+//   chromium-1219 (147) / 1223 (148) / 1228 (149)  -> PASS
+//   chromium-1234 (151) / 1243 (153)               -> FAIL 0/3
+// `playwright` is therefore pinned to 1.61.0, which bundles revision 1228.
+const PLAYWRIGHT_PIN_NOTE =
+  "playwright is pinned to 1.61.0 (chromium 1228) because newer bundled Chromium " +
+  "revisions are rejected by Cloudflare challenges";
 
 // ---- browser lifecycle ----------------------------------------------------
 interface AnyBrowser {
@@ -89,9 +111,10 @@ interface AnyContext {
   newPage(): Promise<AnyPage>;
   close(): Promise<void>;
   addInitScript(fn: unknown): Promise<void>;
+  newCDPSession?(page: unknown): Promise<{ send(method: string, params?: unknown): Promise<unknown> }>;
 }
 interface AnyPage {
-  goto(url: string, opts?: unknown): Promise<{ status(): number } | null>;
+  goto(url: string, opts?: unknown): Promise<{ status(): number; headers?(): Record<string, string> } | null>;
   waitForLoadState(state: string, opts?: unknown): Promise<void>;
   waitForSelector(sel: string, opts?: unknown): Promise<unknown>;
   waitForTimeout(ms: number): Promise<void>;
@@ -101,6 +124,11 @@ interface AnyPage {
   evaluate<T, A = void>(fn: (arg: A) => T | Promise<T>, arg?: A): Promise<T>;
   url(): string;
   title(): Promise<string>;
+  mouse?: {
+    move(x: number, y: number, opts?: { steps?: number }): Promise<void>;
+    down(): Promise<void>;
+    up(): Promise<void>;
+  };
   locator(sel: string): {
     first(): { ariaSnapshot(opts?: unknown): Promise<string> };
     nth(index: number): { ariaSnapshot(opts?: unknown): Promise<string> };
@@ -120,6 +148,85 @@ let openingToken: object | null = null;
 // would be orphaned with no reference left to close it.
 let generation = 0;
 let autoInstallTriggered = false;
+
+// ---------------------------------------------------------------------------
+// Virtual display
+// ---------------------------------------------------------------------------
+// Cloudflare's stronger challenges only pass for a HEADED browser: a headless
+// Chromium advertises `HeadlessChrome` in its UA and exposes no WebGL, and both
+// are trivially detectable. Verified empirically on a live Turnstile challenge:
+// every headless variant failed, while headed msedge passed on the first click.
+// On a machine without a real X server we therefore start our own Xvfb and point
+// the browser at it, so "headed" works in a headless environment.
+let xvfbProc: { pid?: number; kill(): void } | null = null;
+let virtualDisplay: string | null = null;
+
+function displayWorks(display: string): boolean {
+  try {
+    // An X socket must exist for the display, e.g. ":99" or "localhost:99" -> /tmp/.X11-unix/X99.
+    const m = /:(\d+)/.exec(display);
+    if (!m) return false;
+    return existsSync(`/tmp/.X11-unix/X${m[1]}`);
+  } catch {
+    return false;
+  }
+}
+
+/** Ensure some usable X display exists for a headed browser; start Xvfb if needed. */
+async function ensureDisplay(): Promise<void> {
+  if (process.env.PI_WEBREADER_NO_XVFB === "1") return;
+  // An explicitly working DISPLAY (including a forwarded one) wins.
+  if (process.env.DISPLAY && displayWorks(process.env.DISPLAY)) return;
+
+  if (virtualDisplay) {
+    process.env.DISPLAY = virtualDisplay;
+    return;
+  }
+
+  // Pick a free display number.
+  for (let n = 90; n < 130; n++) {
+    if (existsSync(`/tmp/.X11-unix/X${n}`)) continue;
+    const display = `:${n}`;
+    try {
+      const child = spawn("Xvfb", [display, "-screen", "0", "1920x1080x24", "-nolisten", "tcp"], {
+        stdio: "ignore",
+        detached: false,
+      });
+      child.unref?.();
+      // Wait briefly for the socket to appear.
+      for (let i = 0; i < 40; i++) {
+        if (existsSync(`/tmp/.X11-unix/X${n}`)) {
+          xvfbProc = child as unknown as { pid?: number; kill(): void };
+          virtualDisplay = display;
+          process.env.DISPLAY = display;
+          log("started Xvfb on", display, "(pid:", child.pid, ")");
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      try {
+        child.kill();
+      } catch {
+        /* ignore */
+      }
+    } catch (e) {
+      log("Xvfb launch failed:", (e as Error).message);
+      return;
+    }
+  }
+  log("could not obtain an X display; headed browser will likely fail");
+}
+
+function stopDisplay() {
+  if (!xvfbProc) return;
+  try {
+    xvfbProc.kill();
+  } catch {
+    /* ignore */
+  }
+  xvfbProc = null;
+  virtualDisplay = null;
+}
 
 function triggerBackgroundChromiumInstall() {
   if (autoInstallTriggered) return;
@@ -143,7 +250,9 @@ function triggerBackgroundChromiumInstall() {
 
 function contextOpts() {
   return {
-    userAgent: UA,
+    // Only override the UA when the user explicitly asked for one; otherwise keep the
+    // browser's native (self-consistent) user agent.
+    ...(UA ? { userAgent: UA } : {}),
     locale: LOCALE,
     viewport: { width: 1920, height: 1080 },
     javaScriptEnabled: true,
@@ -188,31 +297,37 @@ async function ensureBrowser(): Promise<AnyContext> {
         channel = "cdp";
         launchedContext = launched.contexts()[0] || (await launched.newContext(contextOpts()));
       } else {
-        let lastErr: unknown;
-        for (const ch of channelList()) {
-          try {
-            log("launching channel:", ch || "bundled-chromium", "headless:", !HEADED);
-            launched = (await chromium.launch({
-              ...(ch ? { channel: ch } : {}),
-              headless: !HEADED,
-              args: LAUNCH_ARGS,
-            })) as AnyBrowser;
-            channel = ch || "chromium";
-            break;
-          } catch (e) {
-            lastErr = e;
-            const msg = (e as Error).message || String(e);
-            if (!ch && /Executable doesn't exist|browserType\.launch.*chromium|browser was not found|Looks like Playwright was installed/i.test(msg)) {
-              triggerBackgroundChromiumInstall();
-            }
-            log("channel unavailable:", ch || "bundled", "=>", msg);
+        // A headed browser needs an X display; start Xvfb if the machine has none.
+        if (HEADED) await ensureDisplay();
+        try {
+          log("launching bundled chromium, headless:", !HEADED);
+          launched = (await chromium.launch({
+            headless: !HEADED,
+            args: LAUNCH_ARGS,
+          })) as AnyBrowser;
+          channel = "chromium";
+        } catch (e) {
+          const msg = (e as Error).message || String(e);
+          if (/Executable doesn't exist|browserType\.launch.*chromium|browser was not found|Looks like Playwright was installed/i.test(msg)) {
+            triggerBackgroundChromiumInstall();
+            throw new Error(
+              "The bundled Chromium is not installed. Run:\n" +
+                `  cd ${EXT_DIR} && npx playwright install chromium\n` +
+                `(note: ${PLAYWRIGHT_PIN_NOTE})\n\nOriginal error: ${msg}`,
+            );
           }
+          throw e;
         }
-        if (!launched) throw lastErr;
         launchedContext = await launched.newContext(contextOpts());
       }
 
-      await launchedContext!.addInitScript(stealth);
+      // No stealth patches by default: overriding navigator.plugins / languages / WebGL
+      // on a real browser makes the fingerprint internally inconsistent, which is itself
+      // a strong bot signal (and measurably breaks the Cloudflare challenge). Set
+      // PI_WEBREADER_STEALTH=1 to opt back in for cases that need it.
+      if (/^(1|true|yes)$/i.test(process.env.PI_WEBREADER_STEALTH || "")) {
+        await launchedContext!.addInitScript(stealth);
+      }
 
       if (myGeneration !== generation) {
         // The session that asked for this browser is gone; close it rather than
@@ -268,6 +383,7 @@ async function closeBrowser() {
       /* ignore */
     }
   }
+  stopDisplay();
 }
 
 // ---- per-fetch logic ------------------------------------------------------
@@ -414,20 +530,60 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
   }
 
   let status: number | null = null;
+  let cfMitigated = false;
   try {
-    let resp: { status(): number } | null = null;
+    let resp: { status(): number; headers?(): Record<string, string> } | null = null;
     try {
       resp = await page.goto(p.url, { waitUntil: p.waitUntil, timeout });
     } catch (e) {
       log("goto threw (continuing):", (e as Error).message);
     }
-    if (resp) status = resp.status();
+    if (resp) {
+      status = resp.status();
+      try {
+        const h = resp.headers?.() ?? {};
+        cfMitigated = String(h["cf-mitigated"] || "").toLowerCase().includes("challenge");
+      } catch {
+        /* headers unavailable */
+      }
+    }
 
     // 1. Wait for page load state (domcontentloaded is already fulfilled, wait briefly for load/settle)
     if (p.waitUntil === "networkidle") {
       await page.waitForLoadState("networkidle", { timeout: Math.min(timeout, 8000) }).catch(() => {});
     } else {
       await page.waitForLoadState("load", { timeout: Math.min(timeout, 3000) }).catch(() => {});
+    }
+
+    // 1b. Cloudflare challenge branch. Jev decides whether this is really a challenge
+    // and, if so, which element to click; we then re-check state each round.
+    let cf: CfOutcome | undefined;
+    const jevService = resolveJevService();
+    if (jevService) {
+      try {
+        cf = await handleCloudflareChallenge({
+          page,
+          context: ctx as unknown as { newCDPSession?(page: unknown): Promise<{ send(m: string, p?: unknown): Promise<unknown> }> },
+          url: p.url,
+          jev: jevService,
+          signal,
+          log,
+          headerHint: cfMitigated,
+        });
+        if (cf.detected) {
+          log(
+            `cloudflare challenge branch: detected=true solved=${cf.solved} ` +
+              `rounds=${cf.rounds}${cf.reason ? ` reason=${cf.reason}` : ""}`,
+          );
+          // Give the page a moment to finish rendering the real content after the challenge.
+          if (cf.solved) await page.waitForLoadState("load", { timeout: 3000 }).catch(() => {});
+        }
+      } catch (e) {
+        log("cloudflare challenge branch threw:", (e as Error).message);
+      }
+    } else {
+      // No Jev available: fall back to the cheap structural signal so we at least warn.
+      cfMitigated = cfMitigated || /just a moment|请稍候|安全验证/i.test(await page.title().catch(() => ""));
     }
     
     // 2. Custom wait selector if provided
@@ -621,6 +777,7 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
       screenshot: screenshotB64,
       screenshotPath,
       loadVerdict,
+      cloudflare: cf,
     };
   } finally {
     if (signal) signal.removeEventListener("abort", onAbort);
@@ -1053,7 +1210,8 @@ export default function (pi: ExtensionAPI) {
     label: "Web Reader",
     description:
       "Fetch and fully render web page content with a real headless browser (handles " +
-      "JavaScript / single-page apps, dynamic hydration, and bot-blocking WAFs via a spoofed User-Agent + stealth patches). Content " +
+      "JavaScript / single-page apps, dynamic hydration, and bot-blocking WAFs). Cloudflare " +
+      "challenges (Turnstile / 'Just a moment') are detected and solved automatically. Content " +
       "is extracted from Playwright's ARIA accessibility snapshot and Jev semantic load verification — so " +
       "hidden/hover-only UI is excluded and the output is clean, readable Markdown.",
     promptSnippet: "Real-browser web reader; clean Markdown via ARIA snapshot and Jev semantic load verification",
@@ -1164,12 +1322,24 @@ export default function (pi: ExtensionAPI) {
       const jevNote = result.loadVerdict?.jevScore !== undefined
         ? `Jev Score: ${result.loadVerdict.jevScore.toFixed(2)}${result.loadVerdict.fallback ? " (fallback)" : ""}\n`
         : "";
+      const cfNote = result.cloudflare?.detected
+        ? `Cloudflare: challenge detected — ${result.cloudflare.solved
+            ? `passed after ${result.cloudflare.rounds} click round(s)`
+            : `NOT passed (rounds=${result.cloudflare.rounds}${result.cloudflare.reason ? `, ${result.cloudflare.reason}` : ""})`}\n`
+        : "";
+      // A 403 on a solved challenge is the *challenge* response's status; the content below
+      // is the real page. Say so, otherwise the bare 403 reads as a failure.
+      const statusNote =
+        result.cloudflare?.detected && result.cloudflare.solved && (result.status ?? 0) >= 400
+          ? ` (initial challenge response; page rendered successfully)`
+          : "";
       const header =
         `URL: ${result.url}\n` +
         `Title: ${result.title}\n` +
-        `HTTP: ${result.status ?? "?"}\n` +
+        `HTTP: ${result.status ?? "?"}${statusNote}\n` +
         `Browser: ${activeChannel}${viaCdp ? " (cdp)" : ""}${result.effectiveSelector ? `  [scope: ${result.effectiveSelector}]` : ""}${selectionNote}${truncated ? "  [truncated]" : ""}\n` +
         jevNote +
+        cfNote +
         (result.screenshotPath ? `Screenshot: ${result.screenshotPath}\n` : "") +
         spanLegend +
         `\n`;
@@ -1200,6 +1370,7 @@ export default function (pi: ExtensionAPI) {
           ariaBytes: result.aria?.length ?? 0,
           selection: result.selection,
           screenshotPath: result.screenshotPath,
+          cloudflare: result.cloudflare,
         },
       };
     },
