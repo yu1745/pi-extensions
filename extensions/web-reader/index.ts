@@ -308,10 +308,20 @@ function triggerBackgroundChromiumInstall() {
     if (!require("node:fs").existsSync(cliPath)) {
       cliPath = path.resolve(EXT_DIR, "../../node_modules/playwright/cli.js");
     }
+    // NOTE: windowsHide is required on Windows, and `detached` must NOT be used there:
+    // detached:true asks Windows for a brand-new console, which overrides windowsHide and
+    // pops a visible node.exe window (process.execPath is node.exe) every time this runs.
+    // Without `detached` the child still outlives us via unref() + stdio:"ignore".
     const child = spawn(process.execPath, [cliPath, "install", "chromium", "chromium-headless-shell"], {
       cwd: EXT_DIR,
-      detached: true,
       stdio: "ignore",
+      windowsHide: true,
+      ...(process.platform === "win32" ? {} : { detached: true }),
+    });
+    // A missing binary/CWD surfaces as an async 'error' event that a try/catch cannot see;
+    // without a listener it becomes an uncaught exception and takes the process down.
+    child.on("error", (e) => {
+      log("background chromium install could not start:", (e as NodeJS.ErrnoException).code || e.message);
     });
     child.unref();
     log("triggered background Playwright Chromium installation (pid:", child.pid, ")");
