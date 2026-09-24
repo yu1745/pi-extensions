@@ -48,6 +48,7 @@
 			"extensions/typesafe-jev/index.ts",
 			"extensions/commandcode/index.ts",
 			"extensions/codebuddy-fp/index.ts",
+			"extensions/qoder-fp/index.ts",
 			"extensions/tokenspeed.ts",
 			"extensions/tool-duration.ts",
 			"extensions/web-reader/index.ts",
