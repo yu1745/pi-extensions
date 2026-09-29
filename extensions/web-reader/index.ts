@@ -171,6 +171,14 @@ let generation = 0;
 let autoInstallTriggered = false;
 
 // ---------------------------------------------------------------------------
+// Timing
+// ---------------------------------------------------------------------------
+/** Milliseconds as "1.2s" / "340ms" — the same shape tool-duration.ts prints. */
+function fmtMs(ms: number): string {
+  return ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${Math.round(ms)}ms`;
+}
+
+// ---------------------------------------------------------------------------
 // Virtual display
 // ---------------------------------------------------------------------------
 // Cloudflare's stronger challenges only pass for a HEADED browser: a headless
@@ -613,9 +621,15 @@ async function waitForReadableContent(page: AnyPage, url: string, signal?: Abort
 }
 
 async function fetchPage(p: FetchParams, signal?: AbortSignal) {
+  const t0 = Date.now();
+  const mark = () => Date.now() - t0;
+  // Timing ensureBrowser() itself is what distinguishes a cold launch (seconds) from a
+  // warm no-op (~0ms); there is no need to instrument the launch path for that.
   const ctx = await ensureBrowser();
+  const browserMs = mark();
   const timeout = p.timeoutMs ?? 45000;
   const page = await ctx.newPage();
+  const afterNewPageMs = mark();
 
   const onAbort = () => {
     try {
@@ -657,6 +671,7 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
     } else {
       await page.waitForLoadState("load", { timeout: Math.min(timeout, 3000) }).catch(() => {});
     }
+    const afterLoadStateMs = mark();
 
     // 1b. Cloudflare challenge branch. Jev decides whether this is really a challenge
     // and, if so, which element to click; we then re-check state each round.
@@ -695,7 +710,8 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
         log("cloudflare challenge detected but Jev is unavailable; cannot solve it");
       }
     }
-    
+    const afterCfMs = mark();
+
     // 2. Custom wait selector if provided
     if (p.waitSelector) await page.waitForSelector(p.waitSelector, { timeout }).catch(() => {});
 
@@ -876,9 +892,19 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
     }
 
     const title = await page.title().catch(() => "");
+    const totalMs = mark();
     return {
       status,
       title,
+      timing: {
+        totalMs,
+        // Cold launch dominates everything else; report it only when it actually happened.
+        browserMs: browserMs > 50 ? browserMs : undefined,
+        newPageMs: afterNewPageMs - browserMs,
+        navigateMs: afterLoadStateMs - afterNewPageMs,
+        cloudflareMs: cf !== undefined ? afterCfMs - afterLoadStateMs : undefined,
+        extractMs: totalMs - afterCfMs,
+      },
       url: page.url(),
       aria,
       html,
@@ -1432,10 +1458,23 @@ export default function (pi: ExtensionAPI) {
       const jevNote = result.loadVerdict?.jevScore !== undefined
         ? `Jev Score: ${result.loadVerdict.jevScore.toFixed(2)}${result.loadVerdict.fallback ? " (fallback)" : ""}\n`
         : "";
+      const cfGivenUp = result.cloudflare?.reason === "stalled" || result.cloudflare?.reason === "max-rounds";
       const cfNote = result.cloudflare?.detected
         ? `Cloudflare: challenge detected — ${result.cloudflare.solved
             ? `passed after ${result.cloudflare.rounds} click round(s)`
-            : `NOT passed (rounds=${result.cloudflare.rounds}${result.cloudflare.reason ? `, ${result.cloudflare.reason}` : ""})`}\n`
+            : `NOT passed (rounds=${result.cloudflare.rounds}${result.cloudflare.reason ? `, ${result.cloudflare.reason}` : ""})`}` +
+          (cfGivenUp
+            ? " — the widget stopped responding after the click; retrying it cannot change the outcome. This usually means the client IP is rejected outright, not that the browser is detected.\n"
+            : "\n")
+        : "";
+      // Mirror the Jev Score line: the per-phase breakdown is what makes a slow read
+      // diagnosable (cold launch vs navigation vs a challenge that never resolved).
+      const t = result.timing;
+      const timingNote = t
+        ? `Elapsed: ${fmtMs(t.totalMs)}` +
+          (t.browserMs !== undefined ? ` (browser launch ${fmtMs(t.browserMs)})` : "") +
+          (t.cloudflareMs !== undefined && t.cloudflareMs > 50 ? `, challenge ${fmtMs(t.cloudflareMs)}` : "") +
+          ` — nav ${fmtMs(t.navigateMs)}, extract ${fmtMs(t.extractMs)}\n`
         : "";
       // A 403 on a solved challenge is the *challenge* response's status; the content below
       // is the real page. Say so, otherwise the bare 403 reads as a failure.
@@ -1450,6 +1489,7 @@ export default function (pi: ExtensionAPI) {
         `Browser: ${activeChannel}${viaCdp ? " (cdp)" : ""}${result.effectiveSelector ? `  [scope: ${result.effectiveSelector}]` : ""}${selectionNote}${truncated ? "  [truncated]" : ""}\n` +
         jevNote +
         cfNote +
+        timingNote +
         (result.screenshotPath ? `Screenshot: ${result.screenshotPath}\n` : "") +
         spanLegend +
         `\n`;
@@ -1475,6 +1515,8 @@ export default function (pi: ExtensionAPI) {
           status: result.status,
           browser: activeChannel,
           jevScore: result.loadVerdict?.jevScore,
+          durationMs: result.timing?.totalMs,
+          timing: result.timing,
           truncated,
           format,
           ariaBytes: result.aria?.length ?? 0,

@@ -15,8 +15,17 @@
  *
  * Config:
  *   PI_WEBREADER_CF=off          disable this module entirely
- *   PI_WEBREADER_CF_ROUNDS=N     max click/verify rounds (default 8)
+ *   PI_WEBREADER_CF_ROUNDS=N     max click/verify rounds (default 2 — see note below)
  *   PI_WEBREADER_CF_TIMEOUT_MS=N overall deadline for the challenge branch (default 40000)
+ *
+ * Why the default is 2 and not a larger number: a Cloudflare managed challenge that is
+ * going to pass does so on the FIRST interactive widget, typically within a couple of
+ * seconds. Once the widget has been clicked and the next round still reports `challenge`,
+ * the outcome is already decided — CF is not going to change its mind because we clicked
+ * the same coordinates again. Measured on a rejected challenge: rounds 2..8 all re-clicked
+ * the same widget at the same point and all reported `challenge`, burning 18s and several
+ * paid Jev round-trips for a result that was never in doubt. Retrying is only worth it
+ * when something actually CHANGED between rounds, which the stall check below tracks.
  */
 import type { JevServiceV1 } from "../shared/jev/types.ts";
 
@@ -401,11 +410,11 @@ export async function handleCloudflareChallenge(opts: {
     return { detected: false, solved: false, rounds: 0, reason: "disabled" };
   }
 
-  const maxRoundsRaw = opts.maxRounds ?? parseInt(process.env.PI_WEBREADER_CF_ROUNDS || "8", 10);
+  const maxRoundsRaw = opts.maxRounds ?? parseInt(process.env.PI_WEBREADER_CF_ROUNDS || "2", 10);
   const deadlineRaw = opts.deadlineMs ?? parseInt(process.env.PI_WEBREADER_CF_TIMEOUT_MS || "40000", 10);
   // A malformed env value would otherwise give NaN: maxRounds=NaN skips the loop entirely,
   // and deadline=NaN makes every deadline comparison false (effectively unbounded).
-  const maxRounds = Number.isFinite(maxRoundsRaw) && maxRoundsRaw > 0 ? maxRoundsRaw : 8;
+  const maxRounds = Number.isFinite(maxRoundsRaw) && maxRoundsRaw > 0 ? maxRoundsRaw : 2;
   const deadlineMs = Number.isFinite(deadlineRaw) && deadlineRaw > 0 ? deadlineRaw : 40_000;
 
   // --- cheap pre-gate: don't spend a Jev call on ordinary pages ---------------
@@ -429,6 +438,9 @@ export async function handleCloudflareChallenge(opts: {
   let rounds = 0;
   let last: Verdict | undefined;
   let sawChallenge = false;
+  // Signature of the last widget we clicked. A re-click on an identical, unchanged widget
+  // is the "managed challenge rejected us" signature — see the note at the top of the file.
+  let lastClickSig: string | null = null;
   const remaining = () => deadline - Date.now();
 
   for (let round = 0; round < maxRounds; round++) {
@@ -510,6 +522,23 @@ export async function handleCloudflareChallenge(opts: {
       if (target && !isCloudflareWidget(target)) {
         log(`refusing to click ${verdict.action}: not a Cloudflare challenge widget`);
       } else if (target && page.mouse) {
+        // Same widget, same place, already clicked once: the challenge did not react, so a
+        // second identical click is a guaranteed no-op. Stop and let the caller fall back.
+        // Identified by node + geometry only. The Turnstile frame URL carries a per-attempt
+        // token that changes on every retry, so including it would defeat the comparison.
+        const sig = `${target.nodeId}|${target.tag}|${JSON.stringify(target.rect)}`;
+        if (lastClickSig === sig) {
+          log("challenge stalled: widget unchanged since the previous click; giving up");
+          return {
+            detected: sawChallenge,
+            solved: false,
+            rounds,
+            state: last.state,
+            confidence: last.stateConfidence,
+            reason: "stalled",
+          };
+        }
+        lastClickSig = sig;
         try {
           await humanClick(page, clickPoint(target), log);
           rounds++;
