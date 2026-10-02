@@ -41,6 +41,18 @@ pi install git:github.com/yu1745/pi-extensions
 > pi-smart-compact is provided separately by the fork `git:github.com/yu1745/pi-smart-compact` (upstream + `allowUnverifiedApply`).>
 > The `subagent` extension was **removed** in favor of [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents) (install with `pi install npm:@tintinweb/pi-subagents`).
 
+### Codex request tier logging
+
+`openai-codex-fast` keeps the existing process-shared `/fast` / `/ultrafast` mode (in-process subagents inherit it; restart resets it). Each valid object payload passing the Codex `before_provider_request` hook appends a non-context `custom` entry named `openai-codex-fast-request`. Logs do not restore the mode or inject message text.
+
+Schema v1: `version`, `kind: "requested_service_tier"`, local UUID `request_id`, `session_id`, `parent_entry_id` (leaf before append), `provider`, `model` (payload model, otherwise selected model), `mode`, `service_tier` (`default` / `priority` / `ultrafast`; `unknown` for other explicit values), and `service_tier_explicit`. Standard leaves the payload untouched, including an existing explicit tier; absent tier is recorded as the client default. No prompts, credentials, full payloads, or usage/cost changes are recorded.
+
+This is a **request-time client snapshot**, not a server-confirmed or billed tier. Pi 0.85.1 exposes only payload on this hook, not the physical provider/model or a request-to-message ID; filtering retains the existing selected-provider semantics (virtual routing/independent calls are not guaranteed). Later extensions can still alter the payload. A hook entry does not prove successful transmission: Codex HTTP retries and WebSocket fallback reuse the serialized payload without rerunning this hook. New hook invocations get distinct local IDs, not server retry IDs. Persistence follows Pi session settings (no durable file in no-session/in-memory mode).
+
+Although `message_end` supports replacement before persistence, it exposes no matching request token. The plugin deliberately does **not** infer assistant/usage association by ordering, global mode at completion, or response ID; nested/concurrent calls and retries would make that unsafe. Session/leaf fields are navigation hints, not proof of message association.
+
+Offline tests: `node --experimental-strip-types --test tests/openai-codex-fast.test.ts`.
+
 ### DeepSeek effort
 
 **当前已禁用**：`package.json` 的 `pi.extensions` 不包含此插件。代码和测试仅保留供参考；以下命令说明仅适用于手动重新启用之后。

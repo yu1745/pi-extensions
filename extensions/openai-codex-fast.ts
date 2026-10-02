@@ -2,8 +2,10 @@
 //
 // /fast toggles service_tier=priority on openai-codex Responses API requests.
 // /ultrafast toggles service_tier=ultrafast (currently supported on models like gpt-5.6-sol).
-// State is session-local and is disabled after pi restarts.
+// Mode is process-shared (including in-process subagents), reset after pi restarts.
+// Request snapshots are durable non-context entries; they do not restore the mode.
 
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const TARGET_PROVIDER = "openai-codex";
@@ -64,14 +66,32 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("before_provider_request", (event, ctx) => {
 		if (ctx.model?.provider !== TARGET_PROVIDER) return;
 		renderStatus(ctx);
-		if (state.serviceTier === "standard") return;
 		if (!event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) return;
 
-		const service_tier = state.serviceTier === "ultrafast" ? ULTRAFAST_SERVICE_TIER : FAST_SERVICE_TIER;
-		return {
-			...(event.payload as Record<string, unknown>),
-			service_tier,
+		// Snapshot now, never at message_end: the shared mode may change in flight.
+		const mode = state.serviceTier;
+		const payload = event.payload as Record<string, unknown>;
+		const nextPayload = mode === "standard" ? payload : {
+			...payload,
+			service_tier: mode === "ultrafast" ? ULTRAFAST_SERVICE_TIER : FAST_SERVICE_TIER,
 		};
+		// No request/message correlation token is exposed by this event. A local
+		// id identifies this hook invocation only, not a server request or retry.
+		pi.appendEntry("openai-codex-fast-request", {
+			version: 1,
+			kind: "requested_service_tier",
+			request_id: randomUUID(),
+			session_id: ctx.sessionManager.getSessionId(),
+			parent_entry_id: ctx.sessionManager.getLeafId(),
+			provider: TARGET_PROVIDER,
+			model: typeof payload.model === "string" ? payload.model : ctx.model.id,
+			mode,
+			service_tier: nextPayload.service_tier === undefined ? DEFAULT_SERVICE_TIER
+				: [DEFAULT_SERVICE_TIER, FAST_SERVICE_TIER, ULTRAFAST_SERVICE_TIER].includes(nextPayload.service_tier as string)
+					? nextPayload.service_tier : "unknown",
+			service_tier_explicit: nextPayload.service_tier !== undefined,
+		});
+		if (mode !== "standard") return nextPayload;
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
