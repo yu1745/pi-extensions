@@ -3,7 +3,7 @@
  *
  * 1. While the model is thinking (before a text block streams out), the footer
  *    status shows a live "Thinking Ns" counter; when the first text arrives it
- *    settles to "Thought Ns" until the turn moves on.
+ *    settles to "Thought Ns" and stays visible until the next response.
  * 2. Between two user inputs, when the agent finishes working, a dim separator
  *    "─ Worked for Xm YYs ─" is appended to the transcript (not sent to LLM).
  *
@@ -13,7 +13,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
-const STATUS_KEY = "z-codex-timer";
+// Footer statuses sort by key; keep the timer before quota and speed text.
+export const CODEX_TIMER_STATUS_KEY = "00-codex-timer";
+export const CODEX_TIMER_STATUS_WIDTH = 20;
 
 function fmt(secs: number): string {
 	const s = Math.floor(secs);
@@ -44,16 +46,34 @@ export default function (pi: ExtensionAPI) {
 	);
 
 	// --- Feature 1: live thinking timer in footer status ---
-	const startThinking = (ctx: { ui: { setStatus: (k: string, v?: string) => void }; hasUI: boolean }) => {
+	type TimerContext = { ui: { setStatus: (k: string, v?: string) => void }; hasUI: boolean };
+	const setTimerStatus = (ctx: TimerContext, text: string) => {
+		if (ctx.hasUI) ctx.ui.setStatus(CODEX_TIMER_STATUS_KEY, text.slice(0, CODEX_TIMER_STATUS_WIDTH).padEnd(CODEX_TIMER_STATUS_WIDTH));
+	};
+	const finishThinking = (ctx: TimerContext) => {
+		if (!awaitingText) return;
+		awaitingText = false;
+		stopTick();
+		setTimerStatus(ctx, `Thought ${fmt((Date.now() - thinkStart) / 1000)}`);
+	};
+	const startThinking = (ctx: TimerContext) => {
 		thinkStart = Date.now();
 		awaitingText = true;
 		if (!ctx.hasUI) return;
 		stopTick();
-		ctx.ui.setStatus(STATUS_KEY, "Thinking 0s");
+		setTimerStatus(ctx, "Thinking 0s");
 		tick = setInterval(() => {
-			ctx.ui.setStatus(STATUS_KEY, `Thinking ${fmt((Date.now() - thinkStart) / 1000)}`);
+			setTimerStatus(ctx, `Thinking ${fmt((Date.now() - thinkStart) / 1000)}`);
 		}, 1000);
 	};
+
+	pi.on("session_start", (_event, ctx) => {
+		stopTick();
+		turnStart = 0;
+		thinkStart = 0;
+		awaitingText = false;
+		setTimerStatus(ctx, "Ready");
+	});
 
 	pi.on("agent_start", async () => {
 		turnStart = Date.now();
@@ -67,28 +87,19 @@ export default function (pi: ExtensionAPI) {
 		if (!awaitingText) return;
 		const t = event.assistantMessageEvent?.type;
 		if (t === "text_start" || t === "text_delta") {
-			awaitingText = false;
-			stopTick();
-			if (ctx.hasUI) {
-				ctx.ui.setStatus(STATUS_KEY, `Thought ${fmt((Date.now() - thinkStart) / 1000)}`);
-			}
+			finishThinking(ctx);
 		}
 	});
 
-	// Assistant message finished without producing text (tool calls only): drop the timer.
+	// Tool-only responses also retain their final thinking duration.
 	pi.on("message_end", async (_event, ctx) => {
-		if (awaitingText) {
-			awaitingText = false;
-			stopTick();
-			if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
-		}
+		finishThinking(ctx);
 	});
 
 	// --- Feature 2: on settle, append separator ---
 	pi.on("agent_settled", async (_event, ctx) => {
+		finishThinking(ctx);
 		stopTick();
-		awaitingText = false;
-		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
 		const secs = (Date.now() - turnStart) / 1000;
 		if (turnStart > 0 && secs >= 1) {
 			pi.appendEntry<WorkedForData>("worked-for", {

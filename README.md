@@ -20,7 +20,7 @@ pi install git:github.com/yu1745/pi-extensions
 | `append` | `extensions/append.ts` | `/append` queues user messages until the agent run stops (at `agent_end`), avoiding tool-call interruption |
 | `tokenspeed` | `extensions/tokenspeed.ts` | Model output speed (tokens/sec) status line |
 | `working-bell` | `extensions/working-bell.ts` | Working bell + title status |
-| `codex-timer` | `extensions/codex-timer.ts` | Codex-style timers: live "Thinking Ns" footer while thinking, `─ Worked for Xm YYs ─` separator after each agent run |
+| `codex-timer` | `extensions/codex-timer.ts` | Codex-style timers: fixed 20-column slot at the front of the footer, "Ready" before the first response, live "Thinking Ns", final "Thought Ns" retained until the next response, and a `─ Worked for Xm YYs ─` separator after each agent run |
 | `inject-resume` | `extensions/inject-resume.ts` | Inject-resume-on-exit (pi side, Linux/bash) |
 | `status-footer` | `extensions/status-footer.ts` | Enhanced footer with session cost (USD), turn/step counters, TTFT latency, and multi-cycle split |
 | `deepseek-time-pricing` | `extensions/deepseek-time-pricing.ts` | DeepSeek 分时定价：按消息时间戳重算 `usage.cost`，成本统计跟随高峰/空闲价；`/deepseek-pricing` 查看当前档位。provider `deepseek` 匹配 `deepseek-flash`、`deepseek-v4[.x]-flash*` 与 `deepseek-v4[.x]-pro`（CNY 价目，经 `USD_PER_CNY` 换算）；provider `commandcode` 匹配 `deepseek/deepseek-v4[.x]-pro` 与 `deepseek/deepseek-v4[.x]-flash`（含 `-vision-exp`，USD 价目直用）；平价模型 `deepseek/deepseek-v4-flash-fast` 不参与分时；`tests/deepseek-time-pricing.test.ts` 覆盖各档位与边界 |

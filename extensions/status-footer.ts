@@ -19,6 +19,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { fetchCodexUsage, loadCodexCredentials, parseCodexWindow } from "./shared/codex-api.ts";
+import { CODEX_TIMER_STATUS_KEY, CODEX_TIMER_STATUS_WIDTH } from "./codex-timer.ts";
 
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
@@ -398,7 +399,12 @@ export default function (pi: ExtensionAPI) {
 					if (statuses.size > 0) {
 						const sorted = Array.from(statuses.entries())
 							.sort(([a], [b]) => a.localeCompare(b))
-							.map(([, text]) => sanitizeStatusText(text))
+							.map(([key, text]) => {
+								const clean = sanitizeStatusText(text);
+								if (key !== CODEX_TIMER_STATUS_KEY) return clean;
+								const timer = truncateToWidth(clean, CODEX_TIMER_STATUS_WIDTH, "");
+								return timer + " ".repeat(CODEX_TIMER_STATUS_WIDTH - visibleWidth(timer));
+							})
 							.filter((text) => text.length > 0);
 						if (sorted.length > 0) {
 							lines.push(truncateToWidth(sorted.join("  "), width, theme.fg("dim", "...")));
