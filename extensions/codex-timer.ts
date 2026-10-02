@@ -33,6 +33,8 @@ export default function (pi: ExtensionAPI) {
 	let turnStart = 0; // agent run start (feature 2)
 	let thinkStart = 0; // current assistant message start (feature 1)
 	let awaitingText = false;
+	let thinkTotalMs = 0;
+	let lastThoughtText = "Ready";
 	let tick: ReturnType<typeof setInterval> | null = null;
 
 	const stopTick = () => {
@@ -62,20 +64,31 @@ export default function (pi: ExtensionAPI) {
 	const setTimerStatus = (ctx: TimerContext, text: string) => {
 		if (ctx.hasUI) ctx.ui.setStatus(CODEX_TIMER_STATUS_KEY, centerWithRules(text, CODEX_TIMER_STATUS_WIDTH));
 	};
+	// A turn can contain several assistant messages (tool loop, adaptive-thinking
+	// continuations). Think time is accumulated across them, otherwise a
+	// zero-length follow-up segment would overwrite a real "Thought 1m 20s" with
+	// a meaningless "Thought 0s".
+	const thinkMs = () => thinkTotalMs + (awaitingText ? Date.now() - thinkStart : 0);
 	const finishThinking = (ctx: TimerContext) => {
 		if (!awaitingText) return;
 		awaitingText = false;
+		thinkTotalMs += Date.now() - thinkStart;
 		stopTick();
-		setTimerStatus(ctx, `Thought ${fmt((Date.now() - thinkStart) / 1000)}`);
+		// Sub-second segments carry no information: keep whatever the slot showed
+		// before instead of stamping a fake "Thought 0s" over it.
+		if (thinkTotalMs < 1000) return;
+		lastThoughtText = `Thought ${fmt(thinkTotalMs / 1000)}`;
+		setTimerStatus(ctx, lastThoughtText);
 	};
 	const startThinking = (ctx: TimerContext) => {
+		if (awaitingText) thinkTotalMs += Date.now() - thinkStart; // continue the same streak
 		thinkStart = Date.now();
 		awaitingText = true;
 		if (!ctx.hasUI) return;
 		stopTick();
-		setTimerStatus(ctx, "Thinking 0s");
+		setTimerStatus(ctx, `Thinking ${fmt(thinkMs() / 1000)}`);
 		tick = setInterval(() => {
-			setTimerStatus(ctx, `Thinking ${fmt((Date.now() - thinkStart) / 1000)}`);
+			setTimerStatus(ctx, `Thinking ${fmt(thinkMs() / 1000)}`);
 		}, 1000);
 	};
 
@@ -83,12 +96,15 @@ export default function (pi: ExtensionAPI) {
 		stopTick();
 		turnStart = 0;
 		thinkStart = 0;
+		thinkTotalMs = 0;
 		awaitingText = false;
+		lastThoughtText = "Ready";
 		setTimerStatus(ctx, "Ready");
 	});
 
 	pi.on("agent_start", async () => {
 		turnStart = Date.now();
+		thinkTotalMs = 0;
 	});
 
 	pi.on("message_start", async (event, ctx) => {
