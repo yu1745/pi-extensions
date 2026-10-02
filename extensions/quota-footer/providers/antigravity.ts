@@ -148,7 +148,15 @@ export async function fetchAntigravity(apiKey: string): Promise<FetchResult> {
 
 	// Parse from quotaSummary groups if available
 	if (quotaSummary?.groups && Array.isArray(quotaSummary.groups)) {
-		for (const group of quotaSummary.groups) {
+		// Only Google's own (Gemini) buckets belong in the footer. The same account
+		// also carries Claude/GPT pools whose 5h / weekly windows are a different
+		// quota; if no Gemini group exists at all we keep everything rather than
+		// showing nothing.
+		const allGroups = quotaSummary.groups as any[];
+		const geminiGroups = allGroups.filter((g) =>
+			/gemini|google/i.test(typeof g?.displayName === "string" ? g.displayName : ""),
+		);
+		for (const group of geminiGroups.length > 0 ? geminiGroups : allGroups) {
 			const groupName = typeof group.displayName === "string" ? group.displayName : "";
 			const groupPrefix = /gemini/i.test(groupName)
 				? "Gemini"
@@ -192,11 +200,8 @@ export async function fetchAntigravity(apiKey: string): Promise<FetchResult> {
 
 	// Fallback to modelsData quotaInfo if no buckets from summary
 	if (buckets.length === 0 && modelsData?.models && typeof modelsData.models === "object") {
-		// Group / pick representative models (Claude/GPT pool vs Gemini pool)
+		// Representative Gemini model only — Claude/GPT pools are not shown.
 		const modelEntries = Object.entries(modelsData.models) as [string, any][];
-		const claudeOrGpt = modelEntries.find(
-			([id, m]) => /claude|gpt/i.test(id) && m?.quotaInfo?.remainingFraction !== undefined,
-		);
 		const gemini = modelEntries.find(
 			([id, m]) => /gemini.*pro|gemini.*flash/i.test(id) && m?.quotaInfo?.remainingFraction !== undefined,
 		);
@@ -208,16 +213,6 @@ export async function fetchAntigravity(apiKey: string): Promise<FetchResult> {
 					label: "Gemini",
 					leftPercent: Math.round(clampPercent(rem * 100) ?? 0),
 					resetTime: gemini[1].quotaInfo.resetTime,
-				});
-			}
-		}
-		if (claudeOrGpt && claudeOrGpt[1]?.quotaInfo) {
-			const rem = asFiniteNumber(claudeOrGpt[1].quotaInfo.remainingFraction);
-			if (rem !== null) {
-				buckets.push({
-					label: "Claude/GPT",
-					leftPercent: Math.round(clampPercent(rem * 100) ?? 0),
-					resetTime: claudeOrGpt[1].quotaInfo.resetTime,
 				});
 			}
 		}
@@ -271,7 +266,9 @@ export const antigravityProviderConfig: ProviderConfig = {
 	ttlFor: antigravityTtlFor,
 	extractWeekQuota: (payload: unknown) => {
 		const state = payload as AntigravityPayload;
-		const weekBucket = state.buckets?.find((b) => /\b(week|weekly)\b/i.test(b.label));
+		const weekBucket = state.buckets?.find(
+			(b) => /\b(week|weekly)\b/i.test(b.label) && !/claude|gpt/i.test(b.label),
+		);
 		if (!weekBucket) return null;
 		let resetAt: number | undefined;
 		if (weekBucket.resetTime) {

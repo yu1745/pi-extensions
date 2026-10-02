@@ -47,8 +47,20 @@ export default function (pi: ExtensionAPI) {
 
 	// --- Feature 1: live thinking timer in footer status ---
 	type TimerContext = { ui: { setStatus: (k: string, v?: string) => void }; hasUI: boolean };
+	// A bare "Ready" in a 20-char slot looks half-empty, so frame it with rules.
+	// The slot is even and most labels are odd, leaving one spare column; fill
+	// it with a half-length rule (╴) instead of a space so the two sides stay
+	// visually equal and nothing is padded out with blanks.
+	const centerWithRules = (text: string, width: number): string => {
+		const label = ` ${text} `;
+		if (label.length >= width) return label.slice(0, width);
+		const fill = width - label.length;
+		const left = Math.floor(fill / 2);
+		const right = fill - left;
+		return "─".repeat(left) + label + "─".repeat(right - (fill % 2)) + (fill % 2 ? "╴" : "");
+	};
 	const setTimerStatus = (ctx: TimerContext, text: string) => {
-		if (ctx.hasUI) ctx.ui.setStatus(CODEX_TIMER_STATUS_KEY, text.slice(0, CODEX_TIMER_STATUS_WIDTH).padEnd(CODEX_TIMER_STATUS_WIDTH));
+		if (ctx.hasUI) ctx.ui.setStatus(CODEX_TIMER_STATUS_KEY, centerWithRules(text, CODEX_TIMER_STATUS_WIDTH));
 	};
 	const finishThinking = (ctx: TimerContext) => {
 		if (!awaitingText) return;
