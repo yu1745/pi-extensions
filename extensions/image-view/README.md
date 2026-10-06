@@ -16,7 +16,31 @@
 | 命令 | 作用 |
 |---|---|
 | `/img <path>` | 在对话流插入图片入口 |
-| `/img-sixel on\|off` | Sixel 兜底开关（默认 on；只有无 Kitty/iTerm2 时才轮到它） |
+
+## 能力判定只依赖终端（不写任何共享状态）
+
+协议判定顺序：
+
+1. pi-tui 探到 `kitty` / `iterm2` → 用协议画；
+2. `PI_IMAGE_VIEW_SIXEL=1 | 0`（按终端声明 Sixel）；`PI_IMAGE_PROTOCOL=none` 表示本终端不要图片；
+3. 都没有 → 默认当这台终端认 Sixel。
+
+**不要用持久化文件存这类开关。** 这里踩过一次：早先用
+`~/.cache/pi-image-view-sixel` 保存"Sixel 兜底开关"，而那是跨终端共享的——
+在同一台机器上开两个终端会互相污染（A 里关掉，B 也一起关）。**能力属于
+client，不属于 server**：环境变量随终端进程走，天然隔离。
+
+推荐在 `~/.bashrc` 里按终端自己的标识判定（`STY`/`TMUX` 下要关掉，那两个
+多路复用器会吃掉图片转义序列）：
+
+```bash
+[ -n "$WEBTERM_SESSION" ] && [ -z "$STY$TMUX" ] && export PI_IMAGE_VIEW_SIXEL=1
+[ -n "$STY$TMUX" ] && export PI_IMAGE_VIEW_SIXEL=0
+```
+
+pi 探测不到的终端也可以用官方开关显式指定协议（按进程生效）：
+环境变量 `PI_IMAGE_PROTOCOL=kitty|iterm2|none`，或 `settings.json` 的
+`terminal.images`。
 
 ## 这个扩展为什么长这样
 
@@ -91,7 +115,6 @@ pi 一次点击会先发 `press` 再发 `click`，两个都处理等于执行两
 | `index.ts` | 扩展入口：entry renderer、`read`/`message_end` 触发、命令、心跳、widget 挂载 |
 | `component.ts` | `ImageEntryComponent`（对话流入口）、`ImageGalleryComponent`（widget：header + 按钮 + 命中测试）、`ImageViewComponent`（协议分派） |
 | `prepare.ts` | 图片 → base64（Kitty/iTerm2 用）：小 PNG/JPEG 透传，其余走 ImageMagick 归一化 |
-| `sixel-flag.ts` | Sixel 兜底开关（默认开，`/img-sixel` 可关） |
 | `../sixel-image/sixel.ts` | 手写 Sixel 编码器（ImageMagick 只负责缩放/量化/输出 PNG 像素） |
 | `../sixel-image/component.ts` | `SixelImageComponent`（DECSC 包裹 + 零宽 Kitty 占位 + 预留行 + 心跳标记） |
 

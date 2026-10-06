@@ -32,7 +32,6 @@ import {
 } from "./component.ts";
 import { invalidateImage } from "./prepare.ts";
 
-import { setSixelEnabled, sixelEnabled } from "./sixel-flag.ts";
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|tiff?|svg|avif|heic|ico)$/i;
 const MD_IMAGE = /!\[([^\]\n]*)\]\(\s*(?:<([^>\n]+)>|([^)\s]+))(?:\s+"[^"\n]*")?\s*\)/g;
@@ -266,11 +265,7 @@ export default function imageView(pi: ExtensionAPI): void {
 			return false;
 		}
 		if (!canDrawImages()) {
-			// 不画就别占行：预占十几行空行会把页脚顶飞，比不显示更糟
-			ctx.ui.notify(
-				"image-view: 本终端无法显示图片（无 Kitty/iTerm2，且 Sixel 兜底已用 `/img-sixel off` 关闭）",
-				"warning",
-			);
+			ctx.ui.notify("image-view: 本终端无法显示图片", "warning");
 			return false;
 		}
 		if (refresh) invalidateImage(path);
@@ -355,26 +350,6 @@ export default function imageView(pi: ExtensionAPI): void {
 
 	// Sixel 自检：同一张图、四种包装，一次定位问题层次
 	// Sixel 兜底开关
-	pi.registerCommand("img-sixel", {
-		description: "开关 image-view 的 Sixel 兜底：/img-sixel on|off（默认 on）",
-		handler: async (args: string, ctx: ExtensionContext) => {
-			const arg = args.trim().toLowerCase();
-			if (arg !== "on" && arg !== "off") {
-				ctx.ui.notify(
-					`image-view: Sixel 兜底当前 ${sixelEnabled() ? "开" : "关"}（/img-sixel on|off）`,
-					"info",
-				);
-				return;
-			}
-			setSixelEnabled(arg === "on");
-			ctx.ui.notify(
-				arg === "on"
-					? "image-view: Sixel 兜底已开"
-					: "image-view: Sixel 兜底已关（Kitty/iTerm2 不可用时将不显示图片）",
-				"info",
-			);
-		},
-	});
 
 	// 3) 手动出图
 	pi.registerCommand("img", {

@@ -32,7 +32,6 @@ import {
 	targetWidthPx,
 } from "../sixel-image/component.ts";
 import { prepareImage, type Prepared } from "./prepare.ts";
-import { sixelEnabled } from "./sixel-flag.ts";
 
 /**
  * pi 的 Theme 类型在 coding-agent 内部，pi-tui 只导出渲染器真正用到的最小面。
@@ -134,12 +133,39 @@ function humanBytes(n: number): string {
 }
 
 /**
- * 这个终端到底能不能画图。
- * kitty/iterm2 由 pi-tui 的能力探测给出；sixel 无法可靠探测，默认关闭，
- * 需要 `/img-sixel on` 显式打开——否则会在不支持的终端上白占十几行。
+ * 这个终端能不能画图。
+ *
+ * 能力判定**只依赖当前进程的环境**（也就是终端自己），所以按 client 隔离：
+ * 同一台机器上开多个终端各自独立，不存在互相污染。
+ *
+ * 这里曾经有一个自定义的持久开关（~/.cache/pi-image-view-sixel）。那是错的：
+ * 它把"终端能力"存成了跨终端共享的全局状态（A 里关掉，B 也一起关）。
+ *
+ * 判定顺序：
+ *   1. pi-tui 探到 kitty / iterm2 → 用协议画；
+ *   2. `PI_IMAGE_VIEW_SIXEL` 显式开关（在 .bashrc 里按终端导出，见下）；
+ *   3. 兜底：没探到任何协议就当这台终端认 Sixel。
+ *
+ * 关于第 2 条：Sixel 没法可靠探测（终端不回、或干脆默默吞掉整段序列都有），
+ * 所以按终端显式声明更稳。推荐在 ~/.bashrc 里用终端自己的标识判定，例如：
+ *
+ *     [ -n "$WEBTERM_SESSION" ] && [ -z "$STY$TMUX" ] && export PI_IMAGE_VIEW_SIXEL=1
+ *     [ -n "$TMUX" ] && export PI_IMAGE_VIEW_SIXEL=0      # tmux 下别试
+ *
+ * 这样每个终端各自决定，不共享任何文件状态。
  */
 export function canDrawImages(): boolean {
-	return getCapabilities().images !== null || sixelEnabled();
+	try {
+		if (getCapabilities().images !== null) return true;
+		// pi 官方的按进程开关：none = 本终端不要图片
+		if (process.env.PI_IMAGE_PROTOCOL?.toLowerCase() === "none") return false;
+		const flag = process.env.PI_IMAGE_VIEW_SIXEL?.toLowerCase();
+		if (flag === "0" || flag === "off" || flag === "false") return false;
+		if (flag === "1" || flag === "on" || flag === "true") return true;
+		return true;
+	} catch {
+		return true;
+	}
 }
 
 /**
@@ -167,7 +193,6 @@ export async function prewarm(
 	scale = DEFAULT_WIDGET_SCALE,
 ): Promise<boolean> {
 	if (getCapabilities().images === null) {
-		if (!sixelEnabled()) return false;
 		const columns = process.stdout.columns ?? 100;
 		const target = forWidget ? widgetPixelWidth(scale, columns) : targetWidthPx(columns, false);
 		pinnedPx.set(path, target);
@@ -197,9 +222,6 @@ export class ImageViewComponent implements Component {
 
 		if (caps.images === null) {
 			// Sixel 分支自带同步缓存读 + 异步补生成
-			if (!sixelEnabled()) {
-				return wrapTextWithAnsi(dim(`🖼 ${this.label()}${path} · 本终端不支持图片显示`), width);
-			}
 			// widget 分支也必须走 pxFor：宽度一旦由 prewarm 定了就不能再变，
 			// 否则 render 用 width、prewarm 用 stdout.columns，两边不一致会
 			// 缓存未命中，图上只剩"正在生成 Sixel…"占位行。
