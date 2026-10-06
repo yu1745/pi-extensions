@@ -279,13 +279,18 @@ export default function (pi: ExtensionAPI) {
 						const stepStr = steps > 0 ? ` (${steps} ${steps === 1 ? "step" : "steps"})` : "";
 						line1Parts.push(theme.fg("accent", turnStr) + theme.fg("muted", stepStr));
 					}
-					// First-token latency of the last (or in-flight) provider response.
-					if (ttft.awaiting) {
-						line1Parts.push(theme.fg("warning", "TTFT …"));
-					} else if (ttft.lastMs !== null) {
+					// First-token latency: keep showing the last measured value while a new
+					// request is in flight — only replace it once fresh data arrives.
+					if (ttft.lastMs !== null) {
 						const ms = ttft.lastMs;
 						const color = ms < 800 ? "success" : ms < 2000 ? "warning" : "error";
-						line1Parts.push(theme.fg("muted", "TTFT ") + theme.fg(color, formatLatency(ms)));
+						line1Parts.push(
+							theme.fg("muted", "TTFT ") +
+								theme.fg(color, formatLatency(ms)) +
+								(ttft.awaiting ? theme.fg("dim", "…") : ""),
+						);
+					} else if (ttft.awaiting) {
+						line1Parts.push(theme.fg("warning", "TTFT …"));
 					}
 					const pwd = line1Parts.join(sep);
 
