@@ -336,10 +336,14 @@ export default function imageView(pi: ExtensionAPI): void {
 		}
 	});
 
-	// 2) read 图片：仅在 pi 没有原生图片协议时自动补（否则重复）
+	// 2) read 图片：在对话流里留一个展开入口
+	//
+	// 这里曾经写成 `if (nativeImageSupport()) return;`（"pi 自己会画，别重复"），
+	// 但那会让 Kitty/iTerm2 终端下**什么都没有**：pi 仅在 terminal.showImages 开启时
+	// 才渲染工具结果里的图，且画在工具卡片内部，与"对话流里留一个展开入口"的预期不符；
+	// 关掉 showImages 就彻底不显示。统一留入口，展开行为交给协议分支决定。
 	pi.on("tool_result", async (event, ctx) => {
 		if (event.isError || event.toolName !== "read") return;
-		if (nativeImageSupport()) return;
 		const raw = (event.input as { path?: unknown } | undefined)?.path;
 		if (typeof raw !== "string") return;
 		const abs = resolveLocal(ctx.cwd, raw);
