@@ -10,16 +10,26 @@ pi install git:github.com/yu1745/pi-extensions
 
 | Extension | Path | What it does |
 |---|---|---|
+| `antigravity` | `extensions/antigravity/` | Antigravity provider (`/login antigravity`) with OAuth login + automatic token refresh, plus `/antigravity.usage`, `/antigravity.models`, `/antigravity.doctor` |
+| `qoder` | `extensions/qoder-fp/` | Qoder provider with full CLI fingerprint simulation (24 ordered Cosy headers, RSA-1024 + AES-128-CBC signed `Authorization`, custom Base64 body alphabet); `/login qoder` via standard device flow, or `/qoder-import` |
 | `web_reader` | `extensions/web-reader/` | Anti-WAF web reader with Playwright + stealth + ARIA extraction + Jev semantic load verification |
 | `web_search` | `extensions/web-search/` | Web search tool with five switchable backends (Google Antigravity Grounding, OpenAI Codex Responses, DeepSeek, MiniMax Coding Plan, Z.AI Web Search Prime), selected via `/websearch.backend`; one backend at a time, reloaded on `/reload`. Cross-domain benchmark of all five (32 cases × 8 domains, 160 live calls) in [docs/web-search-backend-benchmark.md](docs/web-search-backend-benchmark.md) |
 | `quota` | `extensions/quota-footer.ts` | Unified usage monitor in the footer: DeepSeek balance, GLM / MiniMax / Codex / Command Code quota (one widget, switch-dispatched). Command Code also shows when its monthly credits expire (`expires in Nd`, warning color in the last 3 days) |
 | `commandcode` | `extensions/commandcode/` | Command Code DeepSeek-only provider with verified sticky multi-account rotation (default low-balance threshold 0.1); [configuration](extensions/commandcode/README.md) |
 | `siliconflow` | `extensions/siliconflow.ts` | SiliconFlow (硅基流动) provider with native dynamic model refresh (`refreshModels` + persisted catalog) |
+| `runinfra` | `extensions/runinfra.ts` | RunInfra provider (`RUNINFRA_API_KEY` or `/login runinfra`) with dynamic model discovery, OpenAI chat-completions compatible |
 | `typesafe-jev` | `extensions/typesafe-jev/` | Reusable typed TypeSafe Jev evaluation service. Credentials use Pi `/login typesafe-jev`; the provider intentionally exposes no chat models |
 | `openai-codex-fast` | `extensions/openai-codex-fast.ts` | `/fast` and `/ultrafast` toggle Codex `service_tier=priority` / `service_tier=ultrafast` |
 | `context-window` | `extensions/context-window.ts` | `/context-window` sets or overrides context window for the current model |
 | `append` | `extensions/append.ts` | `/append` queues user messages until the agent run stops (at `agent_end`), avoiding tool-call interruption |
 | `tokenspeed` | `extensions/tokenspeed.ts` | Model output speed (tokens/sec) status line |
+| `tool-duration` | `extensions/tool-duration.ts` | Times every tool call; `/toolduration` optionally injects the duration banner into tool results so the model can see it (off by default) |
+| `compact-threshold` | `extensions/compact-threshold.ts` | `/compact-threshold 70` lowers the auto-compact trigger for the current session only; reset on `/new`, `/resume`, `/fork` |
+| `chinese-bang-bash` | `extensions/chinese-bang-bash.ts` | Full-width `！` / `！！` trigger Bash mode: keys colour on press, and submission converts them to `!` / `!!` for the native handler |
+| `smart-ctrl-c` | `extensions/smart-ctrl-c.ts` | Ctrl+C behaviour patch for the TUI editor (interrupt, then clear input on second press) |
+| `filter-image-reader` | `extensions/filter-image-reader.ts` | When the active model already has vision, steers it to `read` instead of the `image-reader` subagent, and filters that subagent out of the Agent tool description |
+| `subagents-cost` | `extensions/subagents-cost.ts` | `/subagents-cost` interactive overlay with per-subagent cost/usage breakdown, aggregated across billing entries, sortable by cost or spawn order |
+| `codex-cost` | `extensions/codex-cost.ts` | `/codex-cost` syncs OpenAI Codex quota and the daily cross-device spend ledger |
 | `working-bell` | `extensions/working-bell.ts` | Working bell + title status |
 | `codex-timer` | `extensions/codex-timer.ts` | Codex-style timers: fixed 20-column slot at the front of the footer, "Ready" before the first response, live "Thinking Ns", final "Thought Ns" retained until the next response, and a `─ Worked for Xm YYs ─` separator after each agent run |
 | `inject-resume` | `extensions/inject-resume.ts` | Inject-resume-on-exit (pi side, Linux/bash) |
@@ -38,7 +48,7 @@ pi install git:github.com/yu1745/pi-extensions
 
 </details>
 
-> **26 extensions, one package.** Previously separate repos (`pi-web-reader-spa`) are merged here — uninstall the standalone packages before installing this one to avoid duplicate tool registration.
+> **27 extensions, one package.** Previously separate repos (`pi-web-reader-spa`) are merged here — uninstall the standalone packages before installing this one to avoid duplicate tool registration.
 > pi-smart-compact is provided separately by the fork `git:github.com/yu1745/pi-smart-compact` (upstream + `allowUnverifiedApply`).>
 > The `subagent` extension was **removed** in favor of [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents) (install with `pi install npm:@tintinweb/pi-subagents`).
 
