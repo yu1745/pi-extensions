@@ -22,4 +22,21 @@ export const MODEL_EFFORT_OVERRIDES: Readonly<
   "meta/muse-spark-1.2-contributor": ["minimal", "low", "medium", "high", "xhigh"],
   "meta/muse-spark-1.3": ["minimal", "low", "medium", "high", "xhigh"],
   "meta/muse-spark-1.3-contributor": ["minimal", "low", "medium", "high", "xhigh"],
+
+  // GLM-5.3 FlashX: same effort set as `z-ai/glm-5.3-flash`. The v1.44.0 CLI
+  // catalog predates the FlashX listing entirely, but the Command Code
+  // endpoint accepts `reasoning_effort` for it — same family, same parameter.
+  // Needs the paired MODEL_REASONING_OVERRIDES entry below: the test suite
+  // requires every efforts entry to carry a reasoning flag. Remove both once
+  // the CLI catalog ships its own entry.
+  "z-ai/glm-5.3-flashx": ["low", "high", "max"],
+}
+
+/**
+ * Manual reasoning flags for models the generated catalog does not list at
+ * all (newer than the synced CLI version). Merged over the catalog's
+ * MODEL_REASONING at load time; not touched by the sync script.
+ */
+export const MODEL_REASONING_OVERRIDES: Readonly<Record<string, true>> = {
+  "z-ai/glm-5.3-flashx": true,
 }
