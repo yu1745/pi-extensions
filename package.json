@@ -44,6 +44,7 @@
 			"extensions/context-window.ts",
 			"extensions/append.ts",
 			"extensions/quota-footer.ts",
+			"extensions/image-view/index.ts",
 			"extensions/siliconflow.ts",
 			"extensions/runinfra.ts",
 			"extensions/typesafe-jev/index.ts",
