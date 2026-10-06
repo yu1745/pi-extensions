@@ -1,14 +1,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import { TuiAltScreen } from "@earendil-works/pi-tui";
 
-/** Lines moved per mouse-wheel notch in fullscreen mode (pi-tui default is 1). */
-const FULLSCREEN_WHEEL_LINES = 4;
-/** Mirrors pi-tui's ALT_WHEEL_SCROLL_MULTIPLIER, which is not exported. */
-const ALT_WHEEL_MULTIPLIER = 5;
-
-/** Guards against re-patching when the extension is reloaded (jiti uses moduleCache: false). */
-const WHEEL_PATCHED = Symbol.for("yu1745.pi-extensions.smart-ctrl-c.wheel");
+/**
+ * Fullscreen mouse-wheel scrolling no longer needs a patch: pi 1.0 ships it
+ * natively via the `fullscreenWheelScrollLines` setting (number or "auto"),
+ * with Alt+wheel 5x built into pi-tui. The old TuiAltScreen prototype patch
+ * was removed — its `getWheelScrollLines` hook disappeared in pi-tui 1.0.
+ */
 
 /**
  * Same reload guard for the Ctrl+C patch below.
@@ -20,40 +18,12 @@ const WHEEL_PATCHED = Symbol.for("yu1745.pi-extensions.smart-ctrl-c.wheel");
  */
 const CTRL_C_PATCHED = Symbol.for("yu1745.pi-extensions.smart-ctrl-c.ctrl-c");
 
-type WheelScrollProto = {
-  getWheelScrollLines(button: number): number;
-  [WHEEL_PATCHED]?: boolean;
-};
-
 type CtrlCProto = {
   handleInput(data: string): unknown;
   [CTRL_C_PATCHED]?: boolean;
 };
 
-/**
- * Speed up fullscreen mouse-wheel scrolling.
- *
- * `TuiAltScreen` assigns `this.wheelScrollLines` from its constructor options
- * (`options.wheelScrollLines ?? 1`), and pi's `createInteractiveTui` never passes
- * that option. So the field is always a number, and overriding it per instance
- * only affects the renderer that happens to exist at that moment. Patching the
- * prototype instead covers the initial renderer, every renderer rebuilt by
- * `/tui-mode` switches, and new sessions alike.
- */
-function installWheelScrollPatch(): void {
-  const proto = (TuiAltScreen as unknown as { prototype?: WheelScrollProto } | undefined)?.prototype;
-  if (!proto || typeof proto.getWheelScrollLines !== "function" || proto[WHEEL_PATCHED]) return;
-  proto.getWheelScrollLines = function (button: number): number {
-    return (button & 8) !== 0 ? FULLSCREEN_WHEEL_LINES * ALT_WHEEL_MULTIPLIER : FULLSCREEN_WHEEL_LINES;
-  };
-  proto[WHEEL_PATCHED] = true;
-}
-
 export default function (pi: ExtensionAPI) {
-  // Install at load time: wheel input is consumed by TuiAltScreen's own input
-  // listener, so it never reaches CustomEditor.handleInput.
-  installWheelScrollPatch();
-
   const proto = CustomEditor.prototype as unknown as CtrlCProto;
   if (proto[CTRL_C_PATCHED]) return;
   proto[CTRL_C_PATCHED] = true;
