@@ -24,6 +24,7 @@ import * as https from "node:https";
 import * as net from "node:net";
 import * as tls from "node:tls";
 import * as crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { createProvider } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { encodeRequestBody } from "./codec.ts";
@@ -53,6 +54,58 @@ try {
     fs.readFileSync(path.join(__dirname, "official-system.json"), "utf8")
   );
 } catch {}
+
+/**
+ * 尽力复制到系统剪贴板。逐个尝试常见的 Wayland/X11/macOS 后端，
+ * 都没有就返回 false（不抛错，剪贴板只是锦上添花）。
+ */
+function copyToClipboard(text: string): boolean {
+  const backends: Array<[string, string[]]> = [
+    ["wl-copy", []],
+    ["xclip", ["-selection", "clipboard"]],
+    ["xsel", ["--clipboard", "--input"]],
+    ["pbcopy", []],
+  ];
+  for (const [cmd, args] of backends) {
+    try {
+      execFileSync(cmd, args, { input: text, stdio: ["pipe", "ignore", "ignore"] });
+      return true;
+    } catch {
+      // 该后端不存在或失败，试下一个
+    }
+  }
+  return false;
+}
+
+/**
+ * OSC 8 超链接：把可点击目标放进转义载荷，显示文本另计。
+ * 这样链接再长也不会被折行截断——折行只影响“看得见的文字”，不影响真实 URL。
+ */
+function osc8(url: string, label: string): string {
+  return `\x1b]8;;${url}\x07${label}\x1b]8;;\x07`;
+}
+
+/**
+ * 展示 Device Flow 授权链接。
+ *
+ * 链接约 285 字符，在 TUI 里必然折行成 3~4 个视觉行；Ctrl+点击的超链接识别
+ * 只按视觉行截取，于是用户拿到的 URL 必然残缺、授权页打不开。
+ * 解法是把可点击目标和显示文本解耦：用 OSC 8 把完整 URL 放进转义载荷，
+ * 界面上只显示一行短标签。折行只影响看得见的文字，不影响真实 URL。
+ * 另外尽力复制一份到剪贴板，供不方便点击时直接 Ctrl+V。
+ */
+function emitLoginUrl(url: string): string {
+  const copied = copyToClipboard(url);
+
+  const lines = ["请在浏览器中打开以下链接授权 Qoder 登录（5 分钟内有效）："];
+  lines.push(osc8(url, "▶ 点击打开授权页"));
+  if (copied) {
+    lines.push("已复制到剪贴板：浏览器地址栏 Ctrl+V 即可。");
+  }
+
+  // 仅拼装文案，由调用方统一 notify 一次
+  return lines.join("\n");
+}
 
 function piAuthFile(): string {
   try {
@@ -655,7 +708,7 @@ export default async function (pi: ExtensionAPI) {
             )}&client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`;
 
           interaction.notify?.({
-            message: `请在浏览器中打开以下链接授权 Qoder 登录：\n${authUrl}`,
+            message: emitLoginUrl(authUrl),
           });
 
           // 轮询 deviceToken
