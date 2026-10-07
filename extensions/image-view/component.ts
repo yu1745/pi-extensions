@@ -1,26 +1,19 @@
 /**
- * 图片块组件：按终端能力选图形协议。
+ * 图片组件：只走 Sixel（\x1bP）。
  *
- *   Kitty  (\x1b_G)   → 传输/放置分离、像素级定位、可动画、增量重画
- *   iTerm2 (\x1b]1337) → 全量 base64 内联，按像素/单元定位
- *   Sixel  (\x1bP)    → 兜底：Kitty/iTerm2 都不支持时（foot、mlterm、xterm -ti vt340…）
- *   都没有 → pi-tui 的文本占位
+ * 为什么不做 Kitty/iTerm2：都试过，在这个 pi + 本终端的组合下不可用 ——
+ * Kitty 序列能完整写出（原始字节流确认），但画出来只剩顶上一条；本终端的
+ * EL(\x1b[2K) 会连图形一起擦掉，而 pi 逐行重写预留行必然发 EL，重发序列
+ * 也救不回来（同一 image id 不会重画）。Sixel 这条路已验证可用，就只留它。
  *
- * 前两种直接复用 pi-tui 的 `Image` 组件（它已处理行数预留、Kitty image id、
- * 布局裁剪等细节）；Sixel 走 ../sixel-image 里 quota-footer 验证过的那套
- * 「DECSC 包裹 + 零宽 Kitty 占位」手法。
- *
- * render() 必须同步，所以 base64 / Sixel 都在事件处理器里提前备好，
- * 组件只读缓存；万一缓存缺失（例如会话重放）就异步补生成并给出提示行。
+ * 参考：../sixel-image 里 quota-footer 验证过的那套「DECSC 包裹 + 零宽 Kitty
+ * 占位 + 预留行 + 心跳标记」手法。
  */
 
 import {
-	getCapabilities,
 	getCellDimensions,
-	Image,
 	truncateToWidth,
 	visibleWidth,
-	wrapTextWithAnsi,
 	type Component,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
@@ -31,7 +24,6 @@ import {
 	SixelImageComponent,
 	targetWidthPx,
 } from "../sixel-image/component.ts";
-import { prepareImage, type Prepared } from "./prepare.ts";
 
 /**
  * pi 的 Theme 类型在 coding-agent 内部，pi-tui 只导出渲染器真正用到的最小面。
@@ -40,9 +32,6 @@ import { prepareImage, type Prepared } from "./prepare.ts";
 export interface ImageViewTheme {
 	fg(color: string, text: string): string;
 }
-
-/** 最多占多少行 */
-const MAX_ROWS = 40;
 
 export interface ImageViewData {
 	path: string;
@@ -56,9 +45,6 @@ export interface ImageViewData {
 	/** 只对 widget 生效：相对"铺满宽度"的缩放倍率（1 = 铺满） */
 	scale?: number;
 }
-
-/** Kitty/iTerm2 分支的 base64 负载缓存（不进 session，会话文件不膨胀） */
-const payloads = new Map<string, Prepared>();
 
 /**
  * 每张图选定（已生成）的负载宽度。
@@ -125,13 +111,6 @@ export function forgetPinnedPx(path?: string) {
 	else pinnedPx.clear();
 }
 
-function humanBytes(n: number): string {
-	if (n <= 0) return "";
-	if (n < 1024) return `${n} B`;
-	if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
-	return `${(n / 1024 / 1024).toFixed(1)} MB`;
-}
-
 /**
  * 这个终端能不能画图。
  *
@@ -142,66 +121,46 @@ function humanBytes(n: number): string {
  * 它把"终端能力"存成了跨终端共享的全局状态（A 里关掉，B 也一起关）。
  *
  * 判定顺序：
- *   1. pi-tui 探到 kitty / iterm2 → 用协议画；
- *   2. `PI_IMAGE_VIEW_SIXEL` 显式开关（在 .bashrc 里按终端导出，见下）；
- *   3. 兜底：没探到任何协议就当这台终端认 Sixel。
+ *   1. `PI_IMAGE_VIEW_SIXEL=0`（按终端声明）→ 不画；
+ *   2. `PI_IMAGE_PROTOCOL=none`（pi 官方按进程开关）→ 不画；
+ *   3. 其余情况都当这台终端认 Sixel。
  *
- * 关于第 2 条：Sixel 没法可靠探测（终端不回、或干脆默默吞掉整段序列都有），
- * 所以按终端显式声明更稳。推荐在 ~/.bashrc 里用终端自己的标识判定，例如：
- *
- *     [ -n "$WEBTERM_SESSION" ] && [ -z "$STY$TMUX" ] && export PI_IMAGE_VIEW_SIXEL=1
- *     [ -n "$TMUX" ] && export PI_IMAGE_VIEW_SIXEL=0      # tmux 下别试
- *
- * 这样每个终端各自决定，不共享任何文件状态。
+ * Sixel 没法可靠探测（终端不回、或干脆默默吞掉整段序列都有），所以用"按终端
+ * 声明"而不是探测；开关走环境变量，随终端进程走，同机多开终端互不影响。
  */
 export function canDrawImages(): boolean {
 	try {
-		if (getCapabilities().images !== null) return true;
-		// pi 官方的按进程开关：none = 本终端不要图片
 		if (process.env.PI_IMAGE_PROTOCOL?.toLowerCase() === "none") return false;
 		const flag = process.env.PI_IMAGE_VIEW_SIXEL?.toLowerCase();
-		if (flag === "0" || flag === "off" || flag === "false") return false;
-		if (flag === "1" || flag === "on" || flag === "true") return true;
-		return true;
+		return !(flag === "0" || flag === "off" || flag === "false");
 	} catch {
 		return true;
 	}
 }
 
 /**
- * Sixel 负载的像素宽预算。
+ * 当前生效的分支，供 /img-info 显示。
  *
- * 为什么不是「终端列数 × 单元格像素宽」：pi 的 visibleWidth() 把 Sixel 负载的
- * 每个字符都当成一列可见宽度（实测那行 8896 字符 → 8896 列）。一旦这行走进
- * layout 的 composite 分支（盒子宽度 < 终端宽度，比如滚动条占掉一列时就会），
- * 末尾的 sliceByColumn() 会按内容列宽把它切断，连结尾的 \x1b\\ 都没了 ——
- * 终端拿到未终止的 DCS，整段丢弃，屏幕上什么都不显示（或只显示切断点之前）。
- * 实测：负载 200 像素宽时能完整显示，1345 像素宽时被切。
- *
- * 所以预算按「1 像素 ≈ 1 列」保守取，留 2 列余量给滚动条和 SEGMENT_RESET。
- * 代价是图的物理宽度只有内容列数那么多像素（这台终端约等于屏宽的 1/4）——
- * 这是 pi 的宽度记账方式决定的硬上限，不是可以调参数绕过的。
+ * 注意：这里的转义序列必须写成可读文本（`ESC _G` 而不是真的 ESC 字节），
+ * 否则提示框自己会被当成转义序列解析、整行断掉（之前的 bug）。
  */
-export function sixelWidthBudget(contentColumns: number): number {
-	return Math.max(64, Math.min(400, Math.round(contentColumns - 2)));
+export function describeBranch(): string {
+	if (process.env.PI_IMAGE_PROTOCOL?.toLowerCase() === "none") return "已禁用（PI_IMAGE_PROTOCOL=none）";
+	const flag = process.env.PI_IMAGE_VIEW_SIXEL?.toLowerCase();
+	if (flag === "0" || flag === "off" || flag === "false") return "已禁用（PI_IMAGE_VIEW_SIXEL=0）";
+	return "Sixel（ESC P）";
 }
 
-/** 事件处理器里提前备好负载；返回是否可用 */
+/** 事件处理器里提前备好 Sixel；返回是否可用 */
 export async function prewarm(
 	path: string,
 	forWidget = false,
 	scale = DEFAULT_WIDGET_SCALE,
 ): Promise<boolean> {
-	if (getCapabilities().images === null) {
-		const columns = process.stdout.columns ?? 100;
-		const target = forWidget ? widgetPixelWidth(scale, columns) : targetWidthPx(columns, false);
-		pinnedPx.set(path, target);
-		return Boolean(await prepare(path, target));
-	}
-	const prepared = await prepareImage(path);
-	if (!prepared) return false;
-	payloads.set(path, prepared);
-	return true;
+	const columns = process.stdout.columns ?? 100;
+	const target = forWidget ? widgetPixelWidth(scale, columns) : targetWidthPx(columns, false);
+	pinnedPx.set(path, target);
+	return Boolean(await prepare(path, target));
 }
 
 export class ImageViewComponent implements Component {
@@ -217,52 +176,16 @@ export class ImageViewComponent implements Component {
 
 	render(width: number): string[] {
 		const { path } = this.data;
-		const caps = getCapabilities();
 		const dim = (t: string) => this.theme.fg("muted", t);
-
-		if (caps.images === null) {
-			// Sixel 分支自带同步缓存读 + 异步补生成
-			// widget 分支也必须走 pxFor：宽度一旦由 prewarm 定了就不能再变，
-			// 否则 render 用 width、prewarm 用 stdout.columns，两边不一致会
-			// 缓存未命中，图上只剩"正在生成 Sixel…"占位行。
-			const widthPx = pxFor(path, () =>
-				this.data.widget
-					? widgetPixelWidth(this.data.scale ?? DEFAULT_WIDGET_SCALE, process.stdout.columns ?? width)
-					: targetWidthPx(process.stdout.columns ?? width, false),
-			);
-			return new SixelImageComponent({ path, alt: this.data.alt, widthPx }, dim).render(width);
-		}
-
-		const payload = payloads.get(path);
-		if (!payload) {
-			void prepareImage(path).then((p) => {
-				if (p) payloads.set(path, p);
-			});
-			return wrapTextWithAnsi(dim(`🖼 ${this.label()}${path} · 正在准备图片…`), width);
-		}
-
-		const cols = Math.max(20, Math.min(width, 200));
-		const image = new Image(
-			payload.base64,
-			payload.mimeType,
-			{ fallbackColor: dim },
-			{
-				maxWidthCells: cols,
-				maxHeightCells: MAX_ROWS,
-				filename: path.split("/").pop(),
-			},
-			{ widthPx: payload.widthPx, heightPx: payload.heightPx },
+		// 宽度必须由 prewarm() 钉住，render 复用同一个值：两处各自"按终端列宽
+		// 算一遍"会算出不同结果（widget 传入的 width 与 process.stdout.columns
+		// 未必相等），导致缓存未命中、图上只剩"正在生成 Sixel…"占位行。
+		const widthPx = pxFor(path, () =>
+			this.data.widget
+				? widgetPixelWidth(this.data.scale ?? DEFAULT_WIDGET_SCALE, process.stdout.columns ?? width)
+				: targetWidthPx(process.stdout.columns ?? width, false),
 		);
-		const lines = image.render(width);
-		const proto = caps.images === "kitty" ? "Kitty" : "iTerm2";
-		const size = humanBytes(payload.sourceBytes);
-		lines.push(
-			dim(
-				`🖼 ${this.label()}${path} · ${payload.widthPx}×${payload.heightPx}` +
-					` · ${proto}${size ? ` · ${size}` : ""}`,
-			),
-		);
-		return lines;
+		return new SixelImageComponent({ path, alt: this.data.alt, widthPx }, dim).render(width);
 	}
 
 	private label(): string {

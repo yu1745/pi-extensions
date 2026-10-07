@@ -1,20 +1,22 @@
 /**
- * image-view —— 在 pi 聊天流里直接显示本地图片（claude-code image-view mod 的 pi 版）。
+ * image-view —— 在 pi 里显示本地图片（claude-code image-view mod 的 pi 版）。
  *
- * 协议优先级（终端支持谁就用谁）：
- *   Kitty (\x1b_G) → iTerm2 (\x1b]1337) → Sixel (\x1bP) → 文本占位
- * 前两种复用 pi-tui 的 `Image` 组件；Sixel 是自绘兜底（pi-tui 不认 sixel）。
+ * 只走 Sixel（\x1bP）。Kitty / iTerm2 都试过，在这个 pi 版本 + 实测终端下不可用，
+ * 详见 component.ts 顶部说明。
+ *
+ * 形态：聊天流里留一行可点开的入口，图片本体画在编辑器上方的 widget 里。
+ *   - 聊天流 entry 里画不进图：那行会被 sliceByColumn 按内容列宽切断；
+ *   - widget 是根级全宽、且能自己占住图覆盖的行，是唯一可靠的载体。
  *
  * 触发方式：
- *   1. 助手回复里的 Markdown 图片 ![alt](/abs/path.png) → 消息下方出图
- *      （pi 自己不会去读本地文件，这条任何协议下都需要）；
- *   2. read 了一张图片 → 仅当 pi 没有原生图片协议时自动出图，否则会和
- *      pi 自带的渲染重复；
- *   3. 手动 /img <path>，加 ! 强制重新生成（图片被改写后用）。
+ *   1. read 了一张图片 → 留一行入口；
+ *   2. 助手回复里的 Markdown 图片 ![alt](/abs/path.png) → 留一行入口
+ *      （pi 自己不会去读本地文件）；
+ *   3. 手动 /img <path>，路径前缀 ! 表示强制重新生成。
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getCapabilities, Text } from "@earendil-works/pi-tui";
+import { getCellDimensions, Text } from "@earendil-works/pi-tui";
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import {
@@ -25,12 +27,12 @@ import {
 	MAX_WIDGET_SCALE,
 	MIN_WIDGET_SCALE,
 	canDrawImages,
+	describeBranch,
 	forgetPinnedPx,
 	prewarm,
 	type GalleryItem,
 	type GalleryState,
 } from "./component.ts";
-import { invalidateImage } from "./prepare.ts";
 
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|tiff?|svg|avif|heic|ico)$/i;
@@ -42,15 +44,6 @@ const MAX_GALLERY = 2;
 
 /** 同一张图只自动出一次（/img 手动不算） */
 const shown = new Set<string>();
-
-/** pi 原生能画图（kitty/iTerm2）时为 true */
-function nativeImageSupport(): boolean {
-	try {
-		return getCapabilities().images !== null;
-	} catch {
-		return false;
-	}
-}
 
 function resolveLocal(cwd: string, raw: string): string | null {
 	let p = raw.replace(/^file:\/\//, "");
@@ -133,22 +126,15 @@ export default function imageView(pi: ExtensionAPI): void {
 		ctx.ui.setWidget("image-view-probe", undefined);
 	});
 
-
-	// 实验：把图挂在 widget 里（root 级挂载，x=0 全宽），验证「快路径」假设
-
-
 	// pi 不会加载本地图片，Markdown 里那份只留文字说明
 	pi.registerMarkdownTransformer((markdown) => stripLocalImageMarkdown(markdown, cwd));
 
 	pi.registerEntryRenderer<{ path: string; alt?: string }>(ENTRY_TYPE, (entry, _opts, theme) => {
 		const data = entry.data;
 		if (!data?.path) return new Text(theme.fg("muted", "🖼 (image-view: 数据缺失)"), 0, 0);
-		if (!usesSixel()) {
-			// Kitty / iTerm2：直接在原位画（负载走协议本身，不吃列宽）
-			return new ImageViewComponent({ path: data.path, alt: data.alt }, theme);
-		}
-		// Sixel：对话流里只放一行入口，展开状态按 path 记在闭包里，重绘时复用
-		const state = entryExpanded.get(data.path) ?? { value: galleryState.expanded };
+		// 只留一行入口，图片本体在 widget 里画（聊天流 entry 里负载会被
+		// sliceByColumn 按内容列宽切断，见 sixelPixelBudget 的注释）。
+		const state = entryExpanded.get(data.path) ?? { value: false };
 		entryExpanded.set(data.path, state);
 		return new ImageEntryComponent({ path: data.path, alt: data.alt }, state, {
 			onToggle: () => {
@@ -170,15 +156,6 @@ export default function imageView(pi: ExtensionAPI): void {
 			},
 		});
 	});
-
-	/** 当前是否走 Sixel（无 Kitty/iTerm2 且 Sixel 兜底开着） */
-	function usesSixel(): boolean {
-		try {
-			return getCapabilities().images === null;
-		} catch {
-			return false;
-		}
-	}
 
 	let gallery: GalleryItem[] = [];
 	/** 折叠状态与"手动关掉"状态都留在闭包里，重绘时复用 */
@@ -268,25 +245,11 @@ export default function imageView(pi: ExtensionAPI): void {
 			ctx.ui.notify("image-view: 本终端无法显示图片", "warning");
 			return false;
 		}
-		if (refresh) invalidateImage(path);
 
-		// Sixel 走 widget：聊天流 entry 里负载必然被 sliceByColumn 切断（见
-		// sixelPixelBudget 的注释），只有根级全宽的 widget 能完整写出。
-		if (usesSixel()) {
-			// 两步走：对话流里留一个「展开图片」入口（像 claude-code 的 image-view
-			// mod），展开后图显示在 widget 里 —— 聊天流内没法完整画 Sixel（见
-			// ImageEntryComponent 的注释）。
-			forgetPinnedPx(path);
-			pi.appendEntry(ENTRY_TYPE, { path, alt: alt || undefined });
-			return true;
-		}
-
-		// Kitty / iTerm2 走聊天流 entry（它们的负载走协议本身，不吃列宽）
-		const ok = await prewarm(path);
-		if (!ok) {
-			ctx.ui.notify(`image-view: 无法准备 ${path}`, "error");
-			return false;
-		}
+		// 投递方式：聊天流里只留一行入口（点开才在 widget 中绘制）。
+		// 聊天流 entry 里画不进图 —— 那行会被 sliceByColumn 按内容列宽切断
+		// （见 sixelPixelBudget 的注释），只有根级全宽的 widget 能完整写出。
+		forgetPinnedPx(path);
 		pi.appendEntry(ENTRY_TYPE, { path, alt: alt || undefined });
 		return true;
 	}
@@ -333,10 +296,8 @@ export default function imageView(pi: ExtensionAPI): void {
 
 	// 2) read 图片：在对话流里留一个展开入口
 	//
-	// 这里曾经写成 `if (nativeImageSupport()) return;`（"pi 自己会画，别重复"），
-	// 但那会让 Kitty/iTerm2 终端下**什么都没有**：pi 仅在 terminal.showImages 开启时
-	// 才渲染工具结果里的图，且画在工具卡片内部，与"对话流里留一个展开入口"的预期不符；
-	// 关掉 showImages 就彻底不显示。统一留入口，展开行为交给协议分支决定。
+	// 不再判断"pi 自己会不会画"：pi 只在 terminal.showImages 开启时才渲染工具
+	// 结果里的图，而且画在工具卡片内部，与"对话流里留一行可点开的入口"不符。
 	pi.on("tool_result", async (event, ctx) => {
 		if (event.isError || event.toolName !== "read") return;
 		const raw = (event.input as { path?: unknown } | undefined)?.path;
@@ -350,6 +311,26 @@ export default function imageView(pi: ExtensionAPI): void {
 
 	// Sixel 自检：同一张图、四种包装，一次定位问题层次
 	// Sixel 兜底开关
+
+	// 当前协议 / 判定依据
+	pi.registerCommand("img-info", {
+		description: "显示 image-view 当前使用的图片协议与判定依据：/img-info",
+		handler: async (_args: string, ctx: ExtensionContext) => {
+			const env = (k: string) => process.env[k] ?? "—";
+			const cell = getCellDimensions();
+			ctx.ui.notify(
+				[
+					`协议: ${describeBranch()}`,
+					`Sixel 声明(PI_IMAGE_VIEW_SIXEL): ${env("PI_IMAGE_VIEW_SIXEL")}`,
+					`协议覆盖(PI_IMAGE_PROTOCOL): ${env("PI_IMAGE_PROTOCOL")}`,
+					`TERM: ${env("TERM")} / TERM_PROGRAM: ${env("TERM_PROGRAM")}`,
+					`WEBTERM_SESSION: ${env("WEBTERM_SESSION")} / TMUX: ${env("TMUX")} / STY: ${env("STY")}`,
+					`尺寸: ${process.stdout.columns ?? "?"} 列, 单元格 ${cell.widthPx}×${cell.heightPx}px`,
+				].join("\n"),
+				"info",
+			);
+		},
+	});
 
 	// 3) 手动出图
 	pi.registerCommand("img", {

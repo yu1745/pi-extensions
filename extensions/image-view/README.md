@@ -8,39 +8,45 @@
 - widget 右侧按钮：`−` `+` 缩放（默认铺满 100%，范围 1/8~1）、点百分比复位到 100%、`✕` 关闭
 - 点入口行或 widget 的图片区域同样折叠 / 展开
 
-协议优先级：Kitty（`\x1b_G`）→ iTerm2（`\x1b]1337`）→ Sixel（`\x1bP`）。
-前两种在对话流原位绘制（负载走协议本身）；Sixel 走"入口 + widget"两步（原因见下）。
+只走 **Sixel**（`\x1bP`）。Kitty / iTerm2 分支曾实现并测过，最终删掉了：Kitty 序列
+在本终端能完整写出（原始字节流确认），但画出来只剩顶上一条；本终端的
+EL(`\x1b[2K`) 会连图形一起擦掉，而 pi 逐行重写预留行必然发 EL，重发序列也救不
+回来（同一 image id 不会重画）。Sixel 这条路实测可用，就只留它。
+
+协议判定（`/img-info` 可查）：
+
+1. `PI_IMAGE_VIEW_SIXEL=0`（按终端声明）→ 不画；
+2. `PI_IMAGE_PROTOCOL=none`（pi 官方按进程开关）→ 不画；
+3. 其余都当这台终端认 Sixel。
 
 命令：
 
 | 命令 | 作用 |
 |---|---|
-| `/img <path>` | 在对话流插入图片入口 |
+| `/img <path>` | 在对话流插入图片入口（路径前缀 `!` 强制重新生成） |
+| `/img-info` | 显示当前协议与判定依据（环境变量、TERM、终端尺寸、单元格像素） |
 
 ## 能力判定只依赖终端（不写任何共享状态）
 
-协议判定顺序：
-
-1. pi-tui 探到 `kitty` / `iterm2` → 用协议画；
-2. `PI_IMAGE_VIEW_SIXEL=1 | 0`（按终端声明 Sixel）；`PI_IMAGE_PROTOCOL=none` 表示本终端不要图片；
-3. 都没有 → 默认当这台终端认 Sixel。
+判定顺序见上（`PI_IMAGE_VIEW_SIXEL` / `PI_IMAGE_PROTOCOL` / 默认当支持 Sixel）。
 
 **不要用持久化文件存这类开关。** 这里踩过一次：早先用
 `~/.cache/pi-image-view-sixel` 保存"Sixel 兜底开关"，而那是跨终端共享的——
 在同一台机器上开两个终端会互相污染（A 里关掉，B 也一起关）。**能力属于
 client，不属于 server**：环境变量随终端进程走，天然隔离。
 
-推荐在 `~/.bashrc` 里按终端自己的标识判定（`STY`/`TMUX` 下要关掉，那两个
-多路复用器会吃掉图片转义序列）：
+需要按终端声明时，在 `~/.bashrc` 里用该终端自己的标识判定（`STY`/`TMUX` 下
+关掉，那两个多路复用器会吃掉图片转义序列），例如：
 
 ```bash
 [ -n "$WEBTERM_SESSION" ] && [ -z "$STY$TMUX" ] && export PI_IMAGE_VIEW_SIXEL=1
 [ -n "$STY$TMUX" ] && export PI_IMAGE_VIEW_SIXEL=0
 ```
 
-pi 探测不到的终端也可以用官方开关显式指定协议（按进程生效）：
-环境变量 `PI_IMAGE_PROTOCOL=kitty|iterm2|none`，或 `settings.json` 的
-`terminal.images`。
+（本机当前未设置这些变量 —— 默认就当支持 Sixel。）
+
+按进程禁用图片用 pi 官方开关：环境变量 `PI_IMAGE_PROTOCOL=none`，或
+`settings.json` 的 `terminal.images: false`。
 
 ## 这个扩展为什么长这样
 
@@ -113,8 +119,7 @@ pi 一次点击会先发 `press` 再发 `click`，两个都处理等于执行两
 | 文件 | 职责 |
 |---|---|
 | `index.ts` | 扩展入口：entry renderer、`read`/`message_end` 触发、命令、心跳、widget 挂载 |
-| `component.ts` | `ImageEntryComponent`（对话流入口）、`ImageGalleryComponent`（widget：header + 按钮 + 命中测试）、`ImageViewComponent`（协议分派） |
-| `prepare.ts` | 图片 → base64（Kitty/iTerm2 用）：小 PNG/JPEG 透传，其余走 ImageMagick 归一化 |
+| `component.ts` | `ImageEntryComponent`（对话流入口）、`ImageGalleryComponent`（widget：header + 按钮 + 命中测试）、`ImageViewComponent`（Sixel 渲染） |
 | `../sixel-image/sixel.ts` | 手写 Sixel 编码器（ImageMagick 只负责缩放/量化/输出 PNG 像素） |
 | `../sixel-image/component.ts` | `SixelImageComponent`（DECSC 包裹 + 零宽 Kitty 占位 + 预留行 + 心跳标记） |
 
@@ -122,4 +127,5 @@ pi 一次点击会先发 `press` 再发 `click`，两个都处理等于执行两
 
 - 小图放大到某点后**饱和**（`convert` 的 `>` 只缩不放），百分比会停在实际值。
 - 宽度上限 2000px：铺满终端像素宽是 2430px，但每 500ms 重发的负载会到 MB 级，故折中。
+- 只支持 Sixel：终端不认 Sixel 就没法显示（Kitty/iTerm2 分支已删）。
 - widget 里最多同时留 2 张图（`MAX_GALLERY = 2`）——widget 固定在编辑器上方，不随对话流滚动。
