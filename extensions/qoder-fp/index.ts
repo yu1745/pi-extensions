@@ -755,6 +755,9 @@ async function fingerprintFetch(input: any, init?: any): Promise<Response> {
       const overBudget = Date.now() - budgetStart + peeked.retryAfterMs > MAX_QUEUE_BUDGET_MS;
 
       if (exhausted || overBudget) {
+        // 抛错前必须释放响应体，否则每轮失败都会漏一个未消费的 HTTP 连接，
+        // 句柄迟迟不回收会让进程在输出完成后迟迟不退出
+        try { (resp as any).body?.cancel?.(); } catch {}
         const reason = exhausted ? `重试 ${MAX_QUEUE_RETRIES} 次` : `超出 ${MAX_QUEUE_BUDGET_MS / 1000}s 预算`;
         throw new Error(`Qoder 上游繁忙（${code}，${reason}仍无可用实例）`);
       }
