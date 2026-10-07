@@ -29,8 +29,8 @@ const pricingFixtureUrl = new URL("./fixtures/commandcode-pricing.json", import.
 const pricingFixture = JSON.parse(await readFile(pricingFixtureUrl, "utf-8")) as PricingSnapshot
 const freeModels = new Set([
   "poolside/laguna-s-2.1-free",
-  "meituan/LongCat-2.0:free",
   "inclusionai/ling-3.0-flash-sante:free",
+  "inclusionai/ling-3.1-flash:free",
 ])
 
 function assertCost(
@@ -54,7 +54,7 @@ function assertCost(
 describe("MODEL_COSTS pricing overlay", () => {
   it("covers the current Command Code model catalog snapshot", () => {
     assert.equal(fixture.source, "https://api.commandcode.ai/provider/v1/models")
-    assert.match(fixture.fetchedAt, /^2026-09-15T/)
+    assert.match(fixture.fetchedAt, /^2026-10-07T/)
 
     const catalogIds = [...fixture.modelIds].sort()
     const pricedIds = Object.keys(MODEL_COSTS).sort()
@@ -259,7 +259,7 @@ describe("MODEL_COSTS pricing overlay", () => {
 
   it("tracks pricing provenance", () => {
     assert.equal(PRICING_SOURCE_URL, "https://commandcode.ai/docs/resources/pricing-limits")
-    assert.equal(PRICING_LAST_VERIFIED, "2026-09-15")
+    assert.equal(PRICING_LAST_VERIFIED, "2026-10-07")
   })
 
   it("fails once temporary pricing needs review", () => {

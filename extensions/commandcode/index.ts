@@ -42,7 +42,7 @@ import {
 } from "./src/models.ts"
 import { getApiKey as getOAuthApiKey, login, refreshToken } from "./src/oauth.ts"
 import { normalizeCommandCodeMessage } from "./src/overflow.ts"
-import { MODEL_COSTS, ZERO_MODEL_COST } from "./src/pricing.ts"
+import { MODEL_COSTS, PRICING_LAST_VERIFIED, PRICING_SOURCE_URL, ZERO_MODEL_COST } from "./src/pricing.ts"
 import { registerCommandCodeQuota } from "./src/quota-command.ts"
 import { openCommandCodeAccounts } from "./src/account-ui.ts"
 import { createCommandCodeRuntime } from "./src/runtime.ts"
@@ -65,8 +65,23 @@ const createStream = () =>
   createAssistantMessageEventStream() as unknown as AssistantMessageEventStreamLike
 const nativeStream = streamNativeProvider as unknown as LocalStream
 
+// Models absent from MODEL_COSTS fall back to zero so a pricing gap never
+// breaks a session, but they are reported once: a silent $0 cost is
+// indistinguishable from a free request and breaks every cost display.
+const warnedUnpricedModels = new Set<string>()
+
 function providerModelCost(id: string) {
-  const cost = MODEL_COSTS[id] ?? ZERO_MODEL_COST
+  const cost = MODEL_COSTS[id]
+  if (!cost) {
+    if (!warnedUnpricedModels.has(id)) {
+      warnedUnpricedModels.add(id)
+      console.warn(
+        `[commandcode] no pricing for model "${id}" (last verified ${PRICING_LAST_VERIFIED}); ` +
+          `its usage will report $0. Update extensions/commandcode/src/pricing.ts from ${PRICING_SOURCE_URL}`,
+      )
+    }
+    return { ...ZERO_MODEL_COST, tiers: undefined }
+  }
   return { ...cost, tiers: cost.tiers ? [...cost.tiers] : undefined }
 }
 
