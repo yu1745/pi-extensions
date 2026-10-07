@@ -421,6 +421,27 @@ function transientRetryAfter(detail: any): number | null {
   return Math.min(secs * 1000, MAX_RETRY_AFTER_MS);
 }
 
+/**
+ * 构造一个非 2xx 响应，用于「重试耗尽」这类终态。
+ *
+ * 为什么不用 throw：pi-ai 会把 fetch 的抛异常包成 APIConnectionError，
+ * 其 message 被写死为 "Connection error."（我们的原文只进 cause 被丢弃），
+ * 而 "connection error" 正好命中 pi 的可重试正则，于是 pi 会叠加一层
+ * 全局重试，两层重试相乘把等待拖到数分钟。
+ *
+ * 返回普通 400 响应则能让 pi-ai 把 error.message 原样透出，
+ * 该文本不命中任何可重试特征，于是只有本插件自己重试。
+ * 状态码刻意避开 429/5xx，那些同样在 pi 的可重试列表里。
+ */
+function upstreamBusyResponse(message: string): Response {
+  // 用 text/plain：pi-ai 对 JSON 体是整块转储的，只有纯文本才能干净地透出
+  return new Response(message, {
+    status: 400,
+    statusText: "Bad Request",
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+  });
+}
+
 /** 可被 AbortSignal 打断的 sleep。 */
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) return Promise.resolve();
@@ -758,8 +779,8 @@ async function fingerprintFetch(input: any, init?: any): Promise<Response> {
         // 抛错前必须释放响应体，否则每轮失败都会漏一个未消费的 HTTP 连接，
         // 句柄迟迟不回收会让进程在输出完成后迟迟不退出
         try { (resp as any).body?.cancel?.(); } catch {}
-        const reason = exhausted ? `重试 ${MAX_QUEUE_RETRIES} 次` : `超出 ${MAX_QUEUE_BUDGET_MS / 1000}s 预算`;
-        throw new Error(`Qoder 上游繁忙（${code}，${reason}仍无可用实例）`);
+        const reason = exhausted ? `已重试 ${MAX_QUEUE_RETRIES} 次` : `已超出 ${MAX_QUEUE_BUDGET_MS / 1000}s 预算`;
+        return upstreamBusyResponse(`Qoder 上游繁忙（10605）：无空闲实例，${reason}仍不可用`);
       }
 
       // 上游建议 30s，按上限收紧
