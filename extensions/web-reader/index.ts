@@ -51,6 +51,7 @@ import {
   type ScopeDecision,
 } from "./selection.js";
 import { handleCloudflareChallenge, type CfOutcome } from "./cloudflare.js";
+import { displayWorks } from "./display.js";
 
 const DEBUG = /^(1|true|yes)$/i.test(process.env.PI_WEBREADER_DEBUG || "");
 function log(...a: unknown[]) {
@@ -190,17 +191,6 @@ function fmtMs(ms: number): string {
 let xvfbProc: { pid?: number; kill(): void } | null = null;
 let virtualDisplay: string | null = null;
 
-function displayWorks(display: string): boolean {
-  try {
-    // An X socket must exist for the display, e.g. ":99" or "localhost:99" -> /tmp/.X11-unix/X99.
-    const m = /:(\d+)/.exec(display);
-    if (!m) return false;
-    return existsSync(`/tmp/.X11-unix/X${m[1]}`);
-  } catch {
-    return false;
-  }
-}
-
 /** Ensure some usable display exists for a headed browser; start Xvfb if needed. */
 async function ensureDisplay(): Promise<void> {
   // Windows and macOS have a native compositor, so a headed browser just works and
@@ -208,12 +198,11 @@ async function ensureDisplay(): Promise<void> {
   if (process.platform !== "linux") return;
   if (process.env.PI_WEBREADER_NO_XVFB === "1") return;
   // An explicitly working DISPLAY (including a forwarded one) wins.
-  if (process.env.DISPLAY && displayWorks(process.env.DISPLAY)) return;
+  if (process.env.DISPLAY && await displayWorks(process.env.DISPLAY)) return;
 
   if (virtualDisplay) {
-    // Trust it only if its socket still exists: a crashed Xvfb would otherwise make
-    // every later launch fail with a confusing browser error.
-    if (displayWorks(virtualDisplay)) {
+    // Validate the actual connection; a socket may survive a crashed X server.
+    if (await displayWorks(virtualDisplay)) {
       process.env.DISPLAY = virtualDisplay;
       return;
     }
@@ -233,7 +222,10 @@ async function ensureDisplay(): Promise<void> {
       return;
     }
   }
-  log("could not obtain an X display; headed browser will likely fail");
+  throw new Error(
+    "No usable X display. Install Xvfb and xdpyinfo (Debian/Ubuntu: xvfb x11-utils), " +
+    "or set PI_WEBREADER_HEADLESS=1 before starting Pi.",
+  );
 }
 
 /**
@@ -245,7 +237,7 @@ async function ensureDisplay(): Promise<void> {
  * funnelled through this promise instead.
  */
 function spawnXvfb(display: string): Promise<boolean> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     installDisplayCleanup();
     const n = display.slice(1);
     let child: ReturnType<typeof spawn>;
@@ -277,7 +269,7 @@ function spawnXvfb(display: string): Promise<boolean> {
     // Wait briefly for the X socket to appear.
     (async () => {
       for (let i = 0; i < 40; i++) {
-        if (existsSync(`/tmp/.X11-unix/X${n}`)) {
+        if (existsSync(`/tmp/.X11-unix/X${n}`) && await displayWorks(display)) {
           log("started Xvfb on", display, "(pid:", child.pid, ")");
           finish(true);
           return;
@@ -292,7 +284,11 @@ function spawnXvfb(display: string): Promise<boolean> {
         /* ignore */
       }
       finish(false);
-    })();
+    })().catch((error) => {
+      try { child.kill(); } catch { /* ignore */ }
+      settled = true;
+      reject(error);
+    });
   });
 }
 

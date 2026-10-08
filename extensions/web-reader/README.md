@@ -22,6 +22,22 @@ The browser is launched **in-process** (no subprocess, no `.cmd`/shell issues on
 Windows). It prefers your **installed Chrome or Edge** (genuine fingerprint) and falls
 back to the bundled headless shell.
 
+## Linux display requirements (current `web_reader`)
+
+The current implementation defaults to headed Chromium for Cloudflare compatibility.
+It validates `DISPLAY` with `xdpyinfo`, including connection/authentication, and starts
+Xvfb automatically when the inherited display is unusable. A socket file alone does
+not prove that an X server is reachable.
+
+On Debian/Ubuntu, install the display dependencies with:
+
+```bash
+sudo apt install xvfb x11-utils
+```
+
+Alternatively, start Pi with `PI_WEBREADER_HEADLESS=1` (Cloudflare challenges may fail).
+Reload with `/reload` after updating the extension.
+
 ## Install
 
 ```bash
