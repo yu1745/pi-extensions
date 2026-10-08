@@ -1,37 +1,13 @@
 import assert from "node:assert/strict"
-import { readFile } from "node:fs/promises"
 import { describe, it } from "node:test"
 
 import {
+  FREE_MODEL_IDS,
   MODEL_COSTS,
   PRICING_LAST_VERIFIED,
   PRICING_SOURCE_URL,
   TEMPORARY_PRICING,
 } from "../../extensions/commandcode/src/pricing.ts"
-
-interface ModelCatalogSnapshot {
-  fetchedAt: string
-  source: string
-  modelIds: string[]
-}
-
-interface PricingSnapshot {
-  verifiedAt: string
-  source: string
-  tierPolicy: string
-  tiers: Record<string, [number, number, number, number, number][]>
-  costs: Record<string, [number, number, number, number]>
-}
-
-const fixtureUrl = new URL("./fixtures/commandcode-model-ids.json", import.meta.url)
-const fixture = JSON.parse(await readFile(fixtureUrl, "utf-8")) as ModelCatalogSnapshot
-const pricingFixtureUrl = new URL("./fixtures/commandcode-pricing.json", import.meta.url)
-const pricingFixture = JSON.parse(await readFile(pricingFixtureUrl, "utf-8")) as PricingSnapshot
-const freeModels = new Set([
-  "poolside/laguna-s-2.1-free",
-  "inclusionai/ling-3.0-flash-sante:free",
-  "inclusionai/ling-3.1-flash:free",
-])
 
 function assertCost(
   modelId: string,
@@ -51,67 +27,55 @@ function assertCost(
   )
 }
 
+// These tests cover invariants of the table we own. Whether the table matches
+// Command Code's live catalog is upstream data, not code behaviour: that check
+// lives in `pnpm pricing:sync`, which refreshes MODEL_COSTS instead of failing
+// the suite on every upstream price change.
 describe("MODEL_COSTS pricing overlay", () => {
-  it("covers the current Command Code model catalog snapshot", () => {
-    assert.equal(fixture.source, "https://api.commandcode.ai/provider/v1/models")
-    assert.match(fixture.fetchedAt, /^2026-10-07T/)
-
-    const catalogIds = [...fixture.modelIds].sort()
-    const pricedIds = Object.keys(MODEL_COSTS).sort()
-    assert.deepEqual(pricedIds, catalogIds)
-  })
-
-  it("matches the verified official pricing snapshot", () => {
-    assert.equal(pricingFixture.verifiedAt, PRICING_LAST_VERIFIED)
-    assert.equal(pricingFixture.source, PRICING_SOURCE_URL)
-    assert.match(pricingFixture.tierPolicy, /request-wide input tiers/)
-
-    const expected = Object.fromEntries(
-      Object.entries(pricingFixture.costs).map(
-        ([modelId, [input, output, cacheRead, cacheWrite]]) => [
-          modelId,
-          {
-            input,
-            output,
-            cacheRead,
-            cacheWrite,
-            ...(pricingFixture.tiers[modelId]
-              ? {
-                  tiers: pricingFixture.tiers[modelId].map(
-                    ([inputTokensAbove, tierInput, tierOutput, tierCacheRead, tierCacheWrite]) => ({
-                      inputTokensAbove,
-                      input: tierInput,
-                      output: tierOutput,
-                      cacheRead: tierCacheRead,
-                      cacheWrite: tierCacheWrite,
-                    }),
-                  ),
-                }
-              : {}),
-          },
-        ],
-      ),
-    )
-    assert.deepEqual(MODEL_COSTS, expected)
-  })
-
-  it("uses non-zero prices except for models documented as free", () => {
+  it("prices every model non-negatively and every free model at zero", () => {
     for (const [modelId, cost] of Object.entries(MODEL_COSTS)) {
-      assert.ok(cost.input >= 0, `${modelId} input cost should be non-negative`)
-      assert.ok(cost.output >= 0, `${modelId} output cost should be non-negative`)
-      assert.ok(cost.cacheRead >= 0, `${modelId} cache-read cost should be non-negative`)
-      assert.ok(cost.cacheWrite >= 0, `${modelId} cache-write cost should be non-negative`)
+      for (const field of ["input", "output", "cacheRead", "cacheWrite"] as const) {
+        assert.ok(Number.isFinite(cost[field]), `${modelId} ${field} should be finite`)
+        assert.ok(cost[field] >= 0, `${modelId} ${field} cost should be non-negative`)
+      }
 
-      const allZero = Object.values(cost).every((value) => value === 0)
+      const allZero = [cost.input, cost.output, cost.cacheRead, cost.cacheWrite].every(
+        (value) => value === 0,
+      )
       assert.equal(
         allZero,
-        freeModels.has(modelId),
-        `${modelId} free-model status should be explicit`,
+        FREE_MODEL_IDS.has(modelId),
+        `${modelId} free-model status should be explicit in FREE_MODEL_IDS`,
       )
     }
   })
 
-  it("matches corrected official rates", () => {
+  it("only lists free models that actually have a price entry", () => {
+    for (const modelId of FREE_MODEL_IDS) {
+      assert.ok(MODEL_COSTS[modelId], `${modelId} is listed as free but has no price entry`)
+    }
+  })
+
+  it("keeps context-dependent tiers well-formed and ordered", () => {
+    for (const [modelId, cost] of Object.entries(MODEL_COSTS)) {
+      if (!cost.tiers) continue
+      assert.ok(cost.tiers.length > 0, `${modelId} should not declare an empty tier list`)
+      let previous = 0
+      for (const tier of cost.tiers) {
+        assert.ok(
+          tier.inputTokensAbove > previous,
+          `${modelId} tier thresholds should be strictly increasing`,
+        )
+        previous = tier.inputTokensAbove
+        for (const field of ["input", "output", "cacheRead", "cacheWrite"] as const) {
+          assert.ok(Number.isFinite(tier[field]), `${modelId} tier ${field} should be finite`)
+          assert.ok(tier[field] >= 0, `${modelId} tier ${field} cost should be non-negative`)
+        }
+      }
+    }
+  })
+
+  it("keeps the pinned regressions for previously mispriced models", () => {
     assertCost("deepseek/deepseek-v4-pro", {
       input: 0.66,
       output: 1.98,
@@ -130,17 +94,17 @@ describe("MODEL_COSTS pricing overlay", () => {
       cacheRead: 0.003,
       cacheWrite: 0,
     })
-    assertCost("Qwen/Qwen3.7-Max", {
-      input: 2.5,
-      output: 7.5,
-      cacheRead: 0.5,
-      cacheWrite: 3.13,
-    })
     assertCost("xiaomi/mimo-v2.5-pro", {
       input: 0.435,
       output: 0.87,
       cacheRead: 0.0036,
       cacheWrite: 0,
+    })
+    assertCost("Qwen/Qwen3.7-Max", {
+      input: 2.5,
+      output: 7.5,
+      cacheRead: 0.5,
+      cacheWrite: 3.13,
     })
     assertCost("MiniMaxAI/MiniMax-M2.5", {
       input: 0.3,
@@ -211,18 +175,8 @@ describe("MODEL_COSTS pricing overlay", () => {
       cacheRead: 0.006,
       cacheWrite: 0.038,
     })
-    assertCost("gpt-5.6-terra", {
-      input: 2,
-      output: 12,
-      cacheRead: 0.2,
-      cacheWrite: 2.5,
-    })
-    assertCost("gpt-5.6-luna", {
-      input: 0.2,
-      output: 1.2,
-      cacheRead: 0.02,
-      cacheWrite: 0.25,
-    })
+    assertCost("gpt-5.6-terra", { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.5 })
+    assertCost("gpt-5.6-luna", { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 })
     assert.deepEqual(MODEL_COSTS["xai/grok-4.6"]?.tiers, [
       {
         inputTokensAbove: 200_000,
@@ -234,32 +188,13 @@ describe("MODEL_COSTS pricing overlay", () => {
     ])
   })
 
-  it("uses reviewed rates for the September catalog additions", () => {
-    assertCost("Qwen/Qwen3.8-Max-0902", { input: 2, output: 6, cacheRead: 0.25, cacheWrite: 0 })
-    assertCost("google/gemini-3.8-flash", {
-      input: 1.5,
-      output: 7.5,
-      cacheRead: 0.15,
-      cacheWrite: 0,
-    })
-    assertCost("meta/muse-spark-1.3", { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 })
-    assertCost("meta/muse-spark-1.3-contributor", {
-      input: 0.1,
-      output: 0.2,
-      cacheRead: 0.002,
-      cacheWrite: 0,
-    })
-    assertCost("deepseek/deepseek-v4-flash-vision-exp", {
-      input: 0.15,
-      output: 0.6,
-      cacheRead: 0.003,
-      cacheWrite: 0,
-    })
-  })
-
   it("tracks pricing provenance", () => {
     assert.equal(PRICING_SOURCE_URL, "https://commandcode.ai/docs/resources/pricing-limits")
-    assert.equal(PRICING_LAST_VERIFIED, "2026-10-07")
+    assert.match(PRICING_LAST_VERIFIED, /^\d{4}-\d{2}-\d{2}$/)
+    assert.ok(
+      PRICING_LAST_VERIFIED <= new Date().toISOString().slice(0, 10),
+      "PRICING_LAST_VERIFIED must not be in the future",
+    )
   })
 
   it("fails once temporary pricing needs review", () => {

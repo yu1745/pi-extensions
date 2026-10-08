@@ -20,7 +20,7 @@ export interface TemporaryPricing {
 }
 
 export const PRICING_SOURCE_URL = "https://commandcode.ai/docs/resources/pricing-limits"
-export const PRICING_LAST_VERIFIED = "2026-10-07"
+export const PRICING_LAST_VERIFIED = "2026-10-08"
 
 export const ZERO_MODEL_COST: CommandCodeModelCost = {
   input: 0,
@@ -28,6 +28,21 @@ export const ZERO_MODEL_COST: CommandCodeModelCost = {
   cacheRead: 0,
   cacheWrite: 0,
 }
+
+/**
+ * Models Command Code serves at no credit cost.
+ *
+ * Kept next to the table so "this model is free" is an explicit, reviewable
+ * decision rather than an implicit all-zero row. Run `pnpm pricing:sync` to
+ * refresh the table; the sync check treats a new all-zero model as drift
+ * until it is listed here.
+ */
+export const FREE_MODEL_IDS: ReadonlySet<string> = new Set([
+  "poolside/laguna-s-2.1-free",
+  "inclusionai/ling-3.0-flash-sante:free",
+  "inclusionai/ling-3.1-flash:free",
+  "stealth/glyph-cluster:free",
+])
 
 /**
  * Display prices in USD per million tokens.
@@ -42,6 +57,7 @@ export const MODEL_COSTS: Readonly<Record<string, CommandCodeModelCost>> = {
   "inclusionai/ling-3.0-flash-sante:free": { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   "inclusionai/ling-3.1-flash:free": { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   "poolside/laguna-s-2.1-free": { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  "stealth/glyph-cluster:free": { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   "meituan/LongCat-2.0": { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 },
 
   // Open and open-weight models
@@ -204,6 +220,7 @@ export const MODEL_COSTS: Readonly<Record<string, CommandCodeModelCost>> = {
   "claude-opus-5": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
   "claude-opus-4-8": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
   "claude-opus-4-7": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+  "claude-haiku-5-5": { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
   "claude-haiku-4-5-20251001": {
     input: 1,
     output: 5,

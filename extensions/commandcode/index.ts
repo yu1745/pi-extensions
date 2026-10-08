@@ -18,6 +18,7 @@ import {
   type ProviderConfig,
 } from "@earendil-works/pi-coding-agent"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 
 import { getConfiguredApiKey } from "./src/api-key.ts"
 import { registerCommandCodeAccountManager } from "./src/active-account.ts"
@@ -70,6 +71,10 @@ const nativeStream = streamNativeProvider as unknown as LocalStream
 // indistinguishable from a free request and breaks every cost display.
 const warnedUnpricedModels = new Set<string>()
 
+// Absolute path of the pricing table, so copying the warning alone is enough
+// to act on it.
+const PRICING_FILE = fileURLToPath(new URL("./src/pricing.ts", import.meta.url))
+
 function providerModelCost(id: string) {
   const cost = MODEL_COSTS[id]
   if (!cost) {
@@ -77,7 +82,7 @@ function providerModelCost(id: string) {
       warnedUnpricedModels.add(id)
       console.warn(
         `[commandcode] no pricing for model "${id}" (last verified ${PRICING_LAST_VERIFIED}); ` +
-          `its usage will report $0. Update extensions/commandcode/src/pricing.ts from ${PRICING_SOURCE_URL}`,
+          `its usage will report $0. Update ${PRICING_FILE} from ${PRICING_SOURCE_URL}`,
       )
     }
     return { ...ZERO_MODEL_COST, tiers: undefined }

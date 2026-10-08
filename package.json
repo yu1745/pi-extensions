@@ -12,7 +12,9 @@
 	"scripts": {
 		"test": "node scripts/run-tests.mjs",
 		"test:commandcode": "node --experimental-transform-types --test --test-concurrency=4 tests/commandcode-*.test.ts tests/commandcode-upstream/test-*.ts",
-		"typecheck:commandcode": "tsc -p extensions/commandcode/tsconfig.json"
+		"typecheck:commandcode": "tsc -p extensions/commandcode/tsconfig.json",
+		"pricing:sync": "node scripts/sync-pricing.mjs",
+		"pricing:check": "node scripts/sync-pricing.mjs --check"
 	},
 	"dependencies": {
 		"@huggingface/tokenizers": "^0.2.0",
