@@ -141,9 +141,9 @@ A 100% real user profile + fingerprint is essentially indistinguishable from a h
   interested"-style clutter never leak in.
 - **Guarded content scoping (`autoSelector`)**: Examines every matching main/article/content
   container, prefers the broadest substantive candidate, and compares its ARIA snapshot with a
-  full-page baseline. If the candidate retains less than 20% of the accessible page, or an
-  article selector has multiple substantive matches, extraction automatically falls back to the
-  full page instead of losing sibling articles, feed items, reviews, tables, or dashboard panels.
+  full-page baseline. The automatic scope is used only when it keeps at least 90% of the
+  full-page snapshot; otherwise the full page is returned. This guards against losing sibling
+  articles, feed items, reviews, tables, or dashboard panels.
 - **Markdown Tables with Span Semantics**: Converts ARIA tables into structured Markdown tables.
   Merged cells are explicitly annotated with `[colspan=N]` / `[rowspan=N]`, with `»` marking
   horizontal continuations and `«` marking vertical continuations so LLMs accurately understand

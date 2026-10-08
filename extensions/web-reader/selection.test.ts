@@ -41,9 +41,16 @@ test("rejects choosing one article when several substantive articles exist", () 
 
 test("accepts a sufficiently complete scope", () => {
   const candidate = { selector: "main", index: 0, textLength: 5000, priority: 1 };
-  const decision = decideAriaScope("x".repeat(10_000), "x".repeat(6_000), candidate);
+  const decision = decideAriaScope("x".repeat(10_000), "x".repeat(9_500), candidate);
   assert.equal(decision.useScoped, true);
   assert.equal(decision.reason, "scoped");
+});
+
+test("rejects a scope that holds only part of the page, even a large part", () => {
+  const candidate = { selector: "main", index: 0, textLength: 6000, priority: 1 };
+  const decision = decideAriaScope("x".repeat(10_000), "x".repeat(6_000), candidate);
+  assert.equal(decision.useScoped, false);
+  assert.equal(decision.reason, "low-coverage");
 });
 
 test("falls back to full page when there is no candidate", () => {

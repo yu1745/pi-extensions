@@ -1,5 +1,5 @@
 export const MIN_SCOPE_TEXT = 200;
-export const MIN_ARIA_COVERAGE = 0.2;
+export const MIN_ARIA_COVERAGE = 0.9;
 
 export interface ScopeCandidate {
   selector: string;
@@ -34,9 +34,10 @@ function ariaSize(aria: string): number {
 }
 
 /**
- * A narrow scope is useful only when it retains a meaningful share of the full
- * accessibility tree. Low coverage is a strong signal that a card, review, or
- * first feed item was mistaken for the whole page.
+ * A narrow scope is accepted only when it keeps nearly all of the full accessibility tree.
+ * Narrowing to a container that holds only part of the page loses content (forum replies
+ * outside <article>, product details outside <main>), and extra text costs less than missing
+ * text. The 90% threshold comes from measurements on the WCXB content-extraction benchmark.
  */
 export function decideAriaScope(
   fullAria: string,
