@@ -3,26 +3,17 @@
  * Cloudflare-protected page, using the same Playwright launch path as web_reader.
  *
  * Run:  node tests/web-reader-cloudflare.integration.mjs [url]
- * Requires: network access, a Jev API key in ~/.pi/agent/auth.json, xvfb for headed mode.
+ * Requires: Pi >=1.0, network access, native typesafe auth (/login typesafe or
+ * TYPESAFE_API_KEY), and xvfb for headed mode. Running this script makes paid API calls.
  */
-import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
+import { createExperimentJev, jiti } from "./jev-runtime-helper.mjs";
 import { chromium } from "playwright";
-
-const piRequire = createRequire(
-  "/home/wangyu/.nvm/versions/node/v22.23.1/lib/node_modules/@earendil-works/pi-coding-agent/index.js",
-);
-const { createJiti } = piRequire("jiti");
-const jiti = createJiti(import.meta.url);
 
 const { handleCloudflareChallenge } = await jiti.import(
   "../extensions/web-reader/cloudflare.ts",
 );
-const { createJevClient } = await jiti.import("../extensions/shared/jev/client.ts");
-
 const url = process.argv[2] || "https://linux.do/t/topic/2770639/11";
-const KEY = JSON.parse(readFileSync("/home/wangyu/.pi/agent/auth.json", "utf8"))["typesafe-jev"].key;
-const jev = createJevClient({ apiKey: KEY });
+const jev = await createExperimentJev();
 
 // Mirror web-reader's real launch path (LAUNCH_ARGS from index.ts).
 const LAUNCH_ARGS = [

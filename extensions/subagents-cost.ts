@@ -93,7 +93,24 @@ function resolveAgentOutputTurns(agentId: string, sessionId: string, cwd: string
 	return undefined;
 }
 
-function collectSubagents(ctx: ExtensionContext): { items: SubagentCostItem[]; totalCny: number } {
+function subagentDetails(value: unknown) {
+	// Pi 1.0 tool details are JSON values, not necessarily an object. Narrow
+	// individual fields as well so malformed JSON cannot change aggregation types.
+	const object: Record<string, unknown> =
+		value !== null && typeof value === "object" && !Array.isArray(value)
+			? value as Record<string, unknown> : {};
+	const text = (key: string) => typeof object[key] === "string" ? object[key] : undefined;
+	const number = (key: string) => typeof object[key] === "number" ? object[key] : undefined;
+	return {
+		agentId: text("agentId"), description: text("description"),
+		subagentType: text("subagentType"), displayName: text("displayName"),
+		modelName: text("modelName"), status: text("status"),
+		durationFormatted: text("durationFormatted"), durationMs: number("durationMs"),
+		toolUses: number("toolUses"), turnCount: number("turnCount"),
+	};
+}
+
+export function collectSubagents(ctx: ExtensionContext): { items: SubagentCostItem[]; totalCny: number } {
 	const branch = ctx.sessionManager.getBranch();
 
 	// Map of toolCallId -> requested model
@@ -123,7 +140,7 @@ function collectSubagents(ctx: ExtensionContext): { items: SubagentCostItem[]; t
 
 		if (msg.role === "toolResult") {
 			const text = extractText(content);
-			const details = msg.details || {};
+			const details = subagentDetails(msg.details);
 			const callId = msg.toolCallId;
 			const requestedModel = callId ? callModelMap.get(callId) : undefined;
 
@@ -174,7 +191,7 @@ function collectSubagents(ctx: ExtensionContext): { items: SubagentCostItem[]; t
 
 	for (const entry of branch) {
 		if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
-			const details = entry.message.details || {};
+			const details = subagentDetails(entry.message.details);
 			const usage = entry.message.usage || {};
 			const costUsd = usage.cost?.total ?? 0;
 			const cny = costUsd * RATE;

@@ -40,11 +40,17 @@ Reload with `/reload` after updating the extension.
 
 ## Reading status and structured decisions (2026-10-11)
 
-The current tool is `web_reader`. It asks the registered Jev service two separate
-structured questions: the **page kind** and whether the **requested content is
-ready**. This uses the existing native decision API (`JevServiceV1.evaluate`), not
-a chat/completions model. A high readiness score or HTTP 200 never establishes
-that an article or forum thread was retrieved.
+The current tool is `web_reader` and requires Pi >=1.0. It asks Pi's native Jev
+classifier two separate structured questions: the **page kind** and whether the
+**requested content is ready**. Authenticate with `/login typesafe` or set
+`TYPESAFE_API_KEY`; no `typesafe-jev` plugin is needed. Calls use
+`ctx.modelRegistry.findOfType("classifier", "typesafe", "jev-latest")` and
+`ctx.modelRegistry.classify()`, through the shared deadline/validation helper,
+not a chat/completions model or custom HTTP client. Boolean readiness is the
+native `probability` of true. A high readiness score or HTTP 200 never establishes
+that an article or forum thread was retrieved. Native classifier token usage and
+catalog-priced cost are included in the tool result; missing prices are not
+replaced with guessed fees.
 
 The header reports `Read status`, and tool details include `pageKind`, `blocked`,
 `incomplete`, `verdicts`, and `decisionFallback`. Age/content-preference restrictions

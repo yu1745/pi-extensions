@@ -11,24 +11,13 @@
  * Run: node tests/web-reader-spa-regression.mjs
  */
 import { chromium } from "playwright";
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
-
-const piRequire = createRequire(
-  "/home/wangyu/.nvm/versions/node/v22.23.1/lib/node_modules/@earendil-works/pi-coding-agent/index.js",
-);
-const { createJiti } = piRequire("jiti");
-const jiti = createJiti(import.meta.url);
+// Opt-in live test: Pi >=1.0; /login typesafe or TYPESAFE_API_KEY. Makes paid API calls.
+import { createExperimentJev, jiti } from "./jev-runtime-helper.mjs";
 const { handleCloudflareChallenge } = await jiti.import("../extensions/web-reader/cloudflare.ts");
-const { createJevClient } = await jiti.import("../extensions/shared/jev/client.ts");
-
-const KEY = JSON.parse(readFileSync("/home/wangyu/.pi/agent/auth.json", "utf8"))["typesafe-jev"].key;
-
 // Count Jev calls so we can assert the pre-gate short-circuits before spending any.
 let jevCalls = 0;
-const realJev = createJevClient({ apiKey: KEY });
+const realJev = await createExperimentJev();
 const jev = {
-  version: realJev.version,
   async evaluate(req, opts) {
     jevCalls++;
     return realJev.evaluate(req, opts);

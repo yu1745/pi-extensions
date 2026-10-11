@@ -22,12 +22,12 @@
  * Toggle with the `/tokenspeed` command.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Tokenizer } from "@huggingface/tokenizers";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createJevClient } from "./shared/jev/client.ts";
+import { createJevClassifier } from "./shared/jev/runtime.ts";
 
 const STATUS_KEY = "tokenspeed";
 const HISTORY_LEN = 5; // how many past messages to keep for long-term average
@@ -407,23 +407,6 @@ export function fastClassifyModel(modelId: string): string | null {
 }
 
 /**
- * Read Jev API key from ~/.pi/agent/auth.json
- */
-function getJevApiKey(): string | null {
-	try {
-		const authPath = path.join(os.homedir(), ".pi", "agent", "auth.json");
-		if (!fs.existsSync(authPath)) return null;
-		const auth = JSON.parse(fs.readFileSync(authPath, "utf8"));
-		const jev = auth["typesafe-jev"];
-		if (!jev) return null;
-		if (typeof jev === "string") return jev;
-		return jev.key || jev.apiKey || jev.token || null;
-	} catch {
-		return null;
-	}
-}
-
-/**
  * Tokenizer Manager: handles classification (Jev + cache), lazy downloading, and caching.
  */
 class TokenizerManager {
@@ -450,7 +433,7 @@ class TokenizerManager {
 	 * Classify model identifier into tokenizer family.
 	 * Fast-path -> Local Cache -> Jev.
 	 */
-	async resolveFamily(modelId: string): Promise<string> {
+	async resolveFamily(modelId: string, ctx: ExtensionContext): Promise<string> {
 		if (!modelId) return "generic";
 
 		// 1. Fast path
@@ -462,41 +445,41 @@ class TokenizerManager {
 			return this.taxonomyCache[modelId];
 		}
 
-		// 3. Jev evaluation
-		const apiKey = getJevApiKey();
-		if (apiKey) {
-			try {
-				const client = createJevClient({ apiKey });
-				const res = await client.evaluate({
-					state: { modelId },
-					questions: {
-						family: {
-							type: "choice",
-							instructions:
-								"Classify this deployed model identifier into its core base architecture/tokenizer family.",
-							criteria: JEV_CRITERIA,
-						},
+		// 3. Jev evaluation through the current session's native registry.
+		try {
+			const classifier = createJevClassifier(ctx);
+			const res = await classifier.evaluate({
+				state: { modelId },
+				questions: {
+					family: {
+						type: "choice",
+						instructions:
+							"Classify this deployed model identifier into its core base architecture/tokenizer family.",
+						criteria: JEV_CRITERIA,
 					},
-				});
-				const ans = res.answers.family;
-				const choice = ans?.type === "choice" ? ans.choice : undefined;
-				if (choice && choice !== "other") {
-					const mapped = choice === "gemini" ? "gemma" : choice;
-					this.taxonomyCache[modelId] = mapped;
-					try {
-						fs.writeFileSync(
-							this.taxonomyCacheFile,
-							JSON.stringify(this.taxonomyCache, null, 2),
-							"utf8",
-						);
-					} catch {
-						// ignore
-					}
-					return mapped;
+				},
+			}, { signal: ctx.signal, timeoutMs: 8_000 });
+			// This is a background status lookup, not a tool invocation. Native
+			// res.usage may be absent; do not fabricate a tool/session billing entry
+			// or mix classifier tokens into the chat output-speed measurements.
+			const ans = res.answers.family;
+			const choice = ans?.type === "choice" ? ans.choice : undefined;
+			if (choice && choice !== "other") {
+				const mapped = choice === "gemini" ? "gemma" : choice;
+				this.taxonomyCache[modelId] = mapped;
+				try {
+					fs.writeFileSync(
+						this.taxonomyCacheFile,
+						JSON.stringify(this.taxonomyCache, null, 2),
+						"utf8",
+					);
+				} catch {
+					// ignore
 				}
-			} catch {
-				// Fallback if Jev request fails
+				return mapped;
 			}
+		} catch {
+			// Missing model/credentials, cancellation, or classifier failure: use estimates.
 		}
 
 		return "generic";
@@ -642,9 +625,9 @@ export default function (pi: ExtensionAPI) {
 	/**
 	 * Switch model family and load its tokenizer non-blockingly.
 	 */
-	function updateActiveModel(modelId: string | undefined) {
+	function updateActiveModel(modelId: string | undefined, ctx: ExtensionContext) {
 		if (!modelId) return;
-		tokenizerManager.resolveFamily(modelId).then((family) => {
+		tokenizerManager.resolveFamily(modelId, ctx).then((family) => {
 			currentFamily = family;
 			const tok = tokenizerManager.getOrLoad(family, () => {
 				// Called when tokenizer is loaded from disk or network
@@ -711,7 +694,7 @@ export default function (pi: ExtensionAPI) {
 		meter.reset();
 
 		if (ctx.model) {
-			updateActiveModel(ctx.model.id);
+			updateActiveModel(ctx.model.id, ctx);
 		}
 
 		// Seed from previous session entries if available
@@ -749,7 +732,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("model_select", async (event, ctx) => {
 		lastCtx = ctx;
 		if (event.model) {
-			updateActiveModel(event.model.id);
+			updateActiveModel(event.model.id, ctx);
 		}
 	});
 
@@ -761,7 +744,7 @@ export default function (pi: ExtensionAPI) {
 
 		const modelId = event.message.model || ctx.model?.id;
 		if (modelId) {
-			updateActiveModel(modelId);
+			updateActiveModel(modelId, ctx);
 		}
 
 		meter.begin(Date.now());

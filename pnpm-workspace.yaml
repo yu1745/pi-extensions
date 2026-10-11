@@ -1,4 +1,11 @@
 # pnpm
+# Keep the development SDK graph on the minimum supported Pi release; upstream
+# caret ranges otherwise mix 1.0 and 1.1 classes and break nominal stream types.
+overrides:
+  '@earendil-works/chord': 1.0.0
+  '@earendil-works/pi-ai': 1.0.0
+  '@earendil-works/pi-agent-core': 1.0.0
+  '@earendil-works/pi-tui': 1.0.0
 # Only these dependencies are allowed to run install scripts. Everything else
 # stays blocked (pnpm's default), which is what keeps `pi install`-style
 # production installs from executing unreviewed postinstall code.

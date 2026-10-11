@@ -167,3 +167,5 @@ BENCH_ONLY=icon-expander,pager-is-expander node tests/lazy-strategy-bench.mjs al
 ```
 
 需要网络、Jev key（`~/.pi/agent/auth.json` 的 `typesafe-jev`）与 X 显示（可用 `xvfb-run`）。
+
+> 迁移说明：上文是历史测量及当时的认证入口。当前实验脚本要求 Pi >=1.0，改用原生 `typesafe` provider（`/login typesafe` 或 `TYPESAFE_API_KEY`），不再读取 `typesafe-jev`；表中 benchmark 数据未重新测量。

@@ -19,7 +19,6 @@ pi install git:github.com/yu1745/pi-extensions
 | `commandcode` | `extensions/commandcode/` | Command Code DeepSeek-only provider with verified sticky multi-account rotation (default low-balance threshold 0.1); [configuration](extensions/commandcode/README.md) |
 | `siliconflow` | `extensions/siliconflow.ts` | SiliconFlow (硅基流动) provider with native dynamic model refresh (`refreshModels` + persisted catalog) |
 | `runinfra` | `extensions/runinfra.ts` | RunInfra provider (`RUNINFRA_API_KEY` or `/login runinfra`) with dynamic model discovery, OpenAI chat-completions compatible |
-| `typesafe-jev` | `extensions/typesafe-jev/` | Reusable typed TypeSafe Jev evaluation service. Credentials use Pi `/login typesafe-jev`; the provider intentionally exposes no chat models |
 | `openai-codex-fast` | `extensions/openai-codex-fast.ts` | `/fast` and `/ultrafast` toggle Codex `service_tier=priority` / `service_tier=ultrafast` |
 | `context-window` | `extensions/context-window.ts` | `/context-window` sets or overrides context window for the current model |
 | `append` | `extensions/append.ts` | `/append` queues user messages until the agent run stops (at `agent_end`), avoiding tool-call interruption |
@@ -97,15 +96,19 @@ Offline tests: `node --experimental-strip-types --test tests/openai-codex-fast.t
 node --experimental-strip-types --test tests/deepseek-effort.test.ts
 ```
 
-## TypeSafe Jev service
+## Native TypeSafe Jev classifier (Pi >=1.0)
 
-`typesafe-jev` registers a native Pi auth provider solely so its API key follows Pi's credential flow:
+Jev uses Pi's built-in `typesafe` provider; no separate provider plugin is needed:
 
 ```text
-/login typesafe-jev
+/login typesafe
 ```
 
-It deliberately lists zero generative models. Other extensions can discover the authenticated, typed `JevServiceV1` through the `typesafe-jev:get-service:v1` event, or import the client/service/types from `extensions/shared/jev/`. Requests default to `jev-latest`, have a 20-second deadline and bounded retries for HTTP 429/529. `TYPESAFE_API_KEY` is supported for non-interactive development; normal interactive use should prefer `/login`.
+Alternatively set `TYPESAFE_API_KEY`. A legacy `typesafe-jev` entry is not looked up by the native `typesafe` provider; save the same key with `/login typesafe` rather than reinstalling the retired plugin. Classifier models do not appear in the chat model picker.
+
+Extensions use `ctx.modelRegistry.findOfType("classifier", "typesafe", "jev-latest")` and `ctx.modelRegistry.classify(model, { state, questions }, options)`. The thin `extensions/shared/jev/runtime.ts` helper adds cancellation/deadlines (20 seconds by default, shorter caller budgets) and answer validation, not HTTP or credential handling. Every call explicitly sets `maxRetries: 0` to preserve those budgets. Boolean answers use `probability` (0–1); failures are checked via `stopReason`. Native usage is accumulated in `web_reader` tool results, including reported usage on failed decisions; direct TypeSafe models without catalog pricing report tokens without inventing a charge. Missing usage remains unknown. Tokenizer classification in `tokenspeed` runs outside a tool result: its usage is not added to session totals or mixed into chat token-speed measurements.
+
+The live experiment scripts use `tests/jev-runtime-helper.mjs` with native `ModelRuntime`/`ModelRegistry`; running them requires network access and may incur charges. Historical benchmark results predate this migration and are not fresh measurements of the native runtime.
 
 ## API keys
 

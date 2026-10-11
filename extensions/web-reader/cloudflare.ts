@@ -27,7 +27,7 @@
  * paid Jev round-trips for a result that was never in doubt. Retrying is only worth it
  * when something actually CHANGED between rounds, which the stall check below tracks.
  */
-import type { JevServiceV1 } from "../shared/jev/types.ts";
+import type { JevClassifier } from "../shared/jev/runtime.ts";
 
 // Titles Cloudflare uses for its interstitial. Used only as a cheap pre-gate so that
 // ordinary pages don't pay for a Jev round-trip; Jev remains the actual judge.
@@ -335,7 +335,7 @@ interface Verdict {
 }
 
 async function askJev(
-  jev: JevServiceV1,
+  jev: JevClassifier,
   snap: Snapshot,
   candidates: Candidate[],
   signal?: AbortSignal,
@@ -397,7 +397,7 @@ export async function handleCloudflareChallenge(opts: {
   page: CfPage;
   context: CfContext;
   url: string;
-  jev: JevServiceV1;
+  jev: JevClassifier;
   signal?: AbortSignal;
   log: (...a: unknown[]) => void;
   /** Response carried `cf-mitigated: challenge`. */

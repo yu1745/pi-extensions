@@ -1,130 +1,124 @@
-import assert from "node:assert/strict"
-import test from "node:test"
-import { createEventBus } from "@earendil-works/pi-coding-agent"
-import typesafeJevExtension from "../extensions/typesafe-jev/index.ts"
-import { createJevClient, JevError } from "../extensions/shared/jev/client.ts"
-import {
-  createAuthenticatedJevService,
-  discoverJevService,
-  publishJevService,
-  registerJevService,
-  resolveJevService,
-} from "../extensions/shared/jev/service.ts"
-import { JEV_PROVIDER_ID, JEV_SERVICE_VERSION, type JevServiceV1 } from "../extensions/shared/jev/types.ts"
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import type { ClassifierContext, ClassifierResult, Usage } from '@earendil-works/pi-ai';
+import { createJevClassifier, createJevUsageAccumulator, type JevContext } from '../extensions/shared/jev/runtime.ts';
 
-const request = {
-  state: { command: "until false; do :; done" },
-  questions: {
-    stuck: {
-      type: "noul" as const,
-      instructions: "Is this stuck?",
-      criteria: { true: "Permanently blocked", false: "Can complete" },
-    },
-  },
+const request: ClassifierContext = { state: { text: 'article' }, questions: {
+  ready: { type: 'bool', instructions: 'Ready?', criteria: { true: 'Readable', false: 'Loading' } },
+  kind: { type: 'choice', instructions: 'Kind?', criteria: { content: 'Article', shell: 'Loading' } },
+} };
+const usage: Usage = { input: 12, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 15,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+function result(): ClassifierResult {
+  return { api: 'typesafe-system-one', provider: 'typesafe', model: 'jev-latest', timestamp: 0, stopReason: 'stop', usage,
+    answers: { ready: { type: 'bool', probability: 0.97 }, kind: { type: 'choice', choice: 'content', confidence: 0.9, probabilities: { content: 0.9, shell: 0.1 } } } };
+}
+function context(classify: JevContext['modelRegistry']['classify'] = async () => result()): JevContext {
+  return { modelRegistry: {
+    findOfType: ((...args: string[]) => { assert.deepEqual(args, ['classifier', 'typesafe', 'jev-latest']); return { id: 'jev-latest', provider: 'typesafe' }; }) as JevContext['modelRegistry']['findOfType'],
+    classify,
+  } };
 }
 
-test("provider exposes /login auth without pretending Jev is a chat model", async () => {
-  let provider: any
-  const handlers = new Map<string, (...args: any[]) => unknown>()
-  const events = createEventBus()
-  typesafeJevExtension({
-    registerProvider(value: unknown) { provider = value },
-    events,
-    on(name: string, handler: (...args: any[]) => unknown) { handlers.set(name, handler) },
-  } as never)
-  try {
-    assert.equal(provider.id, JEV_PROVIDER_ID)
-    assert.deepEqual(await provider.getModels(), [])
-    const credential = await provider.auth.apiKey.login({
-      async prompt() { return "  temporary-key  " },
-    })
-    assert.deepEqual(credential, { type: "api_key", key: "temporary-key" })
-  } finally {
-    await handlers.get("session_shutdown")?.()
-  }
-})
+test('uses current native registry, native bool unchanged, explicit no retries and exact usage', async () => {
+  const totals = createJevUsageAccumulator();
+  const ctx = context(async (model, input, options) => {
+    assert.equal(model.id, 'jev-latest');
+    assert.equal(input, request);
+    assert.equal(options?.maxRetries, 0);
+    assert.ok(options?.signal);
+    assert.equal('onPayload' in options!, false);
+    return result();
+  });
+  const response = await createJevClassifier(ctx, totals.add).evaluate(request);
+  assert.deepEqual(response.answers.ready, { type: 'bool', probability: 0.97 });
+  assert.deepEqual(totals.usage, usage);
+  await createJevClassifier(ctx, totals.add).evaluate(request);
+  assert.equal(totals.usage?.totalTokens, 30);
+  assert.equal(totals.usage?.cost.total, 0);
+  assert.equal(usage.totalTokens, 15);
+});
 
-test("Jev client sends bearer auth and validates answers", async () => {
-  let captured: RequestInit | undefined
-  const client = createJevClient({
-    apiKey: "secret-key",
-    fetch: async (_url, init) => {
-      captured = init
-      return new Response(JSON.stringify({
-        model: "jev-test",
-        answers: { stuck: { type: "noul", noul: 0.97 } },
-        usage: { input_tokens: 12, output_tokens: 3 },
-      }), { status: 200, headers: { "content-type": "application/json" } })
-    },
-  })
-  const response = await client.evaluate(request)
-  assert.equal((captured?.headers as Record<string, string>).Authorization, "Bearer secret-key")
-  assert.match(String(captured?.body), /"model":"jev-latest"/)
-  assert.deepEqual(response.answers.stuck, { type: "noul", noul: 0.97 })
-})
+test('each classifier binds its own context rather than a global session', async () => {
+  const first = createJevClassifier(context());
+  const second = createJevClassifier(context(async () => ({ ...result(), answers: { ...result().answers, ready: { type: 'bool', probability: 0.2 } } })));
+  assert.equal((await first.evaluate(request)).answers.ready.type, 'bool');
+  assert.deepEqual((await second.evaluate(request)).answers.ready, { type: 'bool', probability: 0.2 });
+  assert.deepEqual((await first.evaluate(request)).answers.ready, { type: 'bool', probability: 0.97 });
+});
 
-test("Jev client rejects malformed typed answers", async () => {
-  const client = createJevClient({
-    apiKey: "secret-key",
-    maxAttempts: 1,
-    fetch: async () => new Response(JSON.stringify({
-      model: "jev-test",
-      answers: { stuck: { type: "noul", noul: 2 } },
-      usage: { input_tokens: 1, output_tokens: 1 },
-    }), { status: 200 }),
-  })
-  await assert.rejects(client.evaluate(request), (error: unknown) =>
-    error instanceof JevError && error.code === "invalid_response")
-})
+for (const reason of ['error', 'aborted'] as const) test(`rejects native ${reason}, keeping reported usage`, async () => {
+  const totals = createJevUsageAccumulator();
+  const jev = createJevClassifier(context(async () => ({ ...result(), stopReason: reason, errorMessage: 'provider failure' })), totals.add);
+  await assert.rejects(jev.evaluate(request), reason === 'error' ? /provider failure/ : /aborted/);
+  assert.deepEqual(totals.usage, usage);
+});
 
-test("Jev service discovery works through the Pi event bus", () => {
-  const events = createEventBus()
-  const service: JevServiceV1 = {
-    version: JEV_SERVICE_VERSION,
-    async evaluate() { throw new Error("not used") },
-  }
-  const unsubscribe = publishJevService(events, service)
-  try {
-    assert.equal(discoverJevService(events), service)
-  } finally {
-    unsubscribe()
-  }
-  assert.equal(discoverJevService(events), undefined)
-})
+test('missing model and missing authentication fail safely without own credential access', async () => {
+  const ctx = context(async () => { throw new Error('must not call'); });
+  ctx.modelRegistry.findOfType = () => undefined;
+  await assert.rejects(createJevClassifier(ctx).evaluate(request), /unavailable/);
+  const unauthenticated = context(async () => ({ ...result(), stopReason: 'error', errorMessage: 'No credentials for typesafe' }));
+  await assert.rejects(createJevClassifier(unauthenticated).evaluate(request), /No credentials/);
+});
 
-test("global service cleanup cannot erase a newer registration", () => {
-  const first = { version: JEV_SERVICE_VERSION, async evaluate() { throw new Error("first") } } satisfies JevServiceV1
-  const second = { version: JEV_SERVICE_VERSION, async evaluate() { throw new Error("second") } } satisfies JevServiceV1
-  const removeFirst = registerJevService(first)
-  const removeSecond = registerJevService(second)
-  removeFirst()
-  assert.equal(resolveJevService(), second)
-  removeSecond()
-  assert.equal(resolveJevService(), undefined)
-})
+test('usage is optional, not fabricated', async () => {
+  const totals = createJevUsageAccumulator();
+  const response = await createJevClassifier(context(async () => ({ ...result(), usage: undefined })), totals.add).evaluate(request);
+  assert.equal(response.usage, undefined);
+  assert.equal(totals.usage, undefined);
+});
 
-test("authenticated service resolves the /login provider key lazily", async () => {
-  let requestedProvider = ""
-  const oldFetch = globalThis.fetch
-  globalThis.fetch = async (_url, init) => {
-    assert.equal((init?.headers as Record<string, string>).Authorization, "Bearer stored-key")
-    return new Response(JSON.stringify({
-      model: "jev-test",
-      answers: { stuck: { type: "noul", noul: 0.8 } },
-      usage: { input_tokens: 2, output_tokens: 1 },
-    }), { status: 200 })
-  }
-  try {
-    const service = createAuthenticatedJevService(() => ({
-      async getProviderAuth(provider) {
-        requestedProvider = provider
-        return { auth: { apiKey: "stored-key" } }
-      },
-    }))
-    const response = await service.evaluate(request)
-    assert.equal(requestedProvider, JEV_PROVIDER_ID)
-    assert.equal(response.answers.stuck.type, "noul")
-  } finally {
-    globalThis.fetch = oldFetch
-  }
-})
+const malformed: [string, (r: ClassifierResult) => void][] = [
+  ['missing answer', r => { delete r.answers.ready; }],
+  ['wrong type', r => { r.answers.ready = r.answers.kind; }],
+  ['illegal choice', r => { (r.answers.kind as any).choice = 'other'; }],
+  ['prototype choice', r => { (r.answers.kind as any).choice = 'toString'; }],
+  ['missing probabilities', r => { delete (r.answers.kind as any).probabilities; }],
+  ['missing chosen probability', r => { (r.answers.kind as any).probabilities = {}; }],
+  ['unknown probability label', r => { (r.answers.kind as any).probabilities.other = 0.2; }],
+  ...[NaN, Infinity, -0.1, 1.1].flatMap(value => [
+    [`bool ${value}`, (r: ClassifierResult) => { (r.answers.ready as any).probability = value; }],
+    [`confidence ${value}`, (r: ClassifierResult) => { (r.answers.kind as any).confidence = value; }],
+    [`probability ${value}`, (r: ClassifierResult) => { (r.answers.kind as any).probabilities.content = value; }],
+  ] as [string, (r: ClassifierResult) => void][]),
+];
+for (const [name, mutate] of malformed) test(`rejects ${name}`, async () => {
+  const invalid = result(); mutate(invalid);
+  await assert.rejects(createJevClassifier(context(async () => invalid)).evaluate(request), /Jev/);
+});
+
+test('pre-aborted context never calls runtime', async () => {
+  const ctx = context(async () => { throw new Error('should not call'); });
+  ctx.signal = AbortSignal.abort(new Error('cancelled'));
+  await assert.rejects(createJevClassifier(ctx).evaluate(request), /cancelled/);
+});
+
+test('propagates cancellation while runtime is pending', async () => {
+  const controller = new AbortController();
+  let received: AbortSignal | undefined;
+  const jev = createJevClassifier(context(async (_m, _r, options) => { received = options?.signal; return new Promise(() => {}); }));
+  const pending = jev.evaluate(request, { signal: controller.signal });
+  controller.abort(new Error('cancelled'));
+  await assert.rejects(pending, /cancelled/);
+  assert.equal(received?.aborted, true);
+});
+
+test('deadline bounds even a runtime that ignores abort; no hidden retries', async () => {
+  let calls = 0;
+  let received: AbortSignal | undefined;
+  const jev = createJevClassifier(context(async (_m, _r, options) => { calls++; received = options?.signal; return new Promise(() => {}); }));
+  await assert.rejects(jev.evaluate(request, { timeoutMs: 10 }), /timed out/);
+  assert.equal(received?.aborted, true);
+  assert.equal(calls, 1);
+});
+
+test('native thrown failures propagate and usage costs/splits sum without estimation', async () => {
+  await assert.rejects(createJevClassifier(context(async () => { throw new Error('network down'); })).evaluate(request), /network down/);
+  const totals = createJevUsageAccumulator();
+  const paid = { ...usage, reasoning: 2, cacheWrite1h: 1, cost: { ...usage.cost, input: 0.01, total: 0.01 } };
+  totals.add(paid); totals.add(paid);
+  assert.equal(totals.usage?.cost.total, 0.02);
+  assert.equal(totals.usage?.reasoning, 4);
+  assert.equal(totals.usage?.cacheWrite1h, 2);
+});

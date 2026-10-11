@@ -1,4 +1,5 @@
-import type { JevEvaluateRequest, JevEvaluateResponse, JevServiceV1 } from '../shared/jev/types.ts';
+import type { ClassifierContext, ClassifierResult } from '@earendil-works/pi-ai';
+import type { JevClassifier } from '../shared/jev/runtime.ts';
 import { DISMISS_CONSENT_SCRIPT, SAMPLE_SCRIPT } from './page.ts';
 import { gateSignal, pageExcerpt } from './signals.ts';
 
@@ -14,7 +15,7 @@ const KINDS: PageKind[] = ['content', 'content_gate', 'login_wall', 'bot_check',
 const trusted = (confidence: number, evidence: boolean) => confidence > 0.9 || (confidence >= 0.5 && evidence);
 
 /** 页面类型与加载状态分开问；只使用现有 Jev 结构化决策服务，不调用聊天模型。 */
-export function readinessInput(url: string, sample: PageSample): JevEvaluateRequest {
+export function readinessInput(url: string, sample: PageSample): ClassifierContext {
   const gate = gateSignal(sample.text) || gateSignal(sample.title);
   return {
     state: {
@@ -41,23 +42,27 @@ export function readinessInput(url: string, sample: PageSample): JevEvaluateRequ
         },
       },
       is_ready: {
-        type: 'noul',
+        type: 'bool',
         instructions: 'Is the requested main content present and ready to read? Stable menus, cookie settings, age restrictions, sign-in pages and loading shells do not count. Assess main content rather than whether the current UI has finished drawing.',
+        criteria: {
+          true: 'The requested main content is present and ready to read, not just a completed surrounding UI.',
+          false: 'The requested main content is absent, restricted, or still loading; only menus, consent, sign-in, age restrictions or a loading shell are visible.',
+        },
       },
     },
   };
 }
 
-function decision(response: JevEvaluateResponse | undefined) {
+function decision(response: ClassifierResult | undefined) {
   const kind = response?.answers?.page_kind;
   const ready = response?.answers?.is_ready;
-  if (kind?.type !== 'choice' || !KINDS.includes(kind.choice as PageKind) || ready?.type !== 'noul') return undefined;
-  if (![kind.confidence, ready.noul].every(value => Number.isFinite(value) && value >= 0 && value <= 1)) return undefined;
-  return { kind: kind.choice as PageKind, confidence: kind.confidence, ready: ready.noul };
+  if (kind?.type !== 'choice' || !KINDS.includes(kind.choice as PageKind) || ready?.type !== 'bool') return undefined;
+  if (![kind.confidence, ready.probability].every(value => Number.isFinite(value) && value >= 0 && value <= 1)) return undefined;
+  return { kind: kind.choice as PageKind, confidence: kind.confidence, ready: ready.probability };
 }
 
 /** 8 秒总预算（含决策故障），最多 6 次结构化请求；失败不会再追加另一轮 8 秒。 */
-export async function waitForReadableContent(page: ReadinessPage, url: string, jev?: JevServiceV1, signal?: AbortSignal, now = Date.now): Promise<LoadVerdict> {
+export async function waitForReadableContent(page: ReadinessPage, url: string, jev?: JevClassifier, signal?: AbortSignal, now = Date.now): Promise<LoadVerdict> {
   const deadline = now() + 8000;
   let stable = 0;
   let previous = '';

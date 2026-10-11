@@ -26,7 +26,9 @@ interface SiliconFlowModelEntry {
 // Known reasoning model families → enable pi thinking controls.
 const REASONING_PATTERN = /(deepseek-r1|deepseek-v3\.1|deepseek-v3\.2|deepseek-v4|glm-5|glm-z1|qwen3|kimi-k2|qwq|minimax-m2|thinking|reasoner)/i;
 
-function modelMeta(id: string): Pick<ProviderModelConfig, "contextWindow" | "maxTokens" | "reasoning" | "input"> {
+type ChatModelConfig = Extract<ProviderModelConfig, { type?: "chat" }>;
+
+function modelMeta(id: string): Pick<ChatModelConfig, "contextWindow" | "maxTokens" | "reasoning" | "input"> {
 	const lower = id.toLowerCase();
 	const reasoning = REASONING_PATTERN.test(lower) && !/-instruct(?!.*thinking)/i.test(lower);
 	const vision = /vl|vision|omni|ocr|4\.5v/i.test(lower);

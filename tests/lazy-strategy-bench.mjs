@@ -19,18 +19,11 @@
  *   BENCH_ONLY=a,b           run only these fixtures (full sweep is slow)
  */
 import { chromium } from "playwright";
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
+// Opt-in live benchmark: Pi >=1.0; /login typesafe or TYPESAFE_API_KEY.
+// Historical results used the retired custom HTTP client; rerun before comparing timings.
+import { createExperimentJev } from "./jev-runtime-helper.mjs";
 
-const piRequire = createRequire(
-  "/home/wangyu/.nvm/versions/node/v22.23.1/lib/node_modules/@earendil-works/pi-coding-agent/index.js",
-);
-const { createJiti } = piRequire("jiti");
-const jiti = createJiti(import.meta.url);
-const { createJevClient } = await jiti.import("../extensions/shared/jev/client.ts");
-
-const KEY = JSON.parse(readFileSync("/home/wangyu/.pi/agent/auth.json", "utf8"))["typesafe-jev"].key;
-const jev = createJevClient({ apiKey: KEY });
+const jev = await createExperimentJev();
 let jevCalls = 0; // global totals (display only)
 let jevMs = 0;
 const jevCallsByStrategy = {};

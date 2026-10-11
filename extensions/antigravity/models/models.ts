@@ -276,7 +276,7 @@ const thinkingLevelMaps = {
     xhigh: null,
     max: null,
   },
-} satisfies Record<string, ProviderModelConfig["thinkingLevelMap"]>;
+} satisfies Record<string, Extract<ProviderModelConfig, { type?: "chat" }>["thinkingLevelMap"]>;
 
 /** Same set as `agy models`, collapsed to public Pi model IDs. */
 export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [

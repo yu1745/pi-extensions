@@ -2,14 +2,15 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readinessInput, readinessNote, waitForReadableContent, type PageSample, type ReadinessPage } from '../extensions/web-reader/readiness.ts';
 import { DISMISS_CONSENT_SCRIPT } from '../extensions/web-reader/page.ts';
-import type { JevEvaluateRequest, JevEvaluateResponse, JevServiceV1 } from '../extensions/shared/jev/types.ts';
+import type { ClassifierContext, ClassifierResult } from '@earendil-works/pi-ai';
+import type { JevClassifier } from '../extensions/shared/jev/runtime.ts';
 
 const url = 'https://example.com/article';
 const sample: PageSample = { title: 'Article', text: 'An article with readable prose.', textLength: 3000, contentEvidence: true, pendingContent: false, consentText: '' };
-function response(kind = 'content', ready = 0.88): JevEvaluateResponse {
-  return { model: 'test', usage: { input_tokens: 0, output_tokens: 0 }, answers: {
+function response(kind = 'content', ready = 0.88): ClassifierResult {
+  return { api: 'typesafe-system-one', provider: 'typesafe', model: 'test', timestamp: 0, stopReason: 'stop', answers: {
     page_kind: { type: 'choice', choice: kind, confidence: 0.99, probabilities: { [kind]: 0.99 } },
-    is_ready: { type: 'noul', noul: ready },
+    is_ready: { type: 'bool', probability: ready },
   } };
 }
 function fixture(state: (clock: number) => PageSample = () => sample) {
@@ -20,17 +21,19 @@ function fixture(state: (clock: number) => PageSample = () => sample) {
   };
   return { page, now: () => clock, advance: (ms: number) => { clock += ms; } };
 }
-const service = (evaluate: JevServiceV1['evaluate']): JevServiceV1 => ({ version: 1, evaluate });
+const service = (evaluate: JevClassifier['evaluate']): JevClassifier => ({ evaluate });
 
 test('asks separate typed decisions and finds a restriction after long navigation', async () => {
   const gate = { ...sample, contentEvidence: false, text: `${'Language menu '.repeat(400)}该游戏包含您要求屏蔽的内容：一些裸露画面或色情内容` };
   const f = fixture(() => gate);
-  const inputs: JevEvaluateRequest[] = [];
+  const inputs: ClassifierContext[] = [];
   const result = await waitForReadableContent(f.page, url, service(async input => { inputs.push(input); return response('content_gate', 0.88); }), undefined, f.now);
   assert.equal(result.blocked, 'content_gate');
   assert.equal(result.jevScore, 0.88);
   assert.equal(result.incomplete, false);
   assert.deepEqual(Object.keys(inputs[0].questions), ['page_kind', 'is_ready']);
+  assert.equal(inputs[0].questions.is_ready.type, 'bool');
+  assert.deepEqual(Object.keys(inputs[0].questions.is_ready.criteria), ['true', 'false']);
   const state = readinessInput(url, gate).state as { contentExcerpt: string };
   assert.ok(state.contentExcerpt.includes('该游戏包含您要求屏蔽的内容'));
   assert.ok(state.contentExcerpt.length <= 500);
@@ -84,6 +87,16 @@ test('keeps articles discussing restrictions when their real content is present'
   const result = await waitForReadableContent(f.page, url, service(async () => response('content', 0.99)), undefined, f.now);
   assert.equal(result.pageKind, 'content');
   assert.equal(result.blocked, undefined);
+});
+
+test('native bool probabilities retain the exact readiness thresholds', async () => {
+  for (const [probability, evidence, expected] of [[0.9, false, false], [0.90001, false, true], [0.5, true, true], [0.4999, true, false]] as const) {
+    const f = fixture(() => ({ ...sample, contentEvidence: evidence }));
+    const verdict = await waitForReadableContent(f.page, url, service(async () => response('content', probability)), undefined, f.now);
+    assert.equal(verdict.pageKind === 'content', expected, `probability=${probability} evidence=${evidence}`);
+    assert.ok(f.now() <= 8000);
+    assert.ok(verdict.verdicts <= 6);
+  }
 });
 
 test('reports an unresolved consent wall and propagates user cancellation', async () => {

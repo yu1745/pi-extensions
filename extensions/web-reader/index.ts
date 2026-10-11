@@ -42,7 +42,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
-import { resolveJevService } from "../shared/jev/service.ts";
+import { createJevClassifier, createJevUsageAccumulator, type JevClassifier } from "../shared/jev/runtime.ts";
 import { fileURLToPath } from "node:url";
 import {
   chooseScopeCandidate,
@@ -511,7 +511,7 @@ interface FetchParams {
   inlineImage?: boolean;
 }
 
-async function fetchPage(p: FetchParams, signal?: AbortSignal) {
+async function fetchPage(p: FetchParams, signal?: AbortSignal, jevService?: JevClassifier) {
   const t0 = Date.now();
   const mark = () => Date.now() - t0;
   // Timing ensureBrowser() itself is what distinguishes a cold launch (seconds) from a
@@ -567,7 +567,6 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
     // 1b. Cloudflare challenge branch. Jev decides whether this is really a challenge
     // and, if so, which element to click; we then re-check state each round.
     let cf: CfOutcome | undefined;
-    const jevService = resolveJevService();
     if (jevService) {
       try {
         cf = await handleCloudflareChallenge({
@@ -669,7 +668,7 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
     // 4. Extra wait (at least small pause for hydration if not specified)
     const extraWait = p.extraWaitMs ?? 400;
     if (extraWait > 0) await page.waitForTimeout(extraWait).catch(() => {});
-    const loadVerdict = await waitForReadableContent(page, p.url, resolveJevService(), signal);
+    const loadVerdict = await waitForReadableContent(page, p.url, jevService, signal);
     // Only the temporary page is changed. Keep explicit selectors and blocked consent evidence intact.
     if (!p.selector && loadVerdict.blocked !== "consent_wall") await page.evaluate(CLEAN_CONSENT_SCRIPT).catch(() => {});
 
@@ -1282,7 +1281,7 @@ export default function (pi: ExtensionAPI) {
       ),
     }),
 
-    async execute(_toolCallId, params, signal, onUpdate) {
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
       if (signal?.aborted) return { content: [{ type: "text", text: "Cancelled" }], details: {} };
 
       let url = (params as { url: string }).url?.trim();
@@ -1297,9 +1296,11 @@ export default function (pi: ExtensionAPI) {
 
       onUpdate?.({ content: [{ type: "text", text: `Rendering ${url} …` }], details: {} });
 
+      const jevUsage = createJevUsageAccumulator();
+      const jev = createJevClassifier(ctx, jevUsage.add);
       let result;
       try {
-        result = await fetchPage(p, signal);
+        result = await fetchPage(p, signal, jev);
       } catch (e) {
         const msg = (e as Error).message || String(e);
         if (/Executable doesn't exist|browserType\.launch.*chromium|browser was not found|Looks like Playwright was installed/i.test(msg)) {
@@ -1318,9 +1319,10 @@ export default function (pi: ExtensionAPI) {
             ],
             isError: true,
             details: {},
+            usage: jevUsage.usage,
           };
         }
-        return { content: [{ type: "text", text: `Error rendering page: ${msg}` }], isError: true, details: {} };
+        return { content: [{ type: "text", text: `Error rendering page: ${msg}` }], isError: true, details: {}, usage: jevUsage.usage };
       }
 
       let body = "";
@@ -1403,6 +1405,7 @@ export default function (pi: ExtensionAPI) {
 
       return {
         content,
+        usage: jevUsage.usage,
         isError: !!result.loadVerdict.blocked,
         details: {
           url: result.url,
