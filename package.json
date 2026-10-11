@@ -7,9 +7,13 @@
 	"author": "yu1745",
 	"packageManager": "pnpm@11.20.0",
 	"files": [
-		"extensions"
+		"extensions",
+		"bundle"
 	],
 	"scripts": {
+		"build:extensions": "node scripts/build-extensions.mjs",
+		"check:bundles": "node scripts/build-extensions.mjs --check",
+		"test:bundles": "node --test tests/startup-bundles.test.mjs",
 		"test": "node scripts/run-tests.mjs",
 		"test:commandcode": "node --experimental-transform-types --test --test-concurrency=4 tests/commandcode-*.test.ts tests/commandcode-upstream/test-*.ts",
 		"typecheck:commandcode": "tsc -p extensions/commandcode/tsconfig.json",
@@ -27,6 +31,8 @@
 		"@earendil-works/pi-coding-agent": "1.0.0",
 		"@earendil-works/pi-tui": "1.0.0",
 		"@types/node": "^25.9.1",
+		"esbuild": "0.28.2",
+		"jiti": "2.7.0",
 		"typebox": "1.1.38",
 		"typescript": "^6.0.3"
 	},
@@ -56,9 +62,9 @@
 			"extensions/tool-duration.ts",
 			"extensions/web-reader/index.ts",
 			"extensions/working-bell.ts",
-			"extensions/web-search/index.ts",
+			"bundle/web-search.js",
 			"extensions/filter-image-reader.ts",
-			"extensions/antigravity/index.ts",
+			"bundle/antigravity.js",
 			"extensions/subagents-cost.ts",
 			"extensions/deepseek-time-pricing.ts",
 			"extensions/codex-cost.ts",

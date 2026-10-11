@@ -123,7 +123,18 @@ Provider quota monitor (`quota-footer`) reads keys at runtime from `modelRegistr
 ## Development
 
 This repo uses **pnpm**. `package-lock.json` was removed in favor of
-`pnpm-lock.yaml`; the `pi.extensions` array and all scripts are unchanged.
+`pnpm-lock.yaml`.
+
+Antigravity and web search load committed ESM entries from `bundle/` to avoid
+transpiling their main TypeScript implementations on every startup. OAuth and
+its shared Antigravity helpers remain source-only, loaded through Pi's TypeScript
+loader: generated files do not duplicate OAuth client credentials, and login,
+provider and search retain one set of transport/identity caches. Pi and npm
+dependencies are resolved by the host, not bundled. Source remains in `extensions/`. After changing either extension or its dependencies, run
+`pnpm build:extensions` and commit the generated files. `pnpm check:bundles`
+checks freshness without modifying files. Git installs need no build step.
+If selecting individual extensions in Pi package settings, use
+`bundle/antigravity.js` and `bundle/web-search.js` instead of their source paths.
 
 ```sh
 pnpm install          # types + typebox for local typecheck

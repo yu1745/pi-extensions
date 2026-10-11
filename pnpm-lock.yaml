@@ -39,6 +39,12 @@ importers:
       '@types/node':
         specifier: ^25.9.1
         version: 25.9.6
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
+      jiti:
+        specifier: 2.7.0
+        version: 2.7.0
       typebox:
         specifier: 1.1.38
         version: 1.1.38
