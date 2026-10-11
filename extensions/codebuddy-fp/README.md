@@ -20,6 +20,10 @@ pi 原生 `/login` → 选 `codebuddy` → 二级选择：
 
 之后 `/models` 选 `codebuddy/deepseek-v4.1-flash`（或 `hy4-preview` / `hy3` / `kimi-k3`）。退出用原生 `/logout`。
 
+## 启动加载
+
+凭证路径通过静态导入的 `getAgentDir()` 读取，复用 Pi 已加载的 SDK；不要在凭证读取函数中同步 `require("@earendil-works/pi-coding-agent")`，否则 jiti 可能重新加载整棵 SDK 依赖树，使每次启动额外阻塞数秒。模型目录仍在初始化时读取，认证和请求行为不变。
+
 ## 文件
 
 - `index.ts` — 扩展本体

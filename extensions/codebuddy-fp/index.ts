@@ -31,7 +31,7 @@ import * as path from "node:path";
 import { gzipSync } from "node:zlib";
 import { randomBytes } from "node:crypto";
 import { createProvider } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ── 常量（对齐抓包） ─────────────────────────────────────────────────────────
 
@@ -44,7 +44,8 @@ const STATE_FILE = path.join(__dirname, "login-state.json");
 // 与 /login、--api-key 等原生流程同一存储，不另建私有凭证文件。
 function piAuthFile(): string {
   try {
-    const { getAgentDir } = require("@earendil-works/pi-coding-agent");
+    // Reuse Pi's host import. A synchronous jiti require re-evaluates the SDK
+    // dependency graph here and can block every startup for several seconds.
     return path.join(getAgentDir(), "auth.json");
   } catch { return path.join(os.homedir(), ".pi/agent/auth.json"); }
 }
