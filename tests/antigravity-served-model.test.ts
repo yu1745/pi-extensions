@@ -207,6 +207,7 @@ function harness() {
   return {
     entries,
     emit: (name: string, data: any) => handlers.get(name)!(data, {}),
+    flush: () => new Promise((resolve) => setTimeout(resolve, 0)),
     render: (customType: string, data: any) =>
       renderers.get(customType)!({ customType, data }, {}, theme),
   };
@@ -219,9 +220,21 @@ test("every antigravity reply appends one modelVersion entry", async () => {
   const h = harness();
   await h.emit("message_end", assistant({ model: "gemini-3.1-pro", responseModel: "gemini-3.8-flash-n" }));
   await h.emit("message_end", assistant({ model: "gemini-3.8-flash", responseModel: "gemini-3.8-flash-n" }));
+  await h.flush();
   assert.equal(h.entries.length, 2);
   assert.deepEqual(h.entries[0].data, { requested: "gemini-3.1-pro", served: "gemini-3.8-flash-n" });
   assert.deepEqual(h.entries[1].data, { requested: "gemini-3.8-flash", served: "gemini-3.8-flash-n" });
+});
+
+test("the append is deferred, so it cannot run before the TUI clears streamingComponent", async () => {
+  const h = harness();
+  await h.emit("message_end", assistant({ model: "gemini-3.8-flash", responseModel: "gemini-3.8-flash-n" }));
+  // Synchronously after the handler returns, nothing is appended yet. This is the
+  // whole point: an inline appendEntry would fire here, while the TUI still holds a
+  // live streamingComponent, and the entry would render above the message.
+  assert.deepEqual(h.entries, []);
+  await h.flush();
+  assert.equal(h.entries.length, 1);
 });
 
 test("no entry for other providers, other roles, or responses with no modelVersion", async () => {
@@ -229,6 +242,7 @@ test("no entry for other providers, other roles, or responses with no modelVersi
   await h.emit("message_end", assistant({ provider: "openai", responseModel: "gpt-5.6" }));
   await h.emit("message_end", assistant({ role: "user", responseModel: "gemini-3.8-flash-n" }));
   await h.emit("message_end", assistant({ model: "gemini-3.8-flash" }));
+  await h.flush();
   assert.deepEqual(h.entries, []);
 });
 

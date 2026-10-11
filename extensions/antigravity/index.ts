@@ -112,17 +112,29 @@ export default function (pi: ExtensionAPI): void {
     },
   );
 
-  pi.on("message_end", async (event, _ctx) => {
+  pi.on("message_end", (event) => {
     const message = event.message;
     if (message.role !== "assistant" || message.provider !== PROVIDER_ID) return;
     // streamAntigravity copies `modelVersion` onto responseModel; without it the
-    // response never reached a chunk that carried one (error/aborted), so skip
-    // rather than print an empty line.
+    // response never reached a chunk that carried one, so stay silent.
     if (!message.responseModel) return;
-    pi.appendEntry<ModelVersionEntryData>(MODEL_VERSION_ENTRY, {
+    const data: ModelVersionEntryData = {
       requested: message.model,
       served: message.responseModel,
-    });
+    };
+    // Defer by one macrotask so the entry lands BELOW the message, not above it.
+    //
+    // Pi dispatches extension events before TUI listeners (core/agent-session.js:
+    // "Emit to extensions first, then notify public listeners"), so appending inline
+    // here still sees a live streamingComponent, and addCustomEntryToChat splices
+    // custom entries *before* it (interactive-mode.js). The TUI's message_end branch
+    // clears streamingComponent synchronously, and a setTimeout(0) callback is a
+    // macrotask, so it is guaranteed to run after that. Do not "simplify" this back
+    // into a direct appendEntry — the line silently jumps above the message.
+    //
+    // (turn_end's boundary-entry API would be the cleaner hook, but it postdates the
+    // pi-coding-agent 0.85.1 types this repo typechecks against.)
+    setTimeout(() => pi.appendEntry<ModelVersionEntryData>(MODEL_VERSION_ENTRY, data), 0);
   });
 
   pi.registerCommand("antigravity.usage", {
