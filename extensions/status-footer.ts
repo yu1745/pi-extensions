@@ -15,7 +15,9 @@
  *     $174.46 ($15.32 + $10.15 + $2.62) [M:$28.09 | S:$146.37] (prev: $501.14)
  */
 
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { fetchCodexUsage, loadCodexCredentials, parseCodexWindow } from "./shared/codex-api.ts";
@@ -49,6 +51,91 @@ function formatCwd(cwd: string, home: string): string {
 			!isAbsolute(relativeToHome));
 	if (!isInsideHome) return cwd;
 	return relativeToHome === "" ? "~" : `~${sep}${relativeToHome}`;
+}
+
+// ─── CPU 使用率(距上次渲染的区间均值,照搬 ~/.claude/statusline.sh 的 /proc/stat 差分) ───
+const CPU_STATE_FILE = join(homedir(), ".pi", ".footer-cpu-state");
+// 定时重绘间隔(ms)。对齐 claude settings.json 的 statusLine.refreshInterval(那里配的是 1,
+// 即“无冷却、逢渲染就刷新”),但这里取 1s 才合理:1ms 只会让 CPU 采样窗口缩到毫秒级而疯狂抖动。
+// 可用 PI_FOOTER_REFRESH_MS 覆盖(0 = 关闭定时刷新,只跟随其他事件被动更新)。
+const CPU_REFRESH_INTERVAL_MS = (() => {
+	const raw = Number.parseInt(process.env.PI_FOOTER_REFRESH_MS ?? "", 10);
+	return Number.isFinite(raw) && raw >= 0 ? raw : 1_000;
+})();
+// 采样冷却:略小于重绘间隔,避免定时器正好卡在边界上导致“这一拍没采到、下一拍再等一轮”
+const CPU_SAMPLE_COOLDOWN_MS =
+	CPU_REFRESH_INTERVAL_MS > 0 ? Math.max(200, Math.floor(CPU_REFRESH_INTERVAL_MS * 0.9)) : 900;
+
+interface CpuSample {
+	total: number;
+	idle: number;
+}
+
+/** 读 /proc/stat 第一行的累计 jiffies;非 Linux 或不可读返回 null。 */
+function readCpuSample(): CpuSample | null {
+	try {
+		const line = readFileSync("/proc/stat", "utf8").split("\n", 1)[0] ?? "";
+		if (!line.startsWith("cpu ")) return null;
+		const f = line.trim().split(/\s+/).slice(1).map((n) => Number.parseInt(n, 10));
+		if (f.length < 4 || f.some((n) => !Number.isFinite(n))) return null;
+		const [user, nice, system, idle, iowait, irq, softirq, steal = 0] = f;
+		// user/nice 已含 guest/guest_nice,不重复计入
+		return {
+			total: user + nice + system + idle + iowait + irq + softirq + steal,
+			idle: idle + iowait,
+		};
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * 返回区间 CPU 占用百分比(0-100),首次无快照时返回 null。
+ * 对累计值做饱和减法(NOHZ 下 iowait 等计数器可能倒退),最后 clamp 到 [0,100]。
+ *
+ * 关键:采样受 CPU_REFRESH_INTERVAL_MS 冷却约束。footer 的 render() 会被
+ * 各种被动事件(流式 token、光标闪烁等)高频调用,若每次 render 都推进基线,
+ * 差分窗口会缩到毫秒级 → 数值疯狂跳动。因此窗口内直接返回缓存值,
+ * 只在距上次真实采样 >= 间隔时才更新基线与百分比。
+ */
+let cpuCache: { atMs: number; pct: number | null } | null = null;
+
+function sampleCpuPercent(): number | null {
+	const now = Date.now();
+	if (cpuCache && now - cpuCache.atMs < CPU_SAMPLE_COOLDOWN_MS) {
+		return cpuCache.pct;
+	}
+
+	const cur = readCpuSample();
+	if (!cur) return null;
+
+	let prev: CpuSample | undefined;
+	let prevPct: number | undefined;
+	try {
+		const [t, i, p] = readFileSync(CPU_STATE_FILE, "utf8").trim().split(/\s+/);
+		prev = { total: Number.parseInt(t, 10), idle: Number.parseInt(i, 10) };
+		prevPct = Number.parseInt(p, 10);
+	} catch {}
+
+	let pct = prevPct;
+	const dTotal = cur.total - (prev?.total ?? 0);
+	const dIdle = Math.min(cur.idle - (prev?.idle ?? 0), Math.max(0, dTotal));
+	if (prev && dTotal > 0) {
+		const raw = Math.min(100, Math.max(0, ((dTotal - Math.max(0, dIdle)) * 100) / dTotal));
+		// EWMA 平滑,避免窗口边缘抖动直接反映到 UI
+		pct = pct === undefined || !Number.isFinite(pct) ? raw : pct * 0.4 + raw * 0.6;
+		pct = Math.round(pct);
+	}
+
+	try {
+		const tmp = `${CPU_STATE_FILE}.${process.pid}`;
+		writeFileSync(tmp, `${cur.total} ${cur.idle} ${pct ?? ""}\n`);
+		renameSync(tmp, CPU_STATE_FILE);
+	} catch {}
+
+	const result = pct !== undefined && Number.isFinite(pct) ? pct : null;
+	cpuCache = { atMs: now, pct: result };
+	return result;
 }
 
 function sanitizeStatusText(text: string): string {
@@ -198,10 +285,17 @@ export default function (pi: ExtensionAPI) {
 			const home = process.env.HOME || process.env.USERPROFILE || "";
 			const unsubscribe = footerData.onBranchChange(() => tui.requestRender());
 
+			// 定时刷新:否则 CPU 占用只在打字/模型输出触发重绘时才更新
+			const cpuTick = CPU_REFRESH_INTERVAL_MS > 0
+				? setInterval(() => tui.requestRender(), CPU_REFRESH_INTERVAL_MS)
+				: null;
+			cpuTick?.unref?.();
+
 			return {
 				invalidate() {},
 				dispose: () => {
 					requestRender = null;
+					if (cpuTick) clearInterval(cpuTick);
 					unsubscribe();
 				},
 				render(width: number): string[] {
@@ -355,6 +449,13 @@ export default function (pi: ExtensionAPI) {
 					else if (contextPercentValue > 70) ctxColored = theme.fg("warning", ctxDisplay);
 					else ctxColored = theme.fg("success", ctxDisplay);
 					statsParts.push(ctxColored);
+
+					// CPU 占用(整台机器,区间均值)
+					const cpuPct = sampleCpuPercent();
+					if (cpuPct !== null) {
+						const cpuColor = cpuPct >= 80 ? "error" : cpuPct >= 50 ? "warning" : "dim";
+						statsParts.push(theme.fg(cpuColor, `cpu ${cpuPct}%`));
+					}
 
 					let statsLeft = statsParts.join(" ");
 
