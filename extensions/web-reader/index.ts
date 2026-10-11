@@ -52,6 +52,8 @@ import {
 } from "./selection.js";
 import { handleCloudflareChallenge, type CfOutcome } from "./cloudflare.js";
 import { displayWorks } from "./display.js";
+import { waitForReadableContent, readinessNote } from "./readiness.ts";
+import { CLEAN_CONSENT_SCRIPT } from "./page.ts";
 
 const DEBUG = /^(1|true|yes)$/i.test(process.env.PI_WEBREADER_DEBUG || "");
 function log(...a: unknown[]) {
@@ -143,6 +145,7 @@ interface AnyPage {
   ariaSnapshot(opts?: unknown): Promise<string>;
   content(): Promise<string>;
   screenshot(opts?: unknown): Promise<Buffer>;
+  evaluate<T>(expression: string): Promise<T>;
   evaluate<T, A = void>(fn: (arg: A) => T | Promise<T>, arg?: A): Promise<T>;
   url(): string;
   title(): Promise<string>;
@@ -508,114 +511,6 @@ interface FetchParams {
   inlineImage?: boolean;
 }
 
-async function waitForReadableContentFallback(page: AnyPage, signal?: AbortSignal) {
-  let previous = -1;
-  let stableSamples = 0;
-  const deadline = Date.now() + 8000;
-
-  while (Date.now() < deadline && !signal?.aborted) {
-    const state = await page.evaluate(() => {
-      const mainElements = [
-        ...document.querySelectorAll<HTMLElement>("main, [role=\"main\"], #main-content"),
-      ];
-      const mainText = mainElements.reduce(
-        (max, element) => Math.max(max, (element.innerText || "").trim().length),
-        0,
-      );
-      return {
-        hasMain: mainElements.length > 0,
-        mainText,
-        bodyText: (document.body?.innerText || "").trim().length,
-      };
-    }).catch(() => ({ hasMain: false, mainText: 0, bodyText: 0 }));
-
-    const readable = state.hasMain ? state.mainText > 200 : state.bodyText > 500;
-    const current = state.hasMain ? state.mainText : state.bodyText;
-    const tolerance = Math.max(30, Math.round(Math.max(previous, 0) * 0.02));
-    stableSamples = readable && previous >= 0 && Math.abs(current - previous) <= tolerance
-      ? stableSamples + 1
-      : 0;
-    if (stableSamples >= 2) return;
-
-    previous = current;
-    await page.waitForTimeout(350).catch(() => {});
-  }
-}
-
-async function waitForReadableContent(page: AnyPage, url: string, signal?: AbortSignal): Promise<{ jevScore?: number; fallback?: boolean }> {
-  const jev = resolveJevService();
-  if (!jev) {
-    await waitForReadableContentFallback(page, signal);
-    return { fallback: true };
-  }
-
-  // Jev semantic recognition loop
-  const deadline = Date.now() + 8000;
-  let consecutiveHighConfidence = 0;
-  let lastJevScore: number | undefined;
-
-  while (Date.now() < deadline && !signal?.aborted) {
-    // 1. Snapshot lightweight DOM state
-    const snapshot = await page.evaluate(() => {
-      const bodyText = (document.body?.innerText || "").trim();
-      const main = document.querySelector<HTMLElement>("main, [role=\"main\"], #main-content, #__next, #app") || document.body;
-      const mainText = (main ? main.innerText : "").trim();
-      return {
-        title: document.title,
-        readyState: document.readyState,
-        textSample: (mainText || bodyText).slice(0, 500).replace(/\s+/g, " "),
-        textLength: bodyText.length,
-      };
-    }).catch(() => null);
-
-    // Initial blank/connecting gate: don't waste Jev calls if completely empty
-    if (!snapshot || snapshot.textLength === 0) {
-      await page.waitForTimeout(300).catch(() => {});
-      continue;
-    }
-
-    // 2. Query Jev
-    try {
-      const res = await jev.evaluate({
-        state: {
-          url,
-          title: snapshot.title,
-          readyState: snapshot.readyState,
-          contentLength: snapshot.textLength,
-          contentExcerpt: snapshot.textSample,
-        },
-        questions: {
-          is_ready: {
-            type: "noul",
-            instructions: "Determine whether the target webpage content is fully loaded, rendered, and ready for reading, as opposed to displaying placeholders, skeletons, spinners, or loading messages.",
-          },
-        },
-      }, { timeoutMs: 1500, signal });
-
-      const noul = res.answers?.is_ready?.type === "noul" ? res.answers.is_ready.noul : 0;
-      lastJevScore = noul;
-      if (noul >= 0.8) {
-        consecutiveHighConfidence++;
-        if (consecutiveHighConfidence >= 1) {
-          log(`Jev verified page loaded (noul: ${noul.toFixed(2)}, len: ${snapshot.textLength})`);
-          return { jevScore: noul };
-        }
-      } else {
-        consecutiveHighConfidence = 0;
-      }
-    } catch (e) {
-      // If Jev throws (quota exhausted, network failure, 429, etc.), log and fall back to mechanical heuristics
-      log("Jev evaluation failed or unavailable, falling back to heuristic wait:", (e as Error).message);
-      await waitForReadableContentFallback(page, signal);
-      return { fallback: true, jevScore: lastJevScore };
-    }
-
-    // Poll interval between evaluations (~500ms)
-    await page.waitForTimeout(500).catch(() => {});
-  }
-  return { jevScore: lastJevScore };
-}
-
 async function fetchPage(p: FetchParams, signal?: AbortSignal) {
   const t0 = Date.now();
   const mark = () => Date.now() - t0;
@@ -774,7 +669,9 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal) {
     // 4. Extra wait (at least small pause for hydration if not specified)
     const extraWait = p.extraWaitMs ?? 400;
     if (extraWait > 0) await page.waitForTimeout(extraWait).catch(() => {});
-    const loadVerdict = await waitForReadableContent(page, p.url, signal);
+    const loadVerdict = await waitForReadableContent(page, p.url, resolveJevService(), signal);
+    // Only the temporary page is changed. Keep explicit selectors and blocked consent evidence intact.
+    if (!p.selector && loadVerdict.blocked !== "consent_wall") await page.evaluate(CLEAN_CONSENT_SCRIPT).catch(() => {});
 
     // Content extraction = Playwright ARIA accessibility snapshot (same source as
     // playwright-cli). Hidden/aria-hidden/hover-only nodes are excluded by design.
@@ -1345,7 +1242,7 @@ export default function (pi: ExtensionAPI) {
       "JavaScript / single-page apps, dynamic hydration, and bot-blocking WAFs). Cloudflare " +
       "challenges (Turnstile / 'Just a moment') are detected and solved automatically. Content " +
       "is extracted from Playwright's ARIA accessibility snapshot and Jev semantic load verification — so " +
-      "hidden/hover-only UI is excluded and the output is clean, readable Markdown.",
+      "hidden/hover-only UI is excluded and the output is clean, readable Markdown. Age/content-preference, login, consent and error pages are classified separately from render readiness; a blocked result is not article content.",
     promptSnippet: "Real-browser web reader; clean Markdown via ARIA snapshot and Jev semantic load verification",
     promptGuidelines: [
       "Use web_reader to fetch and read web page content, including JavaScript-heavy SPAs, dynamic sites, and documentation.",
@@ -1483,6 +1380,7 @@ export default function (pi: ExtensionAPI) {
         `Title: ${result.title}\n` +
         `HTTP: ${result.status ?? "?"}${statusNote}\n` +
         `Browser: ${activeChannel}${viaCdp ? " (cdp)" : ""}${result.effectiveSelector ? `  [scope: ${result.effectiveSelector}]` : ""}${selectionNote}${truncated ? "  [truncated]" : ""}\n` +
+        readinessNote(result.loadVerdict) +
         jevNote +
         cfNote +
         timingNote +
@@ -1505,12 +1403,18 @@ export default function (pi: ExtensionAPI) {
 
       return {
         content,
+        isError: !!result.loadVerdict.blocked,
         details: {
           url: result.url,
           title: result.title,
           status: result.status,
           browser: activeChannel,
           jevScore: result.loadVerdict?.jevScore,
+          pageKind: result.loadVerdict.pageKind,
+          blocked: result.loadVerdict.blocked,
+          incomplete: result.loadVerdict.incomplete,
+          verdicts: result.loadVerdict.verdicts,
+          decisionFallback: result.loadVerdict.fallback,
           durationMs: result.timing?.totalMs,
           timing: result.timing,
           truncated,

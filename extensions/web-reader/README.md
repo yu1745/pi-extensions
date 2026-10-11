@@ -38,6 +38,36 @@ sudo apt install xvfb x11-utils
 Alternatively, start Pi with `PI_WEBREADER_HEADLESS=1` (Cloudflare challenges may fail).
 Reload with `/reload` after updating the extension.
 
+## Reading status and structured decisions (2026-10-11)
+
+The current tool is `web_reader`. It asks the registered Jev service two separate
+structured questions: the **page kind** and whether the **requested content is
+ready**. This uses the existing native decision API (`JevServiceV1.evaluate`), not
+a chat/completions model. A high readiness score or HTTP 200 never establishes
+that an article or forum thread was retrieved.
+
+The header reports `Read status`, and tool details include `pageKind`, `blocked`,
+`incomplete`, `verdicts`, and `decisionFallback`. Age/content-preference restrictions
+(`content_gate`), login/paywalls, unresolved cookie consent, verification and error
+pages are reported as blocked tool results. Their text is diagnostic evidence,
+not the requested content; a content-preference restriction does not imply login
+is mandatory. A loading shell that exhausts the wait budget is marked incomplete.
+
+Sampling excludes cookie panels and navigation and brings restriction notices
+into the decision excerpt even after long language menus. Non-semantic articles
+can be recognized by their heading and paragraphs; a stable nested menu alone
+is insufficient. Decisions are rechecked against the current DOM before use.
+The eight-second wait budget includes decision failures, with at most six calls;
+unavailable decisions degrade to conservative mechanical checks.
+
+The reader may click one explicit reject-all/necessary-cookies-only control inside
+a recognized cookie panel. It does not confirm an age, change content preferences
+or log in. Known consent panels are removed before the ARIA coverage comparison
+and extraction, while explicit selectors and unresolved consent-wall evidence are
+preserved. Existing Cloudflare handling is unchanged.
+
+Run `/reload` in an existing Pi session; a new `pi -p` process loads the update.
+
 ## Install
 
 ```bash
