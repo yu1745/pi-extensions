@@ -11,9 +11,9 @@
 //   off-peak  everything else (half the peak price)
 //
 // Prices: https://api-docs.deepseek.com/zh-cn/quick_start/pricing
-// Source unit is CNY per 1M tokens; pi stores USD, converted via USD_PER_CNY.
-// The default (1/7) matches cny-footer's RATE=7, so its ¥ footer shows the
-// official CNY price exactly. Override with DEEPSEEK_USD_PER_CNY.
+// DeepSeek publishes fixed CNY prices, so the official-endpoint rules store the
+// CNY numbers verbatim in `usage.cost` — no USD conversion, no exchange rate.
+// status-footer shows them as ¥ for these providers (see CNY_PROVIDERS).
 //
 // Command Code (`commandcode` provider) bills the same Beijing peak windows but
 // publishes its own USD rates, so those rules are marked `unit: "usd"` and skip
@@ -82,11 +82,11 @@ interface PricedMessageLike {
 	usage?: UsageLike;
 }
 
-/** USD per CNY, applied to `cny` rules. `usd` rules are already USD. */
-const USD_PER_CNY = (() => {
-	const parsed = Number(process.env.DEEPSEEK_USD_PER_CNY);
-	return Number.isFinite(parsed) && parsed > 0 ? parsed : 1 / 7;
-})();
+/**
+ * Providers whose `usage.cost` is denominated in CNY instead of USD.
+ * status-footer uses this to pick the ¥ / $ symbol.
+ */
+export const CNY_PROVIDERS: ReadonlySet<string> = new Set(["deepseek"]);
 
 /** 2026-09-10 12:00 Beijing time (GMT+8) = 04:00 UTC. */
 const V41_FLASH_FROM = Date.UTC(2026, 8, 10, 4, 0, 0);
@@ -284,13 +284,14 @@ function withTimeBasedCost(message: unknown): Record<string, unknown> | undefine
 	const tier = tierAt(rule, at);
 	const tierRates = isPeakAt(at) ? tier.peak : tier.offPeak;
 
-	// pi stores cost in USD per 1M tokens; `usd` rules already are USD.
-	const toUsd = (value: number) => (rule.unit === "usd" ? value : value * USD_PER_CNY);
+	// Rates are written verbatim in the rule's own unit: `cny` rules (DeepSeek's
+	// fixed RMB price list) stay in CNY, `usd` rules (Command Code) stay in USD.
+	// No exchange rate is involved; the footer labels the total by provider.
 	const rate = {
-		input: toUsd(tierRates.input),
-		output: toUsd(tierRates.output),
-		cacheRead: toUsd(tierRates.cacheRead),
-		cacheWrite: toUsd(tierRates.cacheWrite),
+		input: tierRates.input,
+		output: tierRates.output,
+		cacheRead: tierRates.cacheRead,
+		cacheWrite: tierRates.cacheWrite,
 	};
 
 	const cost = {

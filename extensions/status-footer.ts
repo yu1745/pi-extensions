@@ -7,12 +7,16 @@
  * Line 1 carries session counters and the last first-token latency:
  *   ~/proj (main) • 3 turns (5 steps) • TTFT 1.24s
  *
- * Line 2 shows usage and session cost in USD:
+ * Line 2 shows usage and session cost:
  *   - Normal session (within current cycle):
  *     $174.46 ($15.32 + $10.15 + $2.62) [M:$28.09 | S:$146.37]
  *   - Multi-cycle session (crossed billing cycle for openai-codex):
  *     Shows current cycle usage and cost, with prior-cycle total appended:
  *     $174.46 ($15.32 + $10.15 + $2.62) [M:$28.09 | S:$146.37] (prev: $501.14)
+ *
+ * Providers that bill in CNY natively (see CNY_PROVIDERS in
+ * deepseek-time-pricing.ts) store their fixed RMB prices in `usage.cost` as-is,
+ * so the whole cost segment is rendered with `¥` and no exchange rate at all.
  */
 
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -22,6 +26,7 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { fetchCodexUsage, loadCodexCredentials, parseCodexWindow } from "./shared/codex-api.ts";
 import { CODEX_TIMER_STATUS_KEY, CODEX_TIMER_STATUS_WIDTH } from "./codex-timer.ts";
+import { CNY_PROVIDERS } from "./deepseek-time-pricing.ts";
 
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
@@ -400,30 +405,35 @@ export default function (pi: ExtensionAPI) {
 
 					// Cost display
 					if (totals.cost || hasCrossedCycle) {
+						// DeepSeek 以固定人民币定价，其 `usage.cost` 本来就是 CNY 数值，
+						// 所以这里只换符号、不做任何汇率换算。
+						const symbol = ctx.model && CNY_PROVIDERS.has(ctx.model.provider) ? "¥" : "$";
+						const money = (value: number) => `${symbol}${formatUsd(value)}`;
+
 						// 当前周期花费
-						const currentUsd = totals.cost;
-						const cacheUsd = parentTotals.costCache;
-						const inputUsd = parentTotals.costInput;
-						const outputUsd = parentTotals.costOutput;
-						const partsUsd = cacheUsd + inputUsd + outputUsd;
-						const breakdown = partsUsd > 0
+						const currentCost = totals.cost;
+						const cacheCost = parentTotals.costCache;
+						const inputCost = parentTotals.costInput;
+						const outputCost = parentTotals.costOutput;
+						const partsCost = cacheCost + inputCost + outputCost;
+						const breakdown = partsCost > 0
 							? theme.fg("dim", " (") +
-									theme.fg("accent", `$${formatUsd(cacheUsd)}`) +
+									theme.fg("accent", money(cacheCost)) +
 									theme.fg("dim", " + ") +
-									theme.fg("mdLink", `$${formatUsd(inputUsd)}`) +
+									theme.fg("mdLink", money(inputCost)) +
 									theme.fg("dim", " + ") +
-									theme.fg("success", `$${formatUsd(outputUsd)}`) +
+									theme.fg("success", money(outputCost)) +
 									theme.fg("dim", ")")
 							: "";
 
-						let costText = theme.fg("warning", `$${formatUsd(currentUsd)}`) + breakdown;
+						let costText = theme.fg("warning", money(currentCost)) + breakdown;
 
 						if (subagentTotals.cost > 0) {
-							const parentUsd = parentTotals.cost;
-							const subUsd = subagentTotals.cost;
+							const parentCost = parentTotals.cost;
+							const subCost = subagentTotals.cost;
 							costText +=
-								theme.fg("dim", " [M:") + theme.fg("warning", `$${formatUsd(parentUsd)}`) +
-								theme.fg("dim", " | S:") + theme.fg("warning", `$${formatUsd(subUsd)}`) +
+								theme.fg("dim", " [M:") + theme.fg("warning", money(parentCost)) +
+								theme.fg("dim", " | S:") + theme.fg("warning", money(subCost)) +
 								theme.fg("dim", "]");
 						}
 
@@ -431,7 +441,7 @@ export default function (pi: ExtensionAPI) {
 						if (hasCrossedCycle && prevCycleCost > 0) {
 							costText +=
 								theme.fg("dim", " (prev: ") +
-								theme.fg("muted", `$${formatUsd(prevCycleCost)}`) +
+								theme.fg("muted", money(prevCycleCost)) +
 								theme.fg("dim", ")");
 						}
 

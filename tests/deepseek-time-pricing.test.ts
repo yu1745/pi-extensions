@@ -2,14 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import extension, { isPeakAt, nextChange } from "../extensions/deepseek-time-pricing.ts";
 
-// Mirrors the extension's own conversion so the test stays valid when
-// DEEPSEEK_USD_PER_CNY is overridden.
-const USD_PER_CNY = (() => {
-	const parsed = Number(process.env.DEEPSEEK_USD_PER_CNY);
-	return Number.isFinite(parsed) && parsed > 0 ? parsed : 1 / 7;
-})();
-
-const CNY_PER_USD = 1 / USD_PER_CNY;
+// DeepSeek's official prices are fixed in CNY and are stored verbatim in
+// `usage.cost` — there is no USD conversion and no exchange rate involved.
 
 const MODEL = {
 	id: "deepseek-flash",
@@ -46,11 +40,11 @@ async function reprice(
 
 const usage = { input: 1_000_000, output: 1_000_000, cacheRead: 1_000_000, cacheWrite: 0 };
 
-/** CNY per 1M tokens -> total USD cost for `usage` above (one full unit each). */
+/** Expected `usage.cost` for `usage` above (one full 1M unit per field), in CNY. */
 const costOf = (cny: { input: number; output: number; cacheRead: number }) => ({
-	input: cny.input / CNY_PER_USD,
-	output: cny.output / CNY_PER_USD,
-	cacheRead: cny.cacheRead / CNY_PER_USD,
+	input: cny.input,
+	output: cny.output,
+	cacheRead: cny.cacheRead,
 });
 
 test("official alias `deepseek-flash` is repriced (off-peak V4.1 tier)", async () => {
@@ -98,7 +92,7 @@ test("catalog IDs `deepseek-v4-flash` / `deepseek-v4.1-flash-*` still match", as
 			usage: { ...usage },
 		});
 		assert.ok(patched, `${id} must be repriced`);
-		close(patched.usage.cost.input, 1 / CNY_PER_USD);
+		close(patched.usage.cost.input, 1);
 	}
 });
 
@@ -126,8 +120,8 @@ test("`deepseek-pro` alias bills at V4.1 Flash prices after the switch", async (
 		usage: { ...usage },
 	});
 	assert.ok(patched, "deepseek-pro must match a pricing rule");
-	close(patched.usage.cost.input, 1 / CNY_PER_USD);
-	close(patched.usage.cost.output, 4 / CNY_PER_USD);
+	close(patched.usage.cost.input, 1);
+	close(patched.usage.cost.output, 4);
 });
 
 test("non-deepseek providers and non-assistant messages are left alone", async () => {
@@ -174,7 +168,7 @@ test("V41_FLASH_FROM boundary is exclusive of the old tier", async () => {
 		timestamp: V41_FLASH_FROM - 1,
 		usage: { ...usage },
 	});
-	close(before.usage.cost.output, 9 / CNY_PER_USD); // Thu 11:59, peak, old tier
+	close(before.usage.cost.output, 9); // Thu 11:59, peak, old tier
 
 	const after = await reprice({
 		role: "assistant",
@@ -183,7 +177,7 @@ test("V41_FLASH_FROM boundary is exclusive of the old tier", async () => {
 		timestamp: V41_FLASH_FROM,
 		usage: { ...usage },
 	});
-	close(after.usage.cost.output, 4 / CNY_PER_USD); // Thu 12:00, off-peak (12–14), new tier
+	close(after.usage.cost.output, 4); // Thu 12:00, off-peak (12–14), new tier
 });
 
 // ---------------------------------------------------------------------------

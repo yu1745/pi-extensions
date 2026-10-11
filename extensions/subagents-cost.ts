@@ -15,8 +15,10 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
 import { existsSync, readFileSync } from "node:fs";
+import { CNY_PROVIDERS } from "./deepseek-time-pricing.ts";
 
-const RATE = 7.0; // USD -> CNY
+/** USD -> CNY, applied only to providers that still bill in USD. */
+const RATE = 7.0;
 
 function formatTokens(count: number): string {
 	if (!count) return "0";
@@ -113,6 +115,10 @@ function subagentDetails(value: unknown) {
 export function collectSubagents(ctx: ExtensionContext): { items: SubagentCostItem[]; totalCny: number } {
 	const branch = ctx.sessionManager.getBranch();
 
+	// DeepSeek 等 provider 的 `usage.cost` 本身已是人民币（固定价目，不经过美元），
+	// 不能再乘汇率；其余 provider 保留原来的 USD -> CNY 换算。
+	const costIsCny = !!ctx.model && CNY_PROVIDERS.has(ctx.model.provider);
+
 	// Map of toolCallId -> requested model
 	const callModelMap = new Map<string, string>();
 
@@ -194,7 +200,7 @@ export function collectSubagents(ctx: ExtensionContext): { items: SubagentCostIt
 			const details = subagentDetails(entry.message.details);
 			const usage = entry.message.usage || {};
 			const costUsd = usage.cost?.total ?? 0;
-			const cny = costUsd * RATE;
+			const cny = costIsCny ? costUsd : costUsd * RATE;
 			totalCny += cny;
 
 			let agentId = details.agentId;
