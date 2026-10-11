@@ -7,6 +7,16 @@ export type DiagnosticsSnapshot = {
   error?: string;
   projectId?: string;
   resolvedRuntimeModel?: string;
+  /**
+   * `modelVersion` from the backend response: the model that actually answered.
+   * Distinct from `resolvedRuntimeModel`, which is only the routing label we sent.
+   */
+  servedModel?: string;
+  /** Served id whose rates were applied; `*` suffix means a family fallback matched. */
+  pricedByModel?: string;
+  /** True when the served id had no entry and the requested model's rates were kept. */
+  costBasisUnknown?: boolean;
+  responseId?: string;
   availableModels?: string;
   matchedModelDebug?: string;
   latencyMs?: number;
@@ -66,6 +76,17 @@ export function setLastProjectId(projectId: string | undefined): void {
 }
 export function setLastResolvedRuntimeModel(model: string | undefined): void {
   currentBag().resolvedRuntimeModel = model;
+}
+export function setLastServedModel(model: string | undefined): void {
+  currentBag().servedModel = model;
+}
+/** Record which served model supplied the rates for the last priced response. */
+export function setLastCostBasis(pricedBy: string | undefined, unknownServedModel: boolean): void {
+  currentBag().pricedByModel = pricedBy;
+  currentBag().costBasisUnknown = unknownServedModel;
+}
+export function setLastResponseId(id: string | undefined): void {
+  currentBag().responseId = id;
 }
 export function setLastAvailableModels(models: string | undefined): void {
   currentBag().availableModels = models;

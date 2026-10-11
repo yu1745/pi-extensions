@@ -27,8 +27,11 @@ import {
   setLastEndpoint,
   setLastError,
   setLastLatencyMs,
+  setLastCostBasis,
   setLastProjectId,
   setLastResolvedRuntimeModel,
+  setLastResponseId,
+  setLastServedModel,
   setLastStatus,
 } from "../diagnostics/diagnostics.js";
 import {
@@ -44,6 +47,7 @@ import {
   getAntigravityRequestModelId,
   getFallbackRuntimeModel,
   getThinkingConfig,
+  resolveServedModelCost,
   PROVIDER_ID,
 } from "../models/models.js";
 import { redactSecrets, safeError } from "../utils/security.js";
@@ -465,8 +469,29 @@ function createOutput(model: Model<Api>): AssistantMessage {
     stopReason: "stop",
     timestamp: Date.now(),
   };
-  calculateCost(model, output.usage);
+  priceUsage(model, output);
   return output;
+}
+
+/**
+ * Price a message from the model the backend actually served, not the id we asked
+ * for. `calculateCost` reads rates off the model object, so swap in a rates-only
+ * stand-in rather than re-deriving the arithmetic (tiers, 1h cache-write doubling).
+ *
+ * `responseModel` is set by streamResponse as soon as the first chunk arrives, which
+ * is before any usageMetadata in that same chunk, so every priced call already knows
+ * the served model. Cost is recomputed from scratch on each usage chunk; usage
+ * metadata is cumulative, not a delta.
+ */
+function priceUsage(model: Model<Api>, output: AssistantMessage): void {
+  const { rates, pricedBy, unknownServedModel } = resolveServedModelCost(
+    output.responseModel,
+    model,
+  );
+  calculateCost({ ...model, cost: rates }, output.usage);
+  if (output.responseModel && output.responseModel !== model.id) {
+    setLastCostBasis(pricedBy, unknownServedModel);
+  }
 }
 
 function asToolCallArguments(args: Record<string, unknown> | undefined): ToolCall["arguments"] {
@@ -547,6 +572,17 @@ export async function streamResponse(
 
       const responseData = chunk.response || chunk;
       const candidate = responseData.candidates?.[0];
+
+      // The requested `model.id` is only a routing label. `modelVersion` is the one
+      // authoritative answer to "what actually answered", so keep it on the message:
+      // Pi renders/aggregates it (usage-totals keys on `responseModel ?? model`), and
+      // the antigravity UI line reads it back. Cheap assignment, same value on every
+      // chunk, so no need to guard against repeats.
+      if (responseData.modelVersion) {
+        output.responseModel = responseData.modelVersion;
+        setLastServedModel(responseData.modelVersion);
+      }
+      if (responseData.responseId) setLastResponseId(responseData.responseId);
 
       for (const part of candidate?.content?.parts || []) {
         if (part.text !== undefined) {
@@ -632,7 +668,7 @@ export async function streamResponse(
         output.usage.reasoning = thoughts;
         output.usage.cacheRead = cacheRead;
         output.usage.totalTokens = responseData.usageMetadata.totalTokenCount || 0;
-        calculateCost(model, output.usage);
+        priceUsage(model, output);
       }
     }
 

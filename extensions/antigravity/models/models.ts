@@ -1,4 +1,5 @@
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import type { Api, Model, ModelCost } from "@earendil-works/pi-ai";
 import type { AntigravityRouting } from "../types/types.js";
 import { ThinkingEffort } from "../types/enums.js";
 
@@ -153,11 +154,88 @@ export function getMaxOutputTokens(modelId: string, runtimeModel?: string): numb
 }
 
 // Pricing per million tokens (matches official Google / Anthropic / OpenAI catalog rates)
-const costGeminiFlash = { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 };
-const costGemini31Pro = { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 };
-const costClaudeOpus46 = { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 };
-const costClaudeSonnet46 = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 };
-const costGptOss120b = { input: 0.15, output: 0.6, cacheRead: 0, cacheWrite: 0 };
+const costGeminiFlash: ModelCost = { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 };
+const costGemini31Pro: ModelCost = { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 };
+const costClaudeOpus46: ModelCost = { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 };
+const costClaudeSonnet46: ModelCost = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 };
+const costGptOss120b: ModelCost = { input: 0.15, output: 0.6, cacheRead: 0, cacheWrite: 0 };
+
+/**
+ * Rates keyed by the model the backend actually served (`modelVersion`), not by the
+ * id we requested.
+ *
+ * The requested id is only a routing label. Live traffic (2026-10) shows
+ * gemini-3.6-flash, gemini-3.7-flash, gemini-3.8-flash and gemini-pro-agent
+ * (a.k.a. "Gemini 3.1 Pro (High)") all answering as `gemini-3.8-flash-n`. Billing
+ * `model.cost` there charges Pro rates for Flash weights, so usage is priced from
+ * the served id instead.
+ *
+ * Only ids actually observed from the backend are listed. An id that is missing
+ * here keeps the requested model's rates and is reported by `/antigravity.doctor`,
+ * rather than silently guessing a cheaper number.
+ */
+const SERVED_MODEL_COST: Record<string, ModelCost> = {
+  // Gemini family. Every 3.6/3.7/3.8 tier and gemini-pro-agent currently report
+  // `gemini-3.8-flash-n`; the older ids below were returned by the same endpoint.
+  "gemini-3.8-flash-n": costGeminiFlash,
+  "gemini-3.8-flash": costGeminiFlash,
+  "gemini-3.7-flash": costGeminiFlash,
+  "gemini-3.6-flash": costGeminiFlash,
+  "gemini-3.5-flash": costGeminiFlash,
+  "gemini-3.5-flash-lite": costGeminiFlash,
+  "gemini-3-flash": costGeminiFlash,
+  "gemini-2.5-flash": costGeminiFlash,
+  "gemini-2.5-flash-lite": costGeminiFlash,
+  // Non-Gemini models echo their own id, so these only matter if Google ever
+  // consolidates them the way it did the Gemini tiers.
+  "claude-opus-4-6-thinking": costClaudeOpus46,
+  "claude-sonnet-4-6-thinking": costClaudeSonnet46,
+  "gpt-oss-120b-medium": costGptOss120b,
+};
+
+/** Prefix fallback for a served id we have no exact entry for, e.g. `gemini-4-pro-x`. */
+function servedCostByFamily(servedModel: string): ModelCost | undefined {
+  const id = servedModel.toLowerCase();
+  if (id.startsWith("claude-opus")) return costClaudeOpus46;
+  if (id.startsWith("claude-sonnet")) return costClaudeSonnet46;
+  if (id.startsWith("gpt-oss")) return costGptOss120b;
+  if (id.startsWith("gemini")) return costGeminiFlash;
+  return undefined;
+}
+
+export type ServedCostResolution = {
+  rates: ModelCost;
+  /** Served id the rates came from, or undefined when the requested id was used. */
+  pricedBy?: string;
+  /** True when the served id is unknown and we fell back to the requested rates. */
+  unknownServedModel: boolean;
+};
+
+/**
+ * Resolve pricing for one response. Falls back to the requested model's rates when
+ * the backend named a model we have no entry for, and flags it so the fallback is
+ * visible in diagnostics instead of silent.
+ */
+export function resolveServedModelCost(
+  servedModel: string | undefined,
+  requestedModel: Model<Api>,
+): ServedCostResolution {
+  const requested = requestedModel.cost;
+  if (!servedModel) return { rates: requested, unknownServedModel: false };
+
+  const exact = SERVED_MODEL_COST[servedModel];
+  if (exact) {
+    return {
+      rates: exact,
+      pricedBy: servedModel,
+      unknownServedModel: false,
+    };
+  }
+  const byFamily = servedCostByFamily(servedModel);
+  if (byFamily) return { rates: byFamily, pricedBy: `${servedModel}*`, unknownServedModel: false };
+
+  return { rates: requested, unknownServedModel: true };
+}
 
 // A null entry is intentionally hidden by Pi. Do not collapse levels that happen to
 // route to the same runtime ID: the UI must reflect the levels the backend advertises.

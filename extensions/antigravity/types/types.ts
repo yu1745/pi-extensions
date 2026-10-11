@@ -164,6 +164,14 @@ export type StreamCandidate = {
 export type StreamResponseData = {
   candidates?: StreamCandidate[];
   usageMetadata?: StreamUsageMetadata;
+  /**
+   * Concrete model the backend served. Present on every chunk of
+   * `v1internal:streamGenerateContent` (verified against the live endpoint) and
+   * NOT the same thing as the requested id: the `model` field is only a routing
+   * label, so several distinct requested ids can share one serving model.
+   */
+  modelVersion?: string;
+  responseId?: string;
 };
 
 export type StreamChunk = StreamResponseData & {

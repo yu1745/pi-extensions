@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { registerApiProvider } from "@earendil-works/pi-ai/compat";
+import { Text } from "@earendil-works/pi-tui";
 import { getApiKey, loginAntigravity, refreshAntigravityToken } from "./auth/index.js";
 import { DEFAULT_ENDPOINT, endpointCandidates } from "./client/index.js";
 import { getLastDiagnostics, runWithDiagnostics } from "./diagnostics/index.js";
@@ -12,6 +13,21 @@ import {
   resolveApiKeyFromContext,
 } from "./usage/index.js";
 import { prewarmConnection, redactSecrets } from "./utils/index.js";
+
+/**
+ * Session entry that renders the model's actual `modelVersion` under each
+ * Antigravity reply. A custom entry, so it is transcript-only: it never enters
+ * the next model request (unlike `pi.sendMessage`, whose content is converted
+ * into a user message).
+ */
+const MODEL_VERSION_ENTRY = "antigravity-model-version";
+
+type ModelVersionEntryData = {
+  /** Public model id that was requested, e.g. `gemini-3.1-pro`. */
+  requested: string;
+  /** `modelVersion` the backend reported for this response. */
+  served: string;
+};
 
 /**
  * Pi's interactive `notify` writes into the chat transcript. `console.log` in that
@@ -79,6 +95,36 @@ export default function (pi: ExtensionAPI): void {
     streamSimple: streamAntigravity,
   });
 
+  // ─── served-model line ─────────────────────────────────────────────────────
+  // The requested model id is a routing label, not a promise about what runs
+  // (verified live: gemini-3.6/3.7/3.8-flash and gemini-pro-agent all serve
+  // `gemini-3.8-flash-n`). Show the truth under every reply so the header in the
+  // transcript cannot silently disagree with what answered.
+  pi.registerEntryRenderer<ModelVersionEntryData>(
+    MODEL_VERSION_ENTRY,
+    (entry, _opts, theme) => {
+      const { requested, served } = entry.data ?? {};
+      if (!served) return undefined;
+      const mismatch = Boolean(requested) && requested !== served;
+      const servedText = theme.fg(mismatch ? "warning" : "dim", served);
+      const asked = mismatch ? theme.fg("muted", `   asked for ${requested}`) : "";
+      return new Text(`${theme.fg("dim", "modelVersion")}  ${servedText}${asked}`, 2, 0);
+    },
+  );
+
+  pi.on("message_end", async (event, _ctx) => {
+    const message = event.message;
+    if (message.role !== "assistant" || message.provider !== PROVIDER_ID) return;
+    // streamAntigravity copies `modelVersion` onto responseModel; without it the
+    // response never reached a chunk that carried one (error/aborted), so skip
+    // rather than print an empty line.
+    if (!message.responseModel) return;
+    pi.appendEntry<ModelVersionEntryData>(MODEL_VERSION_ENTRY, {
+      requested: message.model,
+      served: message.responseModel,
+    });
+  });
+
   pi.registerCommand("antigravity.usage", {
     description: "Show Antigravity shared quota pools (Gemini / Claude+GPT, 5h + weekly)",
     handler: async (_args, ctx) => {
@@ -101,6 +147,12 @@ export default function (pi: ExtensionAPI): void {
       const lines = [
         `provider=${PROVIDER_ID}`,
         `lastResolvedRuntimeModel=${d.resolvedRuntimeModel || "none"}`,
+        `lastServedModel=${d.servedModel || "none"}`,
+        `pricedByModel=${d.pricedByModel || (d.servedModel ? "requested-model-rates" : "none")}`,
+        ...(d.costBasisUnknown
+          ? ["costBasisUnknown=true (unrecognized served model; requested rates kept)"]
+          : []),
+        ...(d.responseId ? [`lastResponseId=${d.responseId}`] : []),
         `availableModels=${d.availableModels || "none"}`,
         `matchedModel=${d.matchedModelDebug || "none"}`,
         `lastEndpoint=${d.endpoint || "none"}`,
