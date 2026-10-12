@@ -7,7 +7,7 @@ import {
 	codeBuddyTtlFor,
 	parseCodeBuddyPackage,
 	parseCodeBuddyQuota,
-	parseCodeBuddyResetAt,
+	parseCodeBuddyExpiring,
 	renderCodeBuddy,
 } from "../extensions/quota-footer.ts";
 
@@ -44,7 +44,11 @@ const SUMMARY = {
 	},
 };
 
-/** Captured verbatim from POST /billing/meter/get-user-resource (first row only). */
+/**
+ * Captured verbatim from POST /billing/meter/get-user-resource (rows trimmed to
+ * the ones that matter). The real account has 11 rows: one subscription pool
+ * plus ten referral packs, each on its own clock.
+ */
 const DETAIL = {
 	code: 0,
 	data: {
@@ -56,12 +60,48 @@ const DETAIL = {
 					{
 						PackageCode: "TCACA_code_008_cfWoLwvjU4",
 						PackageName: "CodeBuddy个人体验版",
+						SubProductCode: "sp_tcaca_codebuddy_ide",
+						CapacitySize: 500,
+						CapacityRemain: 500,
 						CycleStartTime: "2026-10-01 00:00:00",
 						CycleEndTime: "2026-10-31 23:59:59",
 						ExpiredTime: "",
-						CapacitySize: 500,
-						CapacityRemain: 500,
-						CapacityUsed: 0,
+						Status: 0,
+					},
+					{
+						// Drained, and already past its expiry: must never be picked.
+						PackageCode: "TCACA_code_007_nzdH5h4Nl0",
+						PackageName: "CodeBuddy个人版国内运营裂变包",
+						SubProductCode: "sp_tcaca_codebuddyide_bonus_pack",
+						CapacitySize: 100,
+						CapacityRemain: 0,
+						CycleStartTime: "2026-09-15 00:58:38",
+						CycleEndTime: "2026-10-15 00:58:37",
+						ExpiredTime: "2026-10-09 14:27:03",
+						Status: 3,
+					},
+					{
+						// The soonest live pack — this is the one the footer warns about.
+						PackageCode: "TCACA_code_007_nzdH5h4Nl0",
+						PackageName: "CodeBuddy个人版国内运营裂变包",
+						SubProductCode: "sp_tcaca_codebuddyide_bonus_pack",
+						CapacitySize: 100,
+						CapacityRemain: 2,
+						CycleStartTime: "2026-09-16 09:25:38",
+						CycleEndTime: "2026-10-16 09:25:37",
+						ExpiredTime: "",
+						Status: 0,
+					},
+					{
+						PackageCode: "TCACA_code_007_nzdH5h4Nl0",
+						PackageName: "CodeBuddy个人版国内运营裂变包",
+						SubProductCode: "sp_tcaca_codebuddyide_bonus_pack",
+						CapacitySize: 100,
+						CapacityRemain: 100,
+						CycleStartTime: "2026-09-20 18:21:16",
+						CycleEndTime: "2026-10-20 18:21:15",
+						ExpiredTime: "",
+						Status: 0,
 					},
 				],
 			},
@@ -90,79 +130,50 @@ test("aggregates packages into a single credits balance", () => {
 	assert.equal(payload.leftPercent, 85);
 });
 
-test("reads cycle boundary from the detail endpoint as UTC+8", () => {
+test("reads cycle boundaries as UTC+8", () => {
 	// "2026-10-31 23:59:59" must be CST, not the process timezone. On a UTC+2
 	// box Date.parse() would silently land 6h earlier.
 	assert.equal(cbCycleMs("2026-10-31 23:59:59"), Date.parse("2026-10-31T23:59:59+08:00"));
 	assert.equal(cbCycleMs("2026-10-01 00:00:00"), Date.parse("2026-10-01T00:00:00+08:00"));
 	assert.equal(cbCycleMs("not-a-date"), undefined);
 	assert.equal(cbCycleMs(12345), undefined);
+});
 
+test("picks the soonest expiring pack, not the biggest one", () => {
 	const before = Date.parse("2026-10-12T00:00:00Z");
-	const payload = parseOk(SUMMARY, DETAIL, before);
-	assert.equal(payload.resetAt, Date.parse("2026-10-31T23:59:59+08:00"));
+	// The 2-credit pack expires in ~4 days; the 500-credit pool in ~19 days.
+	// Credits burn earliest-expiry-first, so the 2-credit one is the risk.
+	const expiring = parseCodeBuddyExpiring(DETAIL, before);
+	assert.deepEqual(expiring, { amount: 2, at: Date.parse("2026-10-16T09:25:37+08:00") });
 });
 
-test("prefers the subscription cycle over a nearer promo pack", () => {
-	const mixed = structuredClone(DETAIL);
-	// A referral pack that rolls over in two days — much nearer than the
-	// monthly subscription, but not the reset worth showing.
-	mixed.data.Response.Data.Accounts.push({
-		PackageCode: "TCACA_code_007_nzdH5h4Nl0",
-		PackageName: "CodeBuddy个人版国内运营裂变包",
-		SubProductCode: "sp_tcaca_codebuddyide_bonus_pack",
-		CycleStartTime: "2026-09-15 00:58:38",
-		CycleEndTime: "2026-10-15 00:58:37",
-		ExpiredTime: "2026-10-09 14:27:03",
-		CapacitySize: 100,
-		Status: 0,
-	});
+test("skips drained packs and ones already past expiry", () => {
 	const before = Date.parse("2026-10-12T00:00:00Z");
-	const at = (p: any) => p.resetAt;
-	assert.equal(at(parseOk(SUMMARY, mixed, before)), Date.parse("2026-10-31T23:59:59+08:00"));
-	// ...even though the promo pack boundary is the nearest one in the payload.
-	assert.ok(Date.parse("2026-10-15T00:58:37+08:00") < Date.parse("2026-10-31T23:59:59+08:00"));
+	// The 100-credit row with ExpiredTime 2026-10-09 is both drained and
+	// elapsed; neither state may surface as a warning.
+	assert.equal(parseCodeBuddyExpiring(DETAIL, before)?.amount, 2);
+	// Once every remaining boundary is in the past there is nothing to warn on.
+	assert.equal(parseCodeBuddyExpiring(DETAIL, Date.parse("2026-11-20T00:00:00Z")), undefined);
 });
 
-test("uses SubscriptionPackageCode when the summary names one", () => {
-	const detail = structuredClone(DETAIL);
-	detail.data.Response.Data.Accounts[0].PackageCode = "TCACA_code_007_promo";
-	const withCode = structuredClone(SUMMARY);
-	withCode.data.SubscriptionPackageCode = "TCACA_code_007_promo";
-	const before = Date.parse("2026-10-12T00:00:00Z");
-	// The exact-code match still resolves to that row's own cycle.
-	assert.equal(parseOk(withCode, detail, before).resetAt, Date.parse("2026-10-31T23:59:59+08:00"));
+test("ExpiredTime wins over CycleEndTime when both are present", () => {
+	const both = structuredClone(DETAIL);
+	const row = both.data.Response.Data.Accounts[2];
+	row.ExpiredTime = "2026-10-14 08:00:00"; // earlier than its CycleEndTime
+	assert.equal(parseCodeBuddyExpiring(both, Date.parse("2026-10-12T00:00:00Z"))?.at, Date.parse("2026-10-14T08:00:00+08:00"));
 });
 
-test("falls back to the largest active pool when nothing matches", () => {
-	const odd = structuredClone(DETAIL);
-	// No usable SubProductCode, and Status marks the big row as spent.
-	odd.data.Response.Data.Accounts[0].SubProductCode = "";
-	odd.data.Response.Data.Accounts[0].Status = 3;
-	odd.data.Response.Data.Accounts.push({
-		PackageCode: "X",
-		SubProductCode: "",
-		CycleEndTime: "2026-11-30 23:59:59",
-		ExpiredTime: "",
-		CapacitySize: 9000,
-		Status: 0,
-	});
-	const at = parseOk(SUMMARY, odd, Date.parse("2026-10-12T00:00:00Z")).resetAt;
-	assert.equal(at, Date.parse("2026-11-30T23:59:59+08:00"));
-});
-
-test("ignores cycle boundaries that already elapsed", () => {
-	const after = Date.parse("2026-11-05T00:00:00Z");
-	// Every remaining boundary is in the past, so no reset is reported.
-	assert.equal(parseCodeBuddyResetAt(DETAIL, undefined, after), undefined);
-	assert.equal(parseCodeBuddyResetAt(undefined), undefined);
-	assert.equal(parseCodeBuddyResetAt({ data: { Response: { Data: {} } } }), undefined);
+test("a malformed detail payload degrades to no expiry hint", () => {
+	assert.equal(parseCodeBuddyExpiring(undefined), undefined);
+	assert.equal(parseCodeBuddyExpiring({ data: { Response: { Data: {} } } }), undefined);
+	// A row with no parseable date must not become an "expires now" warning.
+	assert.equal(parseCodeBuddyExpiring({ data: { Response: { Data: { Accounts: [{ CapacityRemain: 5 }] } } } }), undefined);
 });
 
 test("summary alone still works when the detail call fails", () => {
 	const payload = parseOk(SUMMARY, null);
-	assert.equal(payload.resetAt, undefined);
-	assert.equal(payload.leftPercent, 85);
+	assert.equal(payload.expiring, undefined);
+	assert.equal(payload.remain, 1202.78000015);
 });
 
 test("frozen capacity is subtracted so the bar cannot oversell", () => {
@@ -209,11 +220,13 @@ test("parses a single package defensively", () => {
 	assert.equal(parseCodeBuddyPackage(null), null);
 });
 
-test("ttl tightens as the pool drains and is capped by the cycle", () => {
-	const healthy = codeBuddyTtlFor({ leftPercent: 90 });
-	const low = codeBuddyTtlFor({ leftPercent: 5 });
-	assert.ok(low < healthy, `expected ${low} < ${healthy}`);
-	assert.ok(healthy <= 600_000, "ttl must never exceed the cycle cap");
+test("ttl is flat because the API reports no percentage to tier on", () => {
+	// CodeBuddy has no percentage and no spend-rate signal, so the poll must
+	// not vary with the balance.
+	for (const leftPercent of [99, 50, 20, 1, 0]) {
+		assert.equal(codeBuddyTtlFor({ leftPercent }), 60_000);
+	}
+	assert.equal(codeBuddyTtlFor(undefined), 60_000);
 });
 
 test("base url honours the env override and trims slashes", () => {
@@ -223,27 +236,29 @@ test("base url honours the env override and trims slashes", () => {
 	delete process.env.CODEBUDDY_API_BASE;
 });
 
-test("renders plan, bar, absolute balance and reset", () => {
-	const payload = parseOk(SUMMARY, DETAIL);
+test("renders the absolute balance and the soonest expiry countdown", () => {
+	const payload = parseOk(SUMMARY, DETAIL, Date.parse("2026-10-12T00:00:00Z"));
 	const now = Date.parse("2026-10-12T00:00:00Z");
 	const realNow = Date.now;
 	Date.now = () => now;
 	try {
 		const out = renderCodeBuddy(payload, fakeCtx);
-		assert.match(out, /^CB 体验版 /);
-		assert.match(out, /85%/);
-		assert.match(out, /1203\/1408 cr/);
-		assert.match(out, /reset /);
-		// Free tier is worth flagging so a draining pool is not a surprise.
-		assert.match(out, /free/);
+		assert.equal(out, "CB 体验版 1203 cr | 2积分会在5d内过期");
+		// No percentage, no bar: the API has no percentage and neither do we.
+		assert.doesNotMatch(out, /%/);
+		assert.doesNotMatch(out, /[█░]/);
 	} finally {
 		Date.now = realNow;
 	}
 });
 
-test("drops the free marker once the account is paid", () => {
-	const paid = structuredClone(SUMMARY);
-	paid.data.IsPaidUser = true;
-	const out = renderCodeBuddy(parseOk(paid), fakeCtx);
-	assert.doesNotMatch(out, /free/);
+test("hides the expiry hint once nothing is left to expire", () => {
+	const drained = structuredClone(SUMMARY);
+	drained.data.Packages[0].CycleRemainCapacity = "0";
+	drained.data.Packages[0].CycleUsedCapacity = "908";
+	// Every detail row is drained, so there is no countdown worth showing.
+	for (const row of DETAIL.data.Response.Data.Accounts) row.CapacityRemain = 0;
+	const out = renderCodeBuddy(parseOk(drained, DETAIL, Date.parse("2026-10-12T00:00:00Z")), fakeCtx);
+	assert.equal(out, "CB 体验版 500 cr");
+	assert.doesNotMatch(out, /过期/);
 });

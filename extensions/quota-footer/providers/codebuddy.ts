@@ -12,7 +12,7 @@
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { FetchResult, ProviderConfig } from "../types.ts";
-import { asFiniteNumber, bar, clampPercent, colorFor, formatReset } from "../utils.ts";
+import { asFiniteNumber, clampPercent, colorFor } from "../utils.ts";
 
 const CB_DEFAULT_BASE = "https://copilot.tencent.com";
 const CB_TIMEOUT_MS = 8000;
@@ -20,14 +20,14 @@ const CB_TIMEOUT_MS = 8000;
 // flagging long before it is actually empty.
 const CB_LOW_THRESHOLD = 10;
 const CB_MID_THRESHOLD = 25;
-const CB_REFRESH_BANDS = [
-	{ minLeftPercent: 50, ttlMs: 300_000 },
-	{ minLeftPercent: 20, ttlMs: 120_000 },
-	{ minLeftPercent: 0, ttlMs: 60_000 },
-] as const;
-// A cycle boundary can also be crossed by wall-clock alone, so never cache
-// longer than this regardless of how healthy the balance looks.
-const CB_MAX_TTL_MS = 600_000;
+// The billing API reports an absolute credit balance and nothing else — no
+// percentage, no spend-rate signal, no window that resets on a known schedule.
+// There is therefore nothing to tier the poll on, so it runs on a flat
+// interval rather than the percentage bands the other providers use.
+//
+// 60s is also what keeps the "X积分会在Yd内过期" countdown honest: that expiry
+// moves as packs burn down, and it is the only time-sensitive number here.
+const CB_TTL_MS = 60_000;
 
 export interface CBPackage {
 	code: string;
@@ -36,6 +36,12 @@ export interface CBPackage {
 	remain: number;
 	used: number;
 	frozen: number;
+}
+
+/** The soonest-to-vanish slice of the balance, and when it disappears. */
+export interface CBExpiring {
+	amount: number;
+	at: number;
 }
 
 export interface CBPayload {
@@ -48,8 +54,8 @@ export interface CBPayload {
 	frozen: number;
 	leftPercent: number;
 	packages: CBPackage[];
-	/** End of the current billing cycle — the earliest one still ahead of us. */
-	resetAt?: number;
+	/** Only the nearest expiring pack — the others are noise in a footer. */
+	expiring?: CBExpiring;
 }
 
 export function codeBuddyBaseUrl(): string {
@@ -57,11 +63,8 @@ export function codeBuddyBaseUrl(): string {
 	return raw.replace(/\/+$/, "");
 }
 
-export function codeBuddyTtlFor(payload: unknown): number {
-	const left = (payload as CBPayload).leftPercent;
-	const band = CB_REFRESH_BANDS.find((b) => left >= b.minLeftPercent);
-	const ttl = band ? band.ttlMs : CB_REFRESH_BANDS[CB_REFRESH_BANDS.length - 1].ttlMs;
-	return Math.min(ttl, CB_MAX_TTL_MS);
+export function codeBuddyTtlFor(_payload: unknown): number {
+	return CB_TTL_MS;
 }
 
 // "2026-10-31 23:59:59" is Asia/Shanghai wall time with no offset attached.
@@ -96,55 +99,37 @@ export function parseCodeBuddyPackage(raw: any): CBPackage | null {
 	};
 }
 
-// Promotional / top-up packs carry their own sub-product code and roll over on
-// their own schedule. Their boundary is not the reset the footer should show.
-const CB_BONUS_PACK = /bonus|addon|pack|campaign|growth/i;
-
 /**
  * `detail` is the optional /billing/meter/get-user-resource response — a ~16KB
- * payload of per-package rows that contributes only the cycle boundary, so
- * every failure mode here is non-fatal.
+ * payload of per-package rows. The summary endpoint aggregates by package code
+ * and carries no dates, so the expiry countdown can only come from here; every
+ * failure mode is non-fatal.
  *
- * A free account has `SubscriptionPackageCode: ""`, and its balance is spread
- * over one subscription pool plus a pile of promo packs that each expire on
- * their own clock. Picking the *nearest* boundary (the obvious reading) then
- * reports a promo rollover instead of the monthly refill the user cares about,
- * so prefer the subscription pool explicitly.
+ * Credits burn earliest-expiry-first (per the product docs), so the row with the
+ * soonest boundary is the one worth warning about — it is the slice that will
+ * silently vanish if it is not spent in time. Every other pack is dropped.
+ *
+ * `ExpiredTime` is authoritative when set; otherwise the pack's billing cycle
+ * end is used, since base/bonus credits are issued per month and do not roll
+ * over. In practice ExpiredTime is usually empty and CycleEndTime is the real
+ * signal, but the former should win if it ever appears.
  */
-export function parseCodeBuddyResetAt(detail: any, subscriptionCode?: unknown, now = Date.now()): number | undefined {
+export function parseCodeBuddyExpiring(detail: any, now = Date.now()): CBExpiring | undefined {
 	const rows = detail?.data?.Response?.Data?.Accounts;
 	if (!Array.isArray(rows)) return undefined;
 
-	const code = typeof subscriptionCode === "string" ? subscriptionCode : "";
-	const cycleEnd = (row: any) => cbCycleMs(row?.CycleEndTime);
-	// Status 0 is active; spent/expired packs are history.
-	const active = rows.filter((r: any) => r?.Status === undefined || r.Status === 0);
+	let best: CBExpiring | undefined;
+	for (const row of rows) {
+		// Nothing to warn about in a pack that is already drained.
+		const remain = asFiniteNumber(row?.CapacityRemain) ?? 0;
+		if (remain <= 0) continue;
 
-	const pick = (pool: any[]): number | undefined => {
-		let best: number | undefined;
-		for (const row of pool) {
-			const at = cycleEnd(row);
-			if (at !== undefined && at > now && (best === undefined || at < best)) best = at;
-		}
-		return best;
-	};
+		const at = cbCycleMs(row?.ExpiredTime) ?? cbCycleMs(row?.CycleEndTime);
+		if (at === undefined || at <= now) continue;
 
-	// 1. Exact match on the package code the summary calls the subscription.
-	if (code) {
-		const exact = pick(active.filter((r: any) => r?.PackageCode === code));
-		if (exact !== undefined) return exact;
+		if (!best || at < best.at) best = { amount: remain, at };
 	}
-	// 2. The main pool: any active row that is not a promo pack.
-	const subscription = pick(active.filter((r: any) => typeof r?.SubProductCode !== "string" || !CB_BONUS_PACK.test(r.SubProductCode)));
-	if (subscription !== undefined) return subscription;
-	// 3. Largest active pool — a fallback for account shapes we have not seen.
-	const largest = [...active].sort((a: any, b: any) => (asFiniteNumber(b?.CapacitySize) ?? 0) - (asFiniteNumber(a?.CapacitySize) ?? 0))[0];
-	if (largest) {
-		const at = cycleEnd(largest);
-		if (at !== undefined && at > now) return at;
-	}
-	// 4. Anything still in the future beats showing no reset at all.
-	return pick(rows);
+	return best;
 }
 
 export function parseCodeBuddyQuota(summary: any, detail?: any, now = Date.now()): FetchResult {
@@ -189,7 +174,7 @@ export function parseCodeBuddyQuota(summary: any, detail?: any, now = Date.now()
 		typeof data.SubscriptionPackageName === "string" && data.SubscriptionPackageName.trim()
 			? data.SubscriptionPackageName.trim()
 			: undefined;
-	const resetAt = parseCodeBuddyResetAt(detail, data.SubscriptionPackageCode, now);
+	const expiring = parseCodeBuddyExpiring(detail, now);
 
 	return {
 		kind: "success",
@@ -204,7 +189,7 @@ export function parseCodeBuddyQuota(summary: any, detail?: any, now = Date.now()
 			frozen,
 			leftPercent,
 			packages,
-			...(resetAt !== undefined ? { resetAt } : {}),
+			...(expiring ? { expiring } : {}),
 		},
 	};
 }
@@ -250,8 +235,10 @@ export async function fetchCodeBuddyQuota(apiKey: string): Promise<FetchResult> 
 	return { kind: "unavailable", at: Date.now() };
 }
 
-// Credits are a pool, not a window: show the absolute balance too, otherwise a
-// 90% bar on a 12-credit account reads as "plenty left".
+// Credits are a pool, not a window: show the absolute balance, the way DS
+// shows an absolute ¥ balance rather than a percentage of some arbitrary cap.
+// There is no API-provided total worth bar-ing against, so the number stands
+// alone.
 function formatCredits(value: number): string {
 	if (value >= 10000) return `${(value / 1000).toFixed(1)}k`;
 	if (value >= 100) return String(Math.round(value));
@@ -259,25 +246,33 @@ function formatCredits(value: number): string {
 	return value.toFixed(value < 10 ? 1 : 0);
 }
 
+const CB_DAY_MS = 24 * 60 * 60 * 1000;
+// Past this the countdown stops being a prompt to spend and starts being noise.
+const CB_EXPIRY_HORIZON_DAYS = 45;
+
 export function renderCodeBuddy(payload: unknown, ctx: ExtensionContext): string {
 	const t = ctx.ui.theme;
 	const state = payload as CBPayload;
 	const color = colorFor(state.leftPercent, CB_LOW_THRESHOLD, CB_MID_THRESHOLD);
 
-	const label = t.fg("dim", "CB") + (state.plan ? t.fg("dim", ` ${state.plan}`) : "");
-	const barSeg = t.fg(color, `${bar(state.leftPercent, 10)} ${state.leftPercent}%`);
-	const amountSeg = t.fg(
-		color,
-		`${formatCredits(state.remain)}/${formatCredits(state.total)} ${state.unit === "credits" ? "cr" : state.unit}`,
-	);
+	const parts: string[] = [
+		t.fg("dim", "CB") +
+			(state.plan ? t.fg("dim", ` ${state.plan}`) : "") +
+			" " +
+			t.fg(color, `${formatCredits(state.remain)} ${state.unit === "credits" ? "cr" : state.unit}`),
+	];
 
-	const parts = [label, barSeg, amountSeg];
-	if (state.resetAt !== undefined) {
-		const reset = formatReset(state.resetAt - Date.now());
-		if (reset) parts.push(t.fg("dim", `reset ${reset}`));
+	// Only the soonest pack. Credits burn earliest-expiry-first, so this is the
+	// slice that is actually at risk — the rest would just crowd the footer.
+	if (state.expiring) {
+		const days = Math.ceil((state.expiring.at - Date.now()) / CB_DAY_MS);
+		if (days > 0 && days <= CB_EXPIRY_HORIZON_DAYS) {
+			// Tighten the colour as the date closes in, not as the pool drains:
+			// a 500-credit pack about to evaporate is the urgent case.
+			const urgency = days <= 3 ? "error" : days <= 7 ? "warning" : "dim";
+			parts.push(t.fg(urgency, `${formatCredits(state.expiring.amount)}积分会在${days}d内过期`));
+		}
 	}
-	// A free account that is about to expire is worth surfacing even mid-pool.
-	if (!state.paid && state.leftPercent > CB_MID_THRESHOLD) parts.push(t.fg("dim", "free"));
 
 	return parts.join(t.fg("dim", " | "));
 }
@@ -289,11 +284,4 @@ export const codeBuddyProviderConfig: ProviderConfig = {
 	fetch: fetchCodeBuddyQuota,
 	render: renderCodeBuddy,
 	ttlFor: codeBuddyTtlFor,
-	extractWeekQuota: (payload: unknown) => {
-		const state = payload as CBPayload;
-		// The billing cycle is monthly, not weekly — history keyed on the same
-		// reset boundary still charts the real spend-down, so reuse the hook.
-		if (state.resetAt === undefined) return null;
-		return { leftPercent: state.leftPercent, resetAt: state.resetAt };
-	},
 };

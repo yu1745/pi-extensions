@@ -26,7 +26,7 @@ export {
 	codeBuddyTtlFor,
 	parseCodeBuddyPackage,
 	parseCodeBuddyQuota,
-	parseCodeBuddyResetAt,
+	parseCodeBuddyExpiring,
 	fetchCodeBuddyQuota,
 	renderCodeBuddy,
 } from "./quota-footer/providers/codebuddy.ts";
