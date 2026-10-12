@@ -15,14 +15,9 @@ Qoder（阿里/通义千问）provider，出网请求对官方 CLI（`qoder`）�
 
 ## 使用
 
-pi 原生 `/login` → 选 `qoder` → 二级选择：
+pi 原生 `/login` → 选 `qoder` → 浏览器 OAuth 授权（淘宝/支付宝/阿里云账号，弹出 URL，授权后自动继续）。
 
-1. **浏览器 OAuth 授权**（淘宝/支付宝/阿里云账号，弹出 URL，授权后自动继续）
-2. **从官方 Qoder CLI 导入**（自动检测 `~/.qoder/.auth`，导入并激活已登录凭据）
-
-此外还提供快捷命令：
-- `/qoder-login`：直接发起登录
-- `/qoder-import`：直接从官方 CLI 导入凭证
+也可直接用快捷命令 `/qoder-login` 发起登录。
 
 之后在 `/models` 选 `qoder/qwen3.8-flash`（限时免费 0x 倍率）或 `qoder/qwen3.8-max`。退出用原生 `/logout`。
 

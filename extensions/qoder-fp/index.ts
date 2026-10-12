@@ -1091,58 +1091,8 @@ export default async function (pi: ExtensionAPI) {
     auth: {
       oauth: {
         name: "Qoder (Alibaba/Tongyi)",
-        loginLabel: "Sign in with Qoder (Browser OAuth or CLI Import)",
+        loginLabel: "Sign in with Qoder (Browser OAuth)",
         async login(interaction: any) {
-          // 统一入口：选 OAuth 浏览器授权，或从官方 CLI 本地凭证导入（对齐 codebuddy 模式）
-          let method = "oauth";
-          if (interaction?.prompt) {
-            method = await interaction.prompt({
-              type: "select",
-              message: "Qoder 登录方式",
-              options: [
-                { id: "oauth", label: "浏览器 OAuth 授权（淘宝/支付宝/阿里云账号）" },
-                { id: "import", label: "从官方 Qoder CLI 导入凭证（需已在终端登录）" },
-              ],
-            });
-          }
-
-          if (method === "import") {
-            const qoderDir = path.join(os.homedir(), ".qoder/.auth");
-            const userFile = path.join(qoderDir, "user");
-            const midFile = path.join(qoderDir, "machine_id");
-
-            if (!fs.existsSync(userFile) || !fs.existsSync(midFile)) {
-              throw new Error(
-                `未找到官方 Qoder CLI 凭证（${qoderDir}）。\n请先在终端安装并登录官方 CLI：qoder login，或改选「浏览器 OAuth 授权」。`
-              );
-            }
-
-            // 检查已存入或可用的凭据
-            const existing = loadAuth();
-            if (existing && existing.accessToken && existing.userId) {
-              // 验证已有凭据有效性
-              try {
-                const refreshed = await refreshAuth(existing);
-                interaction.notify?.({
-                  message: `已导入官方 Qoder CLI 凭证：${refreshed.username || refreshed.userId}${refreshed.email ? ` (${refreshed.email})` : ""}`,
-                });
-                return {
-                  type: "oauth" as const,
-                  access: refreshed.accessToken,
-                  refresh: refreshed.refreshToken,
-                  expires: refreshed.expiresAt,
-                  userId: refreshed.userId,
-                  username: refreshed.username,
-                  email: refreshed.email,
-                };
-              } catch {}
-            }
-
-            interaction.notify?.({
-              message: `检测到本地 Qoder CLI 已安装，正在启动快速授权绑定...`,
-            });
-          }
-
           const proxyUrl =
             process.env.QODER_PROXY ??
             process.env.HTTPS_PROXY ??
@@ -1358,50 +1308,12 @@ export default async function (pi: ExtensionAPI) {
       try {
         const interaction = {
           notify: (n: any) => ctx.ui.notify(typeof n === "string" ? n : n.message, "info"),
-          prompt: async (opt: any) => {
-            if (ctx.ui.select) {
-              return ctx.ui.select(opt.message, opt.options.map((o: any) => o.label));
-            }
-            return opt.options[0]?.id;
-          },
         };
         await (provider as any).auth!.oauth!.login(interaction);
         ctx.ui.notify(`Qoder 登录成功！可在 /models 中选择 qoder/qwen3.8-flash`, "success");
       } catch (err: any) {
         ctx.ui.notify(`Qoder 登录失败: ${err.message}`, "error");
       }
-    },
-  });
-
-  // ── /qoder-import：从官方 CLI 凭据自动导入（无浏览器场景）───────────────
-  pi.registerCommand("qoder-import", {
-    description: "Import credentials from official Qoder CLI",
-    handler: async (_args: string, ctx: any) => {
-      const qoderDir = path.join(os.homedir(), ".qoder/.auth");
-      const userFile = path.join(qoderDir, "user");
-      const midFile = path.join(qoderDir, "machine_id");
-
-      if (!fs.existsSync(userFile) || !fs.existsSync(midFile)) {
-        ctx.ui.notify(
-          `未找到官方 Qoder CLI 凭证（${qoderDir}）。\n请先在终端安装并登录官方 CLI：qoder login，或改选「浏览器 OAuth 授权」。`,
-          "error"
-        );
-        return;
-      }
-
-      const existing = loadAuth();
-      if (existing && existing.accessToken && existing.userId) {
-        try {
-          const refreshed = await refreshAuth(existing);
-          ctx.ui.notify(
-            `Qoder 凭证导入成功：${refreshed.username || refreshed.userId}${refreshed.email ? ` (${refreshed.email})` : ""}\n有效期至 ${new Date(refreshed.expiresAt).toLocaleString()}\n用 /models 选择 qoder/qwen3.8-flash`,
-            "success"
-          );
-          return;
-        } catch {}
-      }
-
-      ctx.ui.notify("已检测到官方 Qoder 安装，请通过 /qoder-login 完成快速绑定授权", "info");
     },
   });
 
