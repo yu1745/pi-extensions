@@ -345,7 +345,14 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	// Backwards-compatible aliases for the old per-provider commands.
-	for (const name of ["ds-balance", "glm-quota", "minimax-quota", "openai-codex-quota", "antigravity-quota"]) {
+	for (const name of [
+		"ds-balance",
+		"glm-quota",
+		"minimax-quota",
+		"openai-codex-quota",
+		"antigravity-quota",
+		"codebuddy-quota",
+	]) {
 		pi.registerCommand(name, {
 			description: `Force-refresh quota in the footer (alias of /quota)`,
 			handler: forceRefresh,

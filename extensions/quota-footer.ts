@@ -18,3 +18,15 @@ export {
 	fetchCommandCodeQuota,
 	renderCommandCode,
 } from "./quota-footer/providers/commandcode.ts";
+
+// Re-export CodeBuddy (积分) functions for tests/consumers
+export {
+	cbCycleMs,
+	codeBuddyBaseUrl,
+	codeBuddyTtlFor,
+	parseCodeBuddyPackage,
+	parseCodeBuddyQuota,
+	parseCodeBuddyResetAt,
+	fetchCodeBuddyQuota,
+	renderCodeBuddy,
+} from "./quota-footer/providers/codebuddy.ts";
