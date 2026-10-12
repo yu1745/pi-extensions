@@ -28,6 +28,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createJevClassifier } from "./shared/jev/runtime.ts";
+import { tiktokenModelToTokenizerJson } from "./shared/tiktoken-convert.ts";
 
 const STATUS_KEY = "tokenspeed";
 const HISTORY_LEN = 5; // how many past messages to keep for long-term average
@@ -57,8 +58,12 @@ const LN2 = Math.LN2;
 /**
  * Tokenizer registry: Only remote URLs, zero JSON bundled in code.
  * Uses hf-mirror.com for reliable high-speed downloads.
+ *
+ * `format: "tiktoken"` entries point at a tiktoken `*.model` vocab file and
+ * are converted to a tokenizer.json-shaped byte-level BPE on download (see
+ * shared/tiktoken-convert.ts) — Moonshot Kimi ships no HF tokenizer.json.
  */
-export const TOKENIZER_REGISTRY: Record<string, { url: string; fallbackUrl?: string }> = {
+export const TOKENIZER_REGISTRY: Record<string, { url: string; fallbackUrl?: string; format?: "tokenizers-json" | "tiktoken" }> = {
 	minimax: {
 		url: "https://hf-mirror.com/MiniMaxAI/MiniMax-Text-01-hf/resolve/main/tokenizer.json",
 		fallbackUrl: "https://huggingface.co/MiniMaxAI/MiniMax-Text-01-hf/resolve/main/tokenizer.json",
@@ -103,6 +108,11 @@ export const TOKENIZER_REGISTRY: Record<string, { url: string; fallbackUrl?: str
 		url: "https://hf-mirror.com/Xenova/grok-1-tokenizer/resolve/main/tokenizer.json",
 		fallbackUrl: "https://huggingface.co/Xenova/grok-1-tokenizer/resolve/main/tokenizer.json",
 	},
+	kimi: {
+		url: "https://hf-mirror.com/moonshotai/Kimi-K3/resolve/main/tiktoken.model",
+		fallbackUrl: "https://huggingface.co/moonshotai/Kimi-K3/resolve/main/tiktoken.model",
+		format: "tiktoken",
+	},
 	phi: {
 		url: "https://hf-mirror.com/microsoft/Phi-3-mini-4k-instruct/resolve/main/tokenizer.json",
 		fallbackUrl: "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct/resolve/main/tokenizer.json",
@@ -119,6 +129,10 @@ const JEV_CRITERIA: Record<string, string> = {
 	gemini: "Google Gemini / Gemma models",
 	llama: "Meta Llama models (e.g. Llama-3, Llama-3.1, Llama-3.3)",
 	mistral: "Mistral / Mixtral models",
+	grok: "xAI Grok models (e.g. Grok-1, Grok-2, Grok-3, Grok-4)",
+	phi: "Microsoft Phi models (e.g. Phi-3, Phi-4)",
+	yi: "01.AI Yi models (e.g. Yi-1.5, Yi-Large)",
+	kimi: "Moonshot AI Kimi models (e.g. Kimi-K2, Kimi-K2.5, Kimi-K3, moonshot-v1)",
 	other: "Other or unknown models",
 };
 
@@ -401,6 +415,7 @@ export function fastClassifyModel(modelId: string): string | null {
 	if (lower.includes("mistral") || lower.includes("mixtral") || lower.includes("codestral"))
 		return "mistral";
 	if (lower.includes("grok")) return "grok";
+	if (lower.includes("kimi") || lower.includes("moonshot")) return "kimi";
 	if (lower.includes("phi")) return "phi";
 	if (lower.includes("yi-") || lower.includes("01-ai")) return "yi";
 	return null;
@@ -525,7 +540,7 @@ class TokenizerManager {
 		if (!this.downloading.has(family)) {
 			this.downloading.add(family);
 			const entry = TOKENIZER_REGISTRY[family];
-			this.downloadFile(entry.url, entry.fallbackUrl, localPath)
+			this.downloadFile(entry.url, entry.fallbackUrl, entry.format ?? "tokenizers-json", localPath)
 				.then((json) => {
 					this.downloading.delete(family);
 					if (json) {
@@ -545,6 +560,7 @@ class TokenizerManager {
 	private async downloadFile(
 		url: string,
 		fallbackUrl: string | undefined,
+		format: "tokenizers-json" | "tiktoken",
 		destPath: string,
 	): Promise<object | null> {
 		const tryFetch = async (targetUrl: string) => {
@@ -567,10 +583,11 @@ class TokenizerManager {
 			}
 		}
 
+		const json = format === "tiktoken" ? tiktokenModelToTokenizerJson(text) : JSON.parse(text);
 		const tmpPath = `${destPath}.tmp-${Date.now()}`;
-		await fs.promises.writeFile(tmpPath, text, "utf8");
+		await fs.promises.writeFile(tmpPath, JSON.stringify(json), "utf8");
 		await fs.promises.rename(tmpPath, destPath);
-		return JSON.parse(text);
+		return json;
 	}
 }
 

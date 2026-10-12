@@ -172,13 +172,17 @@ test("fastClassifyModel correctly detects core model families", () => {
 	assert.equal(fastClassifyModel("antigravity/gemini-3.8-flash"), "gemma");
 	assert.equal(fastClassifyModel("openrouter/mistralai/mistral-large-2411"), "mistral");
 	assert.equal(fastClassifyModel("openrouter/01-ai/yi-1.5-34b-chat"), "yi");
+	assert.equal(fastClassifyModel("moonshotai/Kimi-K3"), "kimi");
+	assert.equal(fastClassifyModel("kimi-k2.5-instruct"), "kimi");
+	assert.equal(fastClassifyModel("moonshot-v1-128k"), "kimi");
 	assert.equal(fastClassifyModel("unknown-model-xyz"), null);
 });
 
 test("TOKENIZER_REGISTRY contains URLs for all major families", () => {
-	const families = ["minimax", "qwen", "deepseek", "glm", "openai", "llama", "claude", "mistral", "gemma", "yi", "grok", "phi"];
+	const families = ["minimax", "qwen", "deepseek", "glm", "openai", "llama", "claude", "mistral", "gemma", "yi", "grok", "phi", "kimi"];
 	for (const f of families) {
 		assert.ok(TOKENIZER_REGISTRY[f], `Missing family ${f} in TOKENIZER_REGISTRY`);
 		assert.ok(TOKENIZER_REGISTRY[f].url.startsWith("https://"), `Invalid URL for ${f}`);
 	}
+	assert.equal(TOKENIZER_REGISTRY.kimi.format, "tiktoken", "kimi must point at a tiktoken vocab");
 });
