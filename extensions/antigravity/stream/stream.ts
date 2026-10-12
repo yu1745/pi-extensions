@@ -1,10 +1,12 @@
 import {
   calculateCost,
   createAssistantMessageEventStream,
+  getCurrentSystemPrompt,
+  getCurrentTools,
   type Api,
   type AssistantMessage,
   type AssistantMessageEventStream,
-  type Context,
+  type TranscriptContext,
   type Model,
   type TextContent,
   type Tool,
@@ -176,7 +178,7 @@ function appendTurn(contents: GeminiContent[], role: GeminiRole, parts: GeminiPa
 /** Exported for unit tests. */
 export function convertMessages(
   model: Model<Api>,
-  context: Context,
+  context: TranscriptContext,
   runtimeModel: string,
 ): GeminiContent[] {
   const contents: GeminiContent[] = [];
@@ -308,13 +310,21 @@ function mapToolChoiceMode(
 /** Exported for unit tests. */
 export function buildRequest(
   model: Model<Api>,
-  context: Context,
+  context: TranscriptContext,
   projectId: string,
   options: AntigravityStreamOptions,
   runtimeModel: string,
   identity?: AntigravityRequestIdentity,
 ): AntigravityGenerateRequest {
   const contents = convertMessages(model, context, runtimeModel);
+  // Pi hands providers a normalized `TranscriptContext`: the prompt and the tool
+  // declarations live in the transcript's system messages, not in
+  // `context.systemPrompt` / `context.tools` (removed in pi 0.86.0). Reading the old
+  // fields silently produced `undefined`, so the request carried NO `tools` at all and
+  // Gemini hallucinated a call to an undeclared function — which the backend rejects as
+  // `MALFORMED_FUNCTION_CALL`. Keep these two lookups as the single source of truth.
+  const systemPrompt = getCurrentSystemPrompt(context.messages);
+  const declaredTools = getCurrentTools(context.messages);
   const request: GeminiRequestBody = {
     contents,
     // agy sends the persona as a single systemInstruction part.
@@ -325,7 +335,7 @@ export function buildRequest(
           text: [
             ANTIGRAVITY_SYSTEM_INSTRUCTION,
             ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION,
-            ...(context.systemPrompt ? [sanitizeText(context.systemPrompt)] : []),
+            ...(systemPrompt ? [sanitizeText(systemPrompt)] : []),
           ].join("\n\n"),
         },
       ],
@@ -349,7 +359,7 @@ export function buildRequest(
     isClaude ||
     model.id.startsWith("gpt-oss-") ||
     runtimeModel.startsWith("gpt-oss-");
-  const tools = convertTools(context.tools);
+  const tools = convertTools(declaredTools);
   if (tools) {
     request.tools = tools;
     // agy sends no toolConfig (the backend default applies). Keep an explicit NONE only
@@ -397,6 +407,11 @@ export function mapStopReason(reason: string | undefined): StopReason {
 export function friendlyAntigravityError(status: number | undefined, text: string): string {
   const msg = redactSecrets(jsonOrTextError(text)).slice(0, 500);
   if (status === 400) {
+    // Region gating, not a bad request from us. The stream loop already retried this a few
+    // times before giving up; re-login cannot change the egress region, so say what can.
+    if (/User location is not supported/i.test(msg)) {
+      return "Antigravity is unavailable from this network's region (the backend rejected the request by geo-location; the official agy CLI reports the same). Next: route this provider through a proxy/VPN in a supported region, or use a different model. Re-login does not affect this.";
+    }
     if (/API key not valid|API_KEY_INVALID/i.test(msg)) {
       return "Antigravity login expired or credentials are invalid. Next: run /login antigravity, then retry.";
     }
@@ -684,7 +699,7 @@ export async function streamResponse(
 
 export function streamAntigravity(
   model: Model<Api>,
-  context: Context,
+  context: TranscriptContext,
   options?: AntigravityStreamOptions,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();

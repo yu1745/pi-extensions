@@ -13,7 +13,9 @@ import { ANTIGRAVITY_MODELS, PROVIDER_ID as PROVIDER_ID2, PROVIDER_NAME } from "
 // extensions/antigravity/stream/stream.ts
 import {
   calculateCost,
-  createAssistantMessageEventStream
+  createAssistantMessageEventStream,
+  getCurrentSystemPrompt,
+  getCurrentTools
 } from "@earendil-works/pi-ai";
 import {
   antigravityHeaders,
@@ -412,6 +414,8 @@ function mapToolChoiceMode(toolChoice) {
 __name(mapToolChoiceMode, "mapToolChoiceMode");
 function buildRequest(model, context, projectId, options, runtimeModel, identity) {
   const contents = convertMessages(model, context, runtimeModel);
+  const systemPrompt = getCurrentSystemPrompt(context.messages);
+  const declaredTools = getCurrentTools(context.messages);
   const request = {
     contents,
     // agy sends the persona as a single systemInstruction part.
@@ -422,7 +426,7 @@ function buildRequest(model, context, projectId, options, runtimeModel, identity
           text: [
             ANTIGRAVITY_SYSTEM_INSTRUCTION,
             ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION,
-            ...context.systemPrompt ? [sanitizeText(context.systemPrompt)] : []
+            ...systemPrompt ? [sanitizeText(systemPrompt)] : []
           ].join("\n\n")
         }
       ]
@@ -441,7 +445,7 @@ function buildRequest(model, context, projectId, options, runtimeModel, identity
   if (Object.keys(generationConfig).length) request.generationConfig = generationConfig;
   const isClaude = model.id.startsWith("claude-") || runtimeModel.startsWith("claude-");
   const isNonGeminiModel = isClaude || model.id.startsWith("gpt-oss-") || runtimeModel.startsWith("gpt-oss-");
-  const tools = convertTools(context.tools);
+  const tools = convertTools(declaredTools);
   if (tools) {
     request.tools = tools;
     if (options.toolChoice === "none") {
@@ -482,6 +486,9 @@ __name(mapStopReason, "mapStopReason");
 function friendlyAntigravityError(status, text) {
   const msg = redactSecrets(jsonOrTextError(text)).slice(0, 500);
   if (status === 400) {
+    if (/User location is not supported/i.test(msg)) {
+      return "Antigravity is unavailable from this network's region (the backend rejected the request by geo-location; the official agy CLI reports the same). Next: route this provider through a proxy/VPN in a supported region, or use a different model. Re-login does not affect this.";
+    }
     if (/API key not valid|API_KEY_INVALID/i.test(msg)) {
       return "Antigravity login expired or credentials are invalid. Next: run /login antigravity, then retry.";
     }
