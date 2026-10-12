@@ -69,7 +69,8 @@
 			"extensions/deepseek-time-pricing.ts",
 			"extensions/codex-cost.ts",
 			"extensions/chinese-bang-bash.ts",
-			"extensions/smart-ctrl-c.ts"
+			"extensions/smart-ctrl-c.ts",
+			"extensions/served-model.ts"
 		]
 	},
 	"keywords": [

@@ -11,6 +11,7 @@ pi install git:github.com/yu1745/pi-extensions
 | Extension | Path | What it does |
 |---|---|---|
 | `antigravity` | `extensions/antigravity/` | Antigravity provider (`/login antigravity`) with OAuth login + automatic token refresh, plus `/antigravity.usage`, `/antigravity.models`, `/antigravity.doctor` |
+| `served_model` | `extensions/served-model.ts` | Captures the backend-served model (`response.model`) for `openai-responses` / `openai-codex-responses` / `azure-openai-responses` via a `registerApiProvider` override, stamps it onto `AssistantMessage.responseModel`, and shows a warning line only on genuine substitution (dated snapshots / effort suffixes are ignored) |
 | `qoder` | `extensions/qoder-fp/` | Qoder provider with full CLI fingerprint simulation (24 ordered Cosy headers, RSA-1024 + AES-128-CBC signed `Authorization`, custom Base64 body alphabet); `/login qoder` via standard device flow, or `/qoder-import` |
 | `web_reader` | `extensions/web-reader/` | Anti-WAF web reader with Playwright + stealth + ARIA extraction + Jev semantic load verification |
 | `web_search` | `extensions/web-search/` | Web search tool with five switchable backends (Google Antigravity Grounding, OpenAI Codex Responses, DeepSeek, MiniMax Coding Plan, Z.AI Web Search Prime), selected via `/websearch.backend`; one backend at a time, reloaded on `/reload`. Cross-domain benchmark of all five (32 cases × 8 domains, 160 live calls) in [docs/web-search-backend-benchmark.md](docs/web-search-backend-benchmark.md) |
