@@ -32,6 +32,12 @@ import { gzipSync } from "node:zlib";
 import { randomBytes } from "node:crypto";
 import { createProvider } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  getCodebuddyFingerprint,
+  isFingerprintEnvForced,
+  setCodebuddyFingerprint,
+  type CodebuddyFingerprint,
+} from "./settings.ts";
 
 // ── 常量（对齐抓包） ─────────────────────────────────────────────────────────
 
@@ -392,15 +398,68 @@ type Model2 = {
   compat: Record<string, unknown>;
 };
 
-// ═══ 工具对齐（官方 22 工具首发，第二轮起换 pi 真实工具）═══
-// 思路：chat 第 1 轮 body.tools 替换为官方 CLI 抓包的 22 个工具定义（指纹对齐）；
-// 模型可能按官方 schema 发起 tool_call（如 "Read"/"Bash" 大写名），pi 找不到该工具
-// 会注入错误消息 → 第 2 轮起发 pi 真实工具定义（read/bash/edit/write），模型自适应。
-let chatRound = 0;
+// ═══ 首轮伪装（可开关；默认关闭）═══
+// `full` 档：chat 第 1 轮 body.tools 替换为官方 CLI 抓包的 22 个工具定义、system
+// 替换为官方系统提示词（完整指纹对齐）；模型可能按官方 schema 发起 tool_call（如
+// "Read"/"Bash" 大写名），pi 找不到该工具会注入错误消息 → 第 2 轮起发 pi 真实工具
+// 定义（read/bash/edit/write），模型自适应。
+// `off` 档（默认）：完全不替换 —— 模型只看到 pi 的一份提示词与一份工具，不存在
+// 「首轮官方、次轮 pi」的双份历史。
 let officialTools: any[] = [];
 try { officialTools = JSON.parse(fs.readFileSync(path.join(__dirname, "official-tools.json"), "utf8")); } catch {}
 let officialSystemTpl = "";
 try { officialSystemTpl = JSON.parse(fs.readFileSync(path.join(__dirname, "official-system.json"), "utf8")).system; } catch {}
+
+/** 本会话（本 agent loop 生命周期）内已发出的 chat 请求数，用于判定"首轮"。
+ *  不能只靠模块级变量：扩展工厂在 /new、/clear、/reload 后会重新执行，但同一实例
+ *  也可能跨多轮对话存活，因此 session_start 时显式归零。 */
+let chatRound = 0;
+
+/** 首轮伪装是否可用：full 档且官方工具定义与系统提示词模板都已加载。
+ *  两者缺一就不伪装，避免出现"官方提示词 + pi 工具"这种半吊子组合。 */
+function fingerprintEnabled(): boolean {
+  return getCodebuddyFingerprint() === "full" && officialTools.length > 0 && officialSystemTpl.length > 0;
+}
+
+/** 归零请求计数（session_start / 切换伪装级别时调用）。 */
+export function resetChatRound(): void {
+  chatRound = 0;
+}
+
+/** 为一次即将发出的 chat 请求推进计数，并返回本轮是否要伪装。 */
+export function beginChatRound(): boolean {
+  chatRound += 1;
+  return fingerprintEnabled() && chatRound === 1;
+}
+
+/**
+ * 按官方抓包基线的 JSON 字段顺序重建 chat body。
+ * `disguise` 为真时：tools + system 提示词都换成官方 CLI 那一份（最高伪装级别）；
+ * 为假时（默认 off 档）：tools / messages 原样透传 —— 模型只看到一份 pi 提示词与一份工具。
+ * 导出供单元测试直接验证字面形状。
+ */
+export function shapeChatBody(p: any, model: any, disguise: boolean): any {
+  const tools = disguise && officialTools.length ? officialTools : p.tools;
+  let messages = p.messages;
+  if (disguise) {
+    const offSys = buildOfficialSystem(p.model);
+    if (offSys && messages?.length && (messages[0].role === "system" || messages[0].role === "developer")) {
+      messages = messages.map((m: any, i: number) => (i === 0 ? { ...m, content: offSys } : m));
+    }
+  }
+  return {
+    model: stripRateId(p.model), // id 里的倍率后缀不出网
+    messages,
+    tools,
+    temperature: p.temperature ?? 1,
+    max_tokens: model.maxTokens, // 官方 CLI 固定发模型 max_tokens，不随上下文余量缩水
+    stream: p.stream,
+    stream_options: p.stream_options ?? { include_usage: true },
+    reasoning_effort: p.reasoning_effort ?? "high", // 官方 config 默认档（deepseek/hy4 均为 high）
+    verbosity: p.verbosity ?? "high",
+    reasoning_summary: p.reasoning_summary ?? "auto",
+  };
+}
 
 /** 用真实环境填充官方 <env> 块。git 状态恒为 No —— 永不泄漏 git 信息。 */
 function buildOfficialSystem(modelId: string): string {
@@ -1003,33 +1062,14 @@ export default async function (pi: ExtensionAPI) {
         let p = params;
         if (prev) { const r = await prev(params, model); if (r !== undefined) p = r; }
         if (p?.model !== model.id) return p; // 非 chat 场景不动
-        chatRound += 1; // 计数放这里：onPayload 先于 fetch 执行
-        // 首轮：tools + system 提示词都换成官方 CLI 的（完整指纹对齐）；
-        // 第 2 轮起发 pi 真实工具与提示词（历史里已有否定信息，模型自适应）
-        const first = chatRound === 1;
-        const tools = first && officialTools.length ? officialTools : p.tools;
-        let messages = p.messages;
-        if (first) {
-          const offSys = buildOfficialSystem(p.model);
-          if (offSys && messages?.length && (messages[0].role === "system" || messages[0].role === "developer")) {
-            messages = messages.map((m: any, i: number) => (i === 0 ? { ...m, content: offSys } : m));
-          }
-        }
-        const out = {
-          model: stripRateId(p.model), // id 里的倍率后缀不出网
-          messages,
-          tools,
-          temperature: p.temperature ?? 1,
-          max_tokens: model.maxTokens, // 官方 CLI 固定发模型 max_tokens，不随上下文余量缩水
-          stream: p.stream,
-          stream_options: p.stream_options ?? { include_usage: true },
-          reasoning_effort: p.reasoning_effort ?? "high", // 官方 config 默认档（deepseek/hy4 均为 high）
-          verbosity: p.verbosity ?? "high",
-          reasoning_summary: p.reasoning_summary ?? "auto",
-        };
+        // 计数推进 + 是否伪装本轮（full 档首轮）：tools + system 提示词都换成官方
+        // CLI 的（完整指纹对齐），第 2 轮起发 pi 真实工具与提示词。
+        // off 档（默认）：一律发 pi 原样的提示词与工具，不做任何替换。
+        const disguise = beginChatRound();
+        const out = shapeChatBody(p, model, disguise);
         if (process.env.CODEBUDDY_DEBUG_BODY) {
           try { require("node:fs").appendFileSync(process.env.CODEBUDDY_DEBUG_BODY,
-            JSON.stringify({ round: chatRound, model: out.model, effort: out.reasoning_effort, max_tokens: out.max_tokens }) + "\n"); } catch {}
+            JSON.stringify({ round: chatRound, disguise, model: out.model, effort: out.reasoning_effort, max_tokens: out.max_tokens }) + "\n"); } catch {}
         }
         return out;
       },
@@ -1222,6 +1262,72 @@ export default async function (pi: ExtensionAPI) {
 
   pi.registerProvider(provider as any);
 
+  // ── 伪装开关：footer 状态条 + /codebuddy-fp 命令 ────────────────────────
+  const STATUS_KEY = "codebuddy-fp";
+
+  /** 只在 codebuddy 模型处于活动状态时显示伪装档位。 */
+  function renderFingerprintStatus(ctx: any): void {
+    if (!ctx.hasUI) return;
+    if (ctx.model?.provider !== "codebuddy") { ctx.ui.setStatus(STATUS_KEY, undefined); return; }
+    const mode = getCodebuddyFingerprint();
+    const forced = isFingerprintEnvForced() ? " (env)" : "";
+    const color = mode === "full" ? "warning" : "dim";
+    ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg(color, `CB fp: ${mode}${forced}`));
+  }
+
+  // ── /codebuddy-fp：切换首轮伪装级别（持久化到 settings.json）──────────
+  pi.registerCommand("codebuddy-fp", {
+    description: "切换 CodeBuddy 首轮伪装级别（on = 最高伪装，off = 不伪装；无参数查看当前状态）",
+    getArgumentCompletions: (prefix: string) => {
+      const items = [
+        { value: "on", label: "on —— 首轮完整官方指纹（官方提示词 + 官方工具）" },
+        { value: "off", label: "off —— 完全不伪装（只发一份 pi 提示词与工具）" },
+      ].filter((i) => i.value.startsWith(prefix));
+      return items.length > 0 ? items : null;
+    },
+    handler: async (args: string, ctx: any) => {
+      const arg = args.trim().toLowerCase();
+      const current = getCodebuddyFingerprint();
+      const describe = (m: CodebuddyFingerprint) =>
+        m === "full"
+          ? "full —— 首轮 system/tools 换成官方 CLI 抓包基线，首条消息与官方完全一致（首轮多烧约 25K input tokens）"
+          : "off —— 不替换任何提示词与工具，只发一份 pi 提示词与一份工具";
+
+      if (!arg || arg === "status") {
+        const forced = isFingerprintEnvForced()
+          ? `\n⚠ CODEBUDDY_FINGERPRINT 环境变量优先于设置文件，命令改动对外网无效。`
+          : "";
+        ctx.ui.notify(`CodeBuddy 伪装级别：${describe(current)}${forced}`, "info");
+        renderFingerprintStatus(ctx);
+        return;
+      }
+      if (arg !== "on" && arg !== "off") {
+        ctx.ui.notify("用法：/codebuddy-fp [on|off]（无参数查看当前状态）", "error");
+        return;
+      }
+
+      const mode: CodebuddyFingerprint = arg === "on" ? "full" : "off";
+      if (mode === current) {
+        ctx.ui.notify(`CodeBuddy 伪装级别已是 ${mode}，未改动`, "info");
+        renderFingerprintStatus(ctx);
+        return;
+      }
+      try {
+        setCodebuddyFingerprint(mode);
+      } catch (e: any) {
+        ctx.ui.notify(`写入 settings.json 失败：${e?.message ?? e}`, "error");
+        return;
+      }
+      // 切换后本轮计数重置：下次请求就是新配置下的"首轮"
+      resetChatRound();
+      renderFingerprintStatus(ctx);
+      ctx.ui.notify(
+        `CodeBuddy 伪装级别已切换为 ${mode}（已持久化，立即生效）\n${describe(mode)}`,
+        mode === "full" ? "warning" : "info",
+      );
+    },
+  });
+
   // ── /codebuddy-import：从官方 CLI 本地明文凭证自动导入（无浏览器场景）═══
   // CLI 存储路径：~/.local/share/CodeBuddyExtension/Data/Public/auth/<authId>.info
   // authId 来自官方包 product.json 的 authentication.id（Tencent-Cloud.coding-copilot）
@@ -1301,9 +1407,20 @@ export default async function (pi: ExtensionAPI) {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    // 新会话 / 重载 / 恢复：请求计数归零，"首轮"重新从本会话第一轮算起
+    resetChatRound();
+    renderFingerprintStatus(ctx);
     const a = loadAuth();
     if (!a) {
       ctx.ui.notify("CodeBuddy 未登录，/login 选择 codebuddy 后用 /models 选 codebuddy/*", "info");
     }
+  });
+
+  pi.on("model_select", async (_event, ctx) => {
+    renderFingerprintStatus(ctx);
+  });
+
+  pi.on("session_shutdown", async (_event, ctx) => {
+    if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
   });
 }

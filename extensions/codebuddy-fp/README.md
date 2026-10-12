@@ -4,12 +4,30 @@ CodeBuddy（腾讯）provider，出网请求对官方 CLI（`@tencent-ai/codebud
 
 ## 特性
 
-- **逐字节同形的首轮请求**：39 个头（顺序+大小写）、body 字段序、官方系统提示词（15.7K 字符模板化，env 块真值填充）、官方 22 个工具定义——均来自真实抓包基线
-- **第 2 轮起切换 pi 真实提示词/工具**（`read/bash/edit/write`），落在官方 `ToolSearch`/`DeferExecuteTool` 背书的"动态工具"合法空间
+- **伪装级别可开关**（`/codebuddy-fp`，默认 `off`）：
+  - `on`（`full`）——**逐字节同形的首轮请求**：39 个头（顺序+大小写）、body 字段序、官方系统提示词（15.7K 字符模板化，env 块真值填充）、官方 22 个工具定义——均来自真实抓包基线
+  - `off`（默认）——**完全不伪装**：不做任何提示词/工具替换，模型只会看到 pi 的一份提示词与一份工具，也不存在「首轮官方、次轮 pi」的双份历史
 - **完整出网序列**：`config → accounts → chat → report → traces`，全部走 `node:https` 原始请求（保序头、HTTP/1.1、可选 CONNECT 代理）
 - **遥测对齐**：report 三类事件 + 工具轮五类事件（`chat_message_response/status`、`chat_tool_action`）、OTLP traces（含官方 SDK bug 字段照抄）、真实 machineId（`/etc/machine-id`）
 - **隐私红线**：`vcsRepo` 等字段恒空、config 永不带 `repos[]`——**git remote 绝不上报**；工作目录等环境信息为真值
 - **token 管理**：pi 原生 `/login` OAuth 流程（provider `oauth` 接口：`login`/`refresh`/`toAuth`，pi 到期自动刷新）、便捷命令 `/codebuddy-login`、官方 CLI 明文凭证导入 `/codebuddy-import`、请求内 401 兜底重试 + 并发去重
+
+## 伪装级别
+
+默认 **`off`（不伪装）**。开启后是最高伪装级别，代价是首轮多烧约 25K input tokens，
+且带工具任务会多 1~2 轮（首轮官方工具被否定 → 模型自适应 pi 工具）。
+
+```
+/codebuddy-fp          # 查看当前级别
+/codebuddy-fp on       # 首轮完全对齐官方 CLI（full）
+/codebuddy-fp off      # 完全不伪装
+```
+
+- 级别**持久化**在 `<agent-dir>/settings.json` 的 `codebuddyFingerprint` 键（`"full"` / `"off"`），
+  与其他插件设置共存，写盘为临时文件 + `rename` 原子操作；切换后立即生效，无需重启。
+- 环境变量 `CODEBUDDY_FINGERPRINT`（`full` / `on` / `off`）优先于设置文件；此时命令改动对外网无效，
+  footer 会标注 `(env)`。
+- 当前模型属于 `codebuddy` provider 时，footer 显示 `CB fp: full|off`。
 
 ## 使用
 
@@ -27,6 +45,7 @@ pi 原生 `/login` → 选 `codebuddy` → 二级选择：
 ## 文件
 
 - `index.ts` — 扩展本体
+- `settings.ts` — 伪装级别的持久化读写（`<agent-dir>/settings.json`）
 - `official-tools.json` — 官方 CLI 2.151.0 的 22 个工具定义（抓包提取）
 - `official-system.json` — 官方系统提示词模板（`{{ENV}}`/`{{MODEL_NAME}}`/`{{MODEL_ID}}` 占位符）
 - 凭证存 **pi 原生库** `~/.pi/agent/auth.json`（`codebuddy` 条目，oauth 形状 + `userId`/`domain`/`nickname` 业务字段）——与 `/login`、自动刷新等原生流程同一存储，无扩展私有凭证文件
@@ -36,6 +55,8 @@ pi 原生 `/login` → 选 `codebuddy` → 二级选择：
 | 变量 | 说明 |
 |---|---|
 | `CODEBUDDY_PROXY` / `HTTPS_PROXY` | 可选出网代理（CONNECT 隧道，保持头序与 HTTP/1.1） |
+| `CODEBUDDY_FINGERPRINT` | 覆盖伪装级别（`full`/`on`/`off`），优先于 settings.json |
+| `CODEBUDDY_DEBUG_BODY` | 调试：把每轮出网 body 摘要追加到指定文件 |
 
 ## 积分换算（未经求证，仅供参考）
 
@@ -69,6 +90,7 @@ pi 原生 `/login` → 选 `codebuddy` → 二级选择：
 
 ## 已知设计取舍
 
-- 带工具任务多 1~2 轮（首轮官方工具被否定 → 模型自适应 pi 工具）
-- 首轮多烧约 25K input tokens（官方提示词+工具定义的价格，即"长得像官方"的成本）
+- 开启伪装（`full`）后，带工具任务多 1~2 轮（首轮官方工具被否定 → 模型自适应 pi 工具）
+- 开启伪装（`full`）后，首轮多烧约 25K input tokens（官方提示词+工具定义的价格，即"长得像官方"的成本）
+- 关闭伪装（`off`，默认）时，仅请求头/body 字段序/伴随遥测保持官方形状，提示词与工具是 pi 自己的
 - refresh 时点、连接复用等连接层细节与官方有细微差异
