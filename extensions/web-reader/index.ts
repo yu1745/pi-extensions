@@ -540,11 +540,36 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal, jevService?: JevC
   let status: number | null = null;
   let cfMitigated = false;
   try {
+    // Navigate with waitUntil "commit", NOT domcontentloaded.
+    //
+    // `domcontentloaded` was the default and it is not a completion signal we can rely on:
+    // a site that keeps long-lived subresources open (openai.com: ~100 `_next/static` chunks
+    // that never finish) never fires DCL at all in some runs, so goto burned the whole 45s
+    // timeout and the read returned "incomplete". Worse, it was flaky rather than slow —
+    // measured on openai.com, the SAME config timed out 2/6 runs and returned in ~2.3s on the
+    // other 4. Reproduced independent of the plugin: a bare Playwright goto behaved identically,
+    // so the browser is not the variable.
+    //
+    // "commit" returns as soon as the navigation response is received, which is the only thing
+    // goto can guarantee here; the real readiness signal is `waitForReadableContent` below,
+    // which short-circuits as soon as substantive content is present. `load`/`networkidle`
+    // stay bounded so a stalled page costs seconds, not the whole budget.
+    const navTimeout = Math.min(timeout, 20000);
     let resp: { status(): number; headers?(): Record<string, string> } | null = null;
     try {
-      resp = await page.goto(p.url, { waitUntil: p.waitUntil, timeout });
+      resp = await page.goto(p.url, { waitUntil: "commit", timeout: navTimeout });
     } catch (e) {
       log("goto threw (continuing):", (e as Error).message);
+    }
+    if (!resp) {
+      // goto can leave the page without a document (e.g. a navigation that never committed).
+      // Do not silently report an empty read; a bounded second attempt at least confirms the
+      // URL is unreachable within a deterministic budget.
+      try {
+        resp = await page.goto(p.url, { waitUntil: "commit", timeout: Math.min(navTimeout, 10000) });
+      } catch (e) {
+        log("goto retry threw:", (e as Error).message);
+      }
     }
     if (resp) {
       status = resp.status();
@@ -556,11 +581,15 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal, jevService?: JevC
       }
     }
 
-    // 1. Wait for page load state (domcontentloaded is already fulfilled, wait briefly for load/settle)
+    // 1. Bounded settle wait. The DOM is usually already interactive after commit; these are
+    // ceilings for the slow case, and their expiry is expected, not an error.
     if (p.waitUntil === "networkidle") {
       await page.waitForLoadState("networkidle", { timeout: Math.min(timeout, 8000) }).catch(() => {});
     } else {
-      await page.waitForLoadState("load", { timeout: Math.min(timeout, 3000) }).catch(() => {});
+      // A short ceiling on purpose: when `load` never fires (openai.com), this used to burn 5s
+      // on every read. `waitForReadableContent` polls the DOM and returns as soon as real
+      // content exists, so it — not this — is the readiness gate.
+      await page.waitForLoadState("load", { timeout: Math.min(timeout, 2500) }).catch(() => {});
     }
     const afterLoadStateMs = mark();
 
@@ -755,7 +784,21 @@ async function fetchPage(p: FetchParams, signal?: AbortSignal, jevService?: JevC
       }
     }
     if (!aria || !aria.trim()) aria = fullAria;
-    if (!aria || !aria.trim()) aria = await page.ariaSnapshot({ timeout: Math.min(timeout, 10000) });
+    if (!aria || !aria.trim()) {
+      // Last resort, and still a hard failure on purpose: an extraction failure must surface as
+      // an error rather than being papered over with a lower-fidelity fallback (that contract is
+      // pinned by tests/web-reader-jev-usage.test.ts). Only the message is improved here, because
+      // a bare "ariaSnapshot: Timeout 10000ms exceeded" gives no hint that the DOM never settled.
+      try {
+        aria = await page.ariaSnapshot({ timeout: Math.min(timeout, 10000) });
+      } catch (e) {
+        throw new Error(
+          `content extraction failed: ${(e as Error).message} ` +
+            `(the DOM did not produce an accessibility snapshot; the page may still be loading ` +
+            `subresources that never settle — see URL=${p.url})`,
+        );
+      }
+    }
 
     let html: string | undefined;
     if (p.format === "html") {
