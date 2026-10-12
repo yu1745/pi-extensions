@@ -12,6 +12,12 @@ import {
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const FIVE_HOUR_MS = 5 * 60 * 60 * 1000;
 
+// Pin the clock for the whole file: the captured subscription period is
+// 2026-09-10 → 2026-10-10, and hardcoded resetAt timestamps sit mid-window
+// relative to this instant. Rendering reads Date.now(), so without this the
+// countdown/reset assertions would rot as real time moves on.
+const FIXED_NOW = Date.parse("2026-09-20T12:00:00Z");
+
 /** Captured verbatim from GET /alpha/billing/credits on a real `individual-go` account. */
 const CREDITS_BODY = {
 	credits: {
@@ -24,8 +30,9 @@ const CREDITS_BODY = {
 	windowLimits: {
 		limited: true,
 		exceeded: null,
-		fiveHour: { used: 0.011917554, cap: 3, exceeded: false, resetAt: 1789059546961 },
-		weekly: { used: 0.011917554, cap: 6, exceeded: false, resetAt: 1789646346961 },
+		// ~1.6h into the 5h window and ~5.3d before the weekly reset at FIXED_NOW.
+		fiveHour: { used: 0.011917554, cap: 3, exceeded: false, resetAt: FIXED_NOW + 1_200_000 },
+		weekly: { used: 0.011917554, cap: 6, exceeded: false, resetAt: FIXED_NOW + 456_000_000 },
 	},
 };
 
@@ -54,7 +61,7 @@ test("parses live credits + window limits + plan", () => {
 
 	assert.equal(payload.fiveHour.cap, 3);
 	assert.equal(payload.fiveHour.cycleMs, FIVE_HOUR_MS);
-	assert.equal(payload.fiveHour.resetAt, 1789059546961);
+	assert.equal(payload.fiveHour.resetAt, CREDITS_BODY.windowLimits.fiveHour.resetAt);
 	assert.equal(payload.fiveHour.exceeded, false);
 	// 0.0119 / 3 = 0.4% used → rounds to 0% used, 100% left.
 	assert.equal(payload.fiveHour.usedPercent, 0);
@@ -91,8 +98,7 @@ test("sums monthly, purchased and free credits", () => {
 });
 
 test("renders how long the expiring monthly credits are still spendable", (t) => {
-	// Time is pinned mid-period so the real countdown is exercised end to end.
-	t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-09-20T12:00:00Z") });
+	t.mock.timers.enable({ apis: ["Date"], now: FIXED_NOW });
 	const payload = parseOk(CREDITS_BODY);
 	assert.equal(payload.expiresAt, Date.parse("2026-10-10T11:56:39.000Z"));
 	assert.equal(payload.monthlyRemaining, 9.988082446);
@@ -113,7 +119,7 @@ test("renders how long the expiring monthly credits are still spendable", (t) =>
 });
 
 test("hides the expiry when nothing monthly is left to expire", (t) => {
-	t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-09-20T12:00:00Z") });
+	t.mock.timers.enable({ apis: ["Date"], now: FIXED_NOW });
 	// Purchased credits never expire, so a $0 monthly balance shows no countdown.
 	const purchasedOnly = parseOk({
 		credits: { monthlyCredits: 0, purchasedCredits: 5, freeCredits: 0 },
@@ -141,10 +147,11 @@ test("treats a zero cap as 'no such window' and keeps the rest", () => {
 	assert.equal(payload.weekly.leftPercent, 50);
 });
 
-test("reports exceeded windows in the rendered widget", () => {
+test("reports exceeded windows in the rendered widget", (t) => {
+	t.mock.timers.enable({ apis: ["Date"], now: FIXED_NOW });
 	const payload = parseOk({
 		credits: { monthlyCredits: 1 },
-		windowLimits: { fiveHour: { used: 4, cap: 3, exceeded: true, resetAt: 1789059546961 } },
+		windowLimits: { fiveHour: { used: 4, cap: 3, exceeded: true, resetAt: FIXED_NOW + 1_200_000 } },
 	});
 	assert.equal(payload.fiveHour.leftPercent, 0);
 	const rendered = renderCommandCode(payload, fakeCtx);
@@ -153,7 +160,7 @@ test("reports exceeded windows in the rendered widget", () => {
 });
 
 test("suppresses the pace delta while one percent still spans more time than has elapsed", (t) => {
-	t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-09-20T12:00:00Z") });
+	t.mock.timers.enable({ apis: ["Date"], now: FIXED_NOW });
 	const now = Date.now();
 	const freshWindow = parseOk({
 		credits: { monthlyCredits: 9 },
