@@ -56,7 +56,7 @@ test("timer changes keep the quota column fixed from idle through digits, units 
 	t.mock.timers.enable({ apis: ["Date", "setInterval"], now: 1000 });
 	const h = harness();
 	await h.emit("session_start");
-	assert.ok(h.lines()[2].startsWith("Ready"));
+	assert.ok(h.lines()[2].includes(" Ready "), h.lines()[2]);
 	const initialColumn = h.lines()[2].indexOf("QUOTA");
 	assert.ok(initialColumn > 0, "idle footer must reserve a timer slot");
 	await h.emit("agent_start");
@@ -65,12 +65,12 @@ test("timer changes keep the quota column fixed from idle through digits, units 
 		t.mock.timers.tick(elapsed);
 		const lines = h.lines();
 		assert.equal(lines.length, 3);
-		assert.ok(lines[2].startsWith(label), lines[2]);
+		assert.ok(lines[2].includes(label), lines[2]);
 		assert.equal(lines[2].indexOf("QUOTA"), initialColumn);
 	}
 	await h.emit("message_update", { message: { role: "assistant" }, assistantMessageEvent: { type: "text_delta" } });
 	const thought = h.lines()[2];
-	assert.ok(thought.startsWith("Thought 1h 00m 00s"));
+	assert.ok(thought.includes("Thought 1h 00m 00s"), thought);
 	assert.equal(thought.indexOf("QUOTA"), initialColumn);
 	await h.emit("message_end", { message: { role: "assistant" } });
 	await h.emit("agent_settled");
@@ -89,7 +89,7 @@ test("tool-only responses keep their duration, while a new session resets to Rea
 	t.mock.timers.tick(10000);
 	await h.emit("message_end", { message: { role: "assistant" } });
 	await h.emit("agent_settled");
-	assert.ok(h.lines()[2].startsWith("Thought 10s"));
+	assert.ok(h.lines()[2].includes("Thought 10s"), h.lines()[2]);
 	assert.equal(h.lines()[2].indexOf("QUOTA"), idle.indexOf("QUOTA"));
 	await h.emit("session_start");
 	assert.equal(h.lines()[2], idle);

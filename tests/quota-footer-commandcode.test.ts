@@ -90,7 +90,9 @@ test("sums monthly, purchased and free credits", () => {
 	assert.match(renderCommandCode(payload, fakeCtx), /\$4\.00/);
 });
 
-test("renders how long the expiring monthly credits are still spendable", () => {
+test("renders how long the expiring monthly credits are still spendable", (t) => {
+	// Time is pinned mid-period so the real countdown is exercised end to end.
+	t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-09-20T12:00:00Z") });
 	const payload = parseOk(CREDITS_BODY);
 	assert.equal(payload.expiresAt, Date.parse("2026-10-10T11:56:39.000Z"));
 	assert.equal(payload.monthlyRemaining, 9.988082446);
@@ -110,7 +112,8 @@ test("renders how long the expiring monthly credits are still spendable", () => 
 	assert.equal(ccExpiry(now - 1000, now), null);
 });
 
-test("hides the expiry when nothing monthly is left to expire", () => {
+test("hides the expiry when nothing monthly is left to expire", (t) => {
+	t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-09-20T12:00:00Z") });
 	// Purchased credits never expire, so a $0 monthly balance shows no countdown.
 	const purchasedOnly = parseOk({
 		credits: { monthlyCredits: 0, purchasedCredits: 5, freeCredits: 0 },
@@ -149,7 +152,8 @@ test("reports exceeded windows in the rendered widget", () => {
 	assert.match(rendered, /5h ░{10} 0%/);
 });
 
-test("suppresses the pace delta while one percent still spans more time than has elapsed", () => {
+test("suppresses the pace delta while one percent still spans more time than has elapsed", (t) => {
+	t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-09-20T12:00:00Z") });
 	const now = Date.now();
 	const freshWindow = parseOk({
 		credits: { monthlyCredits: 9 },
