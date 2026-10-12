@@ -26,15 +26,36 @@ pi 原生 `/login` → 选 `qoder` → 二级选择：
 
 之后在 `/models` 选 `qoder/qwen3.8-flash`（限时免费 0x 倍率）或 `qoder/qwen3.8-max`。退出用原生 `/logout`。
 
+## 排队（Model Queue）
+
+Qoder 的免费池（`qfmodel`，`queueType: "p3"`）实例紧张时，上游会直接拒绝请求并在 SSE 首个信封里给出
+**三层嵌套**的排队信号（外层 `403`、中层 `10605`、内层才是 `isQueued` / `retryAfterSeconds`）。
+这时**不是本地重试**，而是等服务端放行：客户端按服务端下发的 `retryAfterSeconds` 轮询
+`GET /api/v2/service/ask/queue/status`，直到 `isQueued === false` 才用**同一个 `request_set_id`** 重发。
+
+本插件按官方 CLI 1.1.69 的实现复刻了该算法（`queue.ts`）：
+
+- 常量对齐官方：恢复上限 10 次、轮询间隔夹在 [500ms, 30s]、默认等待 30s、单次排队上限 1h、
+  连续轮询失败 3 次放弃、UI 心跳 30s（变化 ≥5s 或 ≥25% 提前刷新）。
+- 进度条公式与官方一致（`95` 封顶 / `3` 下限 / 兜底每轮 `+4`，只增不减），
+  四档等待文案（`<1min` / `1min` / `Nmin` / `over 10min`）也照搬。
+- 排队过程显示在状态栏；turn 结束（正常/报错/中止）会 `POST /api/v2/service/ask/finish` 归还租约，
+  失败只告警，服务端 TTL 会兜底。
+- 排队超时/失败返回**不带可重试特征**的 400 文本，避免 pi 叠加全局重试把等待拖到数分钟。
+
+> 还原过程与证据见 reverse-skill 案例 `20261012-180807-qoder-cli/report/model-queue-algorithm.md`。
+
 ## 环境变量
 
 | 变量 | 说明 |
 |---|---|
 | `QODER_PROXY` / `HTTPS_PROXY` | 可选出网代理（CONNECT 隧道，保持头序与 HTTP/1.1） |
+| `QODER_MODEL_QUEUE_MAX_WAIT_MS` | 单次排队等待上限（毫秒），默认 `3600000`（1h），对齐官方 |
 
 ## 文件结构
 
 - `index.ts` — 插件本体、Provider 注册、OAuth 设备流与流式适配器
+- `queue.ts` — 官方排队算法复刻（解包 / 轮询等待 / 节流 / 进度条），可离线单测
 - `codec.ts` — 自定义 Base64 编解码与外层切片对调算法
 - `cosy.ts` — Cosy 头生成器、RSA/AES 密码学加密与 MD5 签名
 - `official-tools.json` — 官方 CLI 1.1.63 的 31 个工具定义（抓包提取）

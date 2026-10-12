@@ -29,6 +29,21 @@ import { createProvider } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { encodeRequestBody } from "./codec.ts";
 import { buildCosyHeaders, type QoderUser } from "./cosy.ts";
+import {
+  MAX_QUEUE_RECOVERIES,
+  POLL_TIMEOUT_MS,
+  QUEUE_FINISH_PATH,
+  QUEUE_STATUS_PATH,
+  createQueueTelemetry,
+  decodeQueueError,
+  formatQueueView,
+  parseQueueStatus,
+  resolveMaxWaitMs,
+  waitInQueue,
+  type QueueSignal,
+  type QueueStatusFetch,
+  type QueueView,
+} from "./queue.ts";
 
 // ── 常量定义 ─────────────────────────────────────────────────────────────────
 
@@ -337,19 +352,8 @@ export async function rawRequest(
 
 // ── 上游瞬时错误（排队/容量）处理 ───────────────────────────────────────────
 
-/** 上游繁忙时的重试次数。Qwen3.8-Flash 为 0× 免费池，争抢激烈，容易触发。 */
-const MAX_QUEUE_RETRIES = 3;
-/**
- * 单次等待上限。
- *
- * 上游对 10605 固定建议 30s，但实测 doChat 仅 ~0.8s 就返回了排队信号，
- * 而免费池实例周转很快。盲等 30s 收益极低、代价极大：pi 自身还有
- * 全局重试（retry.enabled），两层相乘会把一个 prompt 拖到 5 分钟以上，
- * 体感与卡死无异。故封顶到 10s。
- */
-const MAX_RETRY_AFTER_MS = 10_000;
-/** 单次 fetch 内部重试的总预算上限（不含上游响应耗时）。 */
-const MAX_QUEUE_BUDGET_MS = 25_000;
+/** 上游繁忙时的恢复次数：对齐官方 bve = 10（Qwen3.8-Flash 为 0× 免费池，争抢激烈）。 */
+const MAX_QUEUE_RETRIES = MAX_QUEUE_RECOVERIES;
 
 /** 通知通道：在 TUI 里走ui.notify，headless 下退回 stderr。 */
 let statusNotify: ((message: string) => void) | null = null;
@@ -361,64 +365,16 @@ function notifyStatus(message: string): void {
 }
 
 /**
- * 判断一个对象是否含排队/容量信号。
- */
-function hasQueueSignal(node: any): boolean {
-  if (!node || typeof node !== "object") return false;
-  if (node.isQueued === true || node.serviceAvailable === false) return true;
-  return Number.isFinite(Number(node.retryAfterSeconds)) || Number.isFinite(Number(node.waitTime));
-}
-
-/**
- * 解开 Qoder 上游错误。
+ * 解开 Qoder 上游错误并判定是否可自愈。
  *
- * 上游会把同一个错误**反复**包进 message 字符串里，实测是三层：
+ * 上游会把同一个错误**反复**包进 message 字符串里，实测三层：
  *   {"code":"403","message":"{\"code\":\"10605\",\"message\":\"{\"isQueued\":true,...}\"}"}
- * 注意最外层 code 是 403，真正指示排队的 10605 在第二层，
- * 可用的信号（isQueued / retryAfterSeconds）在第三层。
- * 只剥两层会误判成「永久错误」，所以要一直剥到出现信号为止。
+ * 最外层 code 是 403，真正指示排队的 10605 在第二层，可用信号在第三层。
+ * 只剥两层会误判成「永久错误」，所以用 queue.ts 里那份剥到信号出现为止的实现。
+ * 403 签名错误、401 认证等没有排队信号，属于永久错误，不能重试。
  */
-function decodeUpstreamError(body: string): { codes: string[]; detail?: any; raw: string } {
-  let node: any;
-  try {
-    node = JSON.parse(body);
-  } catch {
-    return { codes: [], raw: body };
-  }
-
-  const codes: string[] = [];
-  let detail: any;
-  let depth = 0;
-  for (; depth < 5; depth++) {
-    if (!node || typeof node !== "object") break;
-    if (node.code != null) codes.push(String(node.code));
-    if (hasQueueSignal(node)) {
-      detail = node;
-      break;
-    }
-    const msg = typeof node.message === "string" ? node.message : undefined;
-    if (!msg) break;
-    try {
-      node = JSON.parse(msg);
-    } catch {
-      break;
-    }
-  }
-
-  return { codes, detail, raw: typeof node?.message === "string" ? node.message : body };
-}
-
-/**
- * 判断是否为可自愈的瞬时错误。
- *
- * 10605 是 Qoder 的排队/容量信号：serviceAvailable=false 且带 retryAfterSeconds，
- * 要求客户端等一会儿再来。403 签名错误、401 认证等属于永久错误，不能重试。
- */
-function transientRetryAfter(detail: any): number | null {
-  if (!hasQueueSignal(detail)) return null;
-  const secs = Number(detail.retryAfterSeconds ?? detail.waitTime);
-  if (!Number.isFinite(secs) || secs <= 0) return 0; // 信号成立但未给等待时长，立即重试
-  return Math.min(secs * 1000, MAX_RETRY_AFTER_MS);
+function decodeUpstreamError(body: string): { codes: string[]; detail?: QueueSignal; raw: string } {
+  return decodeQueueError(body);
 }
 
 /**
@@ -468,16 +424,20 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
  */
 async function peekQueueError(
   resp: Response
-): Promise<{ response: Response; retryAfterMs: number | null; codes: string[] }> {
+): Promise<{
+  response: Response;
+  codes: string[];
+  queue?: QueueSignal;
+}> {
   const headers = { "Content-Type": "text/event-stream; charset=utf-8" };
-  if (!resp.body) return { response: resp, retryAfterMs: null, codes: [] };
+  if (!resp.body) return { response: resp, codes: [] };
 
   const [probe, rest] = resp.body.tee();
   const reader = probe.getReader();
   const decoder = new TextDecoder();
   let acc = "";
-  let retryAfterMs: number | null = null;
   let codes: string[] = [];
+  let queue: QueueSignal | undefined;
 
   try {
     // 只需读到第一个信封，最多兜 64 KiB
@@ -494,7 +454,7 @@ async function peekQueueError(
             typeof envelope.body === "string" ? envelope.body : JSON.stringify(envelope.body ?? {})
           );
           codes = decoded.codes;
-          retryAfterMs = transientRetryAfter(decoded.detail);
+          queue = decoded.detail;
         }
       } catch {}
       break; // 第一个信封就是它，够了
@@ -507,9 +467,175 @@ async function peekQueueError(
 
   return {
     response: new Response(rest, { status: resp.status, statusText: resp.statusText, headers }),
-    retryAfterMs,
     codes,
+    queue,
   };
+}
+
+// ── 官方排队状态轮询（GET /api/v2/service/ask/queue/status）──────────────────
+
+/** 官方在 chat 请求之外独立签名的 GET：Accept 是 application/json，不是 SSE。 */
+async function pollQueueStatus(
+  user: QoderUser,
+  params: {
+    requestSetId: string;
+    modelKey: string;
+    queueType?: string;
+    signal?: AbortSignal;
+    timeoutMs: number;
+  }
+): Promise<QueueSignal> {
+  const proxyUrl =
+    process.env.QODER_PROXY ??
+    process.env.HTTPS_PROXY ??
+    process.env.HTTP_PROXY ??
+    undefined;
+
+  const qs = new URLSearchParams();
+  qs.set("requestSetId", params.requestSetId);
+  qs.set("modelKey", params.modelKey);
+  if (params.queueType) qs.set("queueType", params.queueType);
+  const url = `${INFER_BASE}${QUEUE_STATUS_PATH}?${qs.toString()}`;
+
+  // 官方 `yve`：单次轮询超时，且不得超过剩余预算
+  const timeout = Math.max(0, Math.min(POLL_TIMEOUT_MS, params.timeoutMs));
+  if (timeout <= 0) {
+    throw Object.assign(new Error("model queue status request timed out"), {
+      queue_fatal: true,
+    });
+  }
+
+  // 官方在这个 GET 上单独做一次 401/403 强制刷新重试（Eve 的 for(let l=0;l<2;l++) 循环）
+  let current = user;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error("queue status timeout")), timeout);
+    const signal = params.signal
+      ? AbortSignal.any([params.signal, controller.signal])
+      : controller.signal;
+
+    try {
+      const headers = buildCosyHeaders(url, current, "", machineId).map(
+        ([k, v]) => [k, k.toLowerCase() === "accept" ? "application/json" : v] as [string, string]
+      );
+      const resp = await rawRequest(url, "GET", headers, Buffer.alloc(0), proxyUrl, signal);
+      const body = await resp.text().catch(() => "");
+
+      if (resp.status === 401 || resp.status === 403) {
+        if (attempt === 0) {
+          // 官方：强制刷新 token 后原样重试一次（不再改变 requestSetId）
+          const fresh = await getValidAuth(true);
+          current = {
+            uid: fresh.userId,
+            token: fresh.accessToken,
+            email: fresh.email,
+            name: fresh.username,
+          };
+          continue;
+        }
+        throw Object.assign(new Error(`model queue status auth error: HTTP ${resp.status}`), {
+          queue_auth: true,
+        });
+      }
+      if (resp.status === 404) {
+        // 官方把 404 视为端点不可用且**立即失败**（queue_endpoint_unavailable）
+        throw Object.assign(new Error("model queue status endpoint unavailable"), {
+          queue_endpoint_unavailable: true,
+        });
+      }
+      if (!resp.ok) {
+        throw new Error(`model queue status request failed: HTTP ${resp.status}`);
+      }
+
+      const parsed = parseQueueStatus(body);
+      if (!parsed) {
+        throw Object.assign(new Error("model queue status response is invalid"), {
+          queue_endpoint_unavailable: true,
+        });
+      }
+      return parsed;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw Object.assign(new Error("model queue status request failed after auth retry"), {
+    queue_auth: true,
+  });
+}
+
+/**
+ * 归还排队租约（POST /api/v2/service/ask/finish）。
+ *
+ * 官方在 turn 收尾时对本 turn 用过的所有 requestSetId 各发一次；失败只告警，
+ * 因为服务端 TTL 到期也会释放。这里同样做成尽力而为。
+ */
+async function releaseQueueLease(params: {
+  modelKey: string;
+  requestSetId: string;
+  timeConsumedMs: number;
+  signal?: AbortSignal;
+}): Promise<void> {
+  const auth = await getValidAuth().catch(() => null);
+  if (!auth) return;
+  const user: QoderUser = {
+    uid: auth.userId,
+    token: auth.accessToken,
+    email: auth.email,
+    name: auth.username,
+  };
+
+  const proxyUrl =
+    process.env.QODER_PROXY ??
+    process.env.HTTPS_PROXY ??
+    process.env.HTTP_PROXY ??
+    undefined;
+
+  const url = `${INFER_BASE}${QUEUE_FINISH_PATH}`;
+  const body = JSON.stringify({
+    payload: JSON.stringify({
+      model_key: params.modelKey,
+      request_set_id: params.requestSetId,
+      user_id: auth.userId,
+      time_consumed: Math.max(0, Math.round(params.timeConsumedMs)),
+    }),
+    encodeVersion: "1",
+  });
+
+  const headers = buildCosyHeaders(url, user, body, machineId).map(
+    ([k, v]) => [k, k.toLowerCase() === "accept" ? "application/json" : v] as [string, string]
+  );
+  headers.push(["Content-Type", "application/json"]);
+
+  const resp = await rawRequest(
+    url,
+    "POST",
+    headers,
+    Buffer.from(body, "utf8"),
+    proxyUrl,
+    params.signal
+  );
+  await resp.text().catch(() => "");
+}
+
+/** 本 turn 内进入过排队的 requestSetId，用于 turn 结束时归还租约。 */
+const touchedRequestSets = new Map<string, number>();
+
+function noteQueuedRequestSet(requestSetId: string): void {
+  if (!touchedRequestSets.has(requestSetId)) {
+    touchedRequestSets.set(requestSetId, Date.now());
+  }
+}
+
+/** 把一帧排队状态画到状态栏（TUI 有 ui 时）。 */
+let queueStatusSink: ((text: string | undefined) => void) | null = null;
+function renderQueueView(view: QueueView): void {
+  if (queueStatusSink) {
+    try {
+      queueStatusSink(formatQueueView(view));
+      return;
+    } catch {}
+  }
+  notifyStatus(formatQueueView(view));
 }
 
 // ── SSE 响应解包转换 ─────────────────────────────────────────────────────────
@@ -626,11 +752,24 @@ function transformQoderSseResponse(rawResp: Response): Response {
 
 let chatRound = 0;
 
+interface ChatIds {
+  requestId: string;
+  requestSetId: string;
+}
+
+function newChatIds(): ChatIds {
+  return {
+    requestId: crypto.randomUUID().replace(/-/g, ""),
+    requestSetId: crypto.randomUUID().replace(/-/g, ""),
+  };
+}
+
 async function doChat(
   authUser: QoderUser,
   openAiBody: any,
   proxyUrl?: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  ids: ChatIds = newChatIds()
 ): Promise<Response> {
   chatRound++;
   const modelDisplayName = openAiBody.model?.includes("max")
@@ -661,8 +800,9 @@ async function doChat(
   const enableThinking = !isNone;
 
   const qoderBody = {
-    request_id: crypto.randomUUID().replace(/-/g, ""),
-    request_set_id: crypto.randomUUID().replace(/-/g, ""),
+    // request_set_id 必须与排队轮询用的一致：服务端按它登记/查询排队条目
+    request_id: ids.requestId,
+    request_set_id: ids.requestSetId,
     chat_record_id: crypto.randomUUID().replace(/-/g, ""),
     session_id: crypto.randomUUID().replace(/-/g, ""),
     stream: true,
@@ -737,62 +877,100 @@ async function fingerprintFetch(input: any, init?: any): Promise<Response> {
   const openAiBody = typeof init?.body === "string" ? JSON.parse(init.body) : init?.body ?? {};
 
   /**
-   * 发一次请求，并对瞬时排队错误做有限重试。
+   * 发一次请求；若命中服务端容量队列，则按官方算法轮询等待后重发。
+   *
+   * 官方语义：排队不是「本地重试」，而是「等服务端放行」——
+   * 客户端只按服务端下发的 retryAfterSeconds 轮询 queue/status，
+   * 期间不换实例、不降级模型。request_set_id 必须保持不变，
+   * 服务端靠它关联排队条目（只重生成 request_id）。
    * 永久错误（403 签名失效、401 认证）直接向上抛，由调用方处理。
    */
-  const send = async (user: QoderUser): Promise<Response> => {
-    let resp = await doChat(user, openAiBody, proxyUrl, init?.signal);
+  const send = async (userIn: QoderUser): Promise<Response> => {
+    let user = userIn;
+    // requestSetId 跨「排队 → 放行后重发」保持不变，对齐官方只重生成 requestId 的做法
+    let ids = newChatIds();
+    let resp = await doChat(user, openAiBody, proxyUrl, init?.signal, ids);
 
     // 401 自动刷新兜底
     if (resp.status === 401) {
       try {
         const fresh = await getValidAuth(true);
-        resp = await doChat(
-          {
-            uid: fresh.userId,
-            token: fresh.accessToken,
-            email: fresh.email,
-            name: fresh.username,
-          },
-          openAiBody,
-          proxyUrl,
-          init?.signal
-        );
+        user = {
+          uid: fresh.userId,
+          token: fresh.accessToken,
+          email: fresh.email,
+          name: fresh.username,
+        };
+        resp = await doChat(user, openAiBody, proxyUrl, init?.signal, ids);
       } catch {}
     }
 
-    const budgetStart = Date.now();
-    for (let attempt = 1; ; attempt++) {
+    const telemetry = createQueueTelemetry();
+
+    for (let recovery = 0; ; recovery++) {
       if (!resp.ok || !resp.body) return resp;
 
       const peeked = await peekQueueError(resp);
       resp = peeked.response;
 
-      if (peeked.retryAfterMs === null) return resp;
+      // 没有排队信号：正常响应（或永久错误）直接透传
+      if (peeked.queue === undefined) return resp;
+
+      // 官方上限：一个 turn 内最多恢复 10 次
+      if (recovery >= MAX_QUEUE_RETRIES) {
+        try { (resp as any).body?.cancel?.(); } catch {}
+        return upstreamBusyResponse(
+          `Qoder 上游繁忙（10605）：已进入排队恢复 ${MAX_QUEUE_RETRIES} 次仍无空闲实例，请稍后再试`
+        );
+      }
 
       // 外层 code 常是 403，排队信号真正在里面的 10605
       const code = peeked.codes[peeked.codes.length - 1] ?? "10605";
-      const exhausted = attempt >= MAX_QUEUE_RETRIES;
-      const overBudget = Date.now() - budgetStart + peeked.retryAfterMs > MAX_QUEUE_BUDGET_MS;
+      noteQueuedRequestSet(ids.requestSetId);
+      notifyStatus(`上游繁忙（${code}），进入排队等待…`);
 
-      if (exhausted || overBudget) {
-        // 抛错前必须释放响应体，否则每轮失败都会漏一个未消费的 HTTP 连接，
-        // 句柄迟迟不回收会让进程在输出完成后迟迟不退出
-        try { (resp as any).body?.cancel?.(); } catch {}
-        const reason = exhausted ? `已重试 ${MAX_QUEUE_RETRIES} 次` : `已超出 ${MAX_QUEUE_BUDGET_MS / 1000}s 预算`;
-        return upstreamBusyResponse(`Qoder 上游繁忙（10605）：无空闲实例，${reason}仍不可用`);
+      // 丢弃本次响应体，否则每轮都会漏一个未消费的 HTTP 连接
+      try { (resp as any).body?.cancel?.(); } catch {}
+
+      try {
+        await waitInQueue({
+          initialQueue: peeked.queue,
+          requestSetId: ids.requestSetId,
+          modelKey: peeked.queue.modelKey ?? "qfmodel",
+          signal: init?.signal,
+          telemetry,
+          onView: renderQueueView,
+          sleep,
+          fetchStatus: ((p) => pollQueueStatus(user, p)) as QueueStatusFetch,
+        });
+      } catch (err: any) {
+        // 排队失败不能 throw：pi-ai 会把 fetch 抛的异常包成 "Connection error."，
+        // 而该文本正好命中 pi 的可重试正则，会叠加一层全局重试把等待拖到数分钟。
+        // 返回不命中重试特征的 400 文本，让错误原样透出且节奏只由本插件控制。
+        const msg = err?.message ?? String(err);
+        const maxWait = resolveMaxWaitMs();
+        return upstreamBusyResponse(
+          `Qoder 上游繁忙（10605）：排队未成功（${msg}）。` +
+            `已等 ${Math.round((telemetry.waitMs ?? 0) / 1000)}s / 上限 ${Math.round(maxWait / 1000)}s，` +
+            `轮询 ${telemetry.pollCount} 次（失败 ${telemetry.pollFailureCount} 次）。请稍后再试。`
+        );
       }
 
-      // 上游建议 30s，按上限收紧
-      const waitMs = peeked.retryAfterMs;
-      notifyStatus(
-        `上游繁忙（${code}），${Math.ceil(waitMs / 1000)}s 后重试 (${attempt}/${MAX_QUEUE_RETRIES})`
-      );
-      await sleep(waitMs, init?.signal);
+      telemetry.recovered = true;
+      telemetry.recoveryAttempt++;
+      renderQueueView({
+        status: "ready",
+        progress: 100,
+        elapsedMs: telemetry.waitMs ?? 0,
+        maxWaitMs: resolveMaxWaitMs(),
+      });
 
-      // 丢弃本次响应体，否则每次重试都会漏一个未消费的 HTTP 连接
-      try { (resp as any).body?.cancel?.(); } catch {}
-      resp = await doChat(user, openAiBody, proxyUrl, init?.signal);
+      // 放行后用同一 request_set_id、新 request_id 重发（对齐官方）
+      ids = {
+        requestId: crypto.randomUUID().replace(/-/g, ""),
+        requestSetId: ids.requestSetId,
+      };
+      resp = await doChat(user, openAiBody, proxyUrl, init?.signal, ids);
     }
   };
 
@@ -844,6 +1022,45 @@ export default async function (pi: ExtensionAPI) {
   try {
     statusNotify = (message: string) => (pi as any).ui?.notify?.(message, "info");
   } catch {}
+
+  // 排队状态走状态栏（比 notify 安静，且会随新帧原地刷新）
+  pi.on("session_start", async (_event, ctx) => {
+    queueStatusSink = (text) => ctx.ui.setStatus("qoder-queue", text);
+  });
+
+  pi.on("session_shutdown", async () => {
+    queueStatusSink = null;
+  });
+
+  // turn 结束（正常/报错/中止）都要归还排队租约，否则服务端要等 TTL 才释放槽位
+  const flushQueueLeases = async (ctx: any) => {
+    queueStatusSink?.(undefined);
+    if (touchedRequestSets.size === 0) return;
+    const entries = [...touchedRequestSets.entries()];
+    touchedRequestSets.clear();
+    await Promise.allSettled(
+      entries.map(([requestSetId, startedAt]) =>
+        releaseQueueLease({
+          modelKey: "qfmodel",
+          requestSetId,
+          timeConsumedMs: Date.now() - startedAt,
+        }).catch((err) => {
+          notifyStatus(
+            `排队租约归还失败（服务端 TTL 会兜底）: ${err?.message ?? String(err)}`
+          );
+        })
+      )
+    );
+    void ctx;
+  };
+
+  pi.on("turn_end", async (_event, ctx) => {
+    await flushQueueLeases(ctx);
+  });
+
+  pi.on("agent_end", async (_event, ctx) => {
+    await flushQueueLeases(ctx);
+  });
 
   const wrapOptions = (o: any) => ({
     ...(o ?? {}),
