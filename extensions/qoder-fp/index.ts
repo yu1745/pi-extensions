@@ -34,7 +34,10 @@ import {
   POLL_TIMEOUT_MS,
   QUEUE_FINISH_PATH,
   QUEUE_STATUS_PATH,
+  buildQueueFinishBody,
   createQueueTelemetry,
+  createQueueStatusSinks,
+  queueFailureReason,
   decodeQueueError,
   formatQueueView,
   parseQueueStatus,
@@ -591,17 +594,17 @@ async function releaseQueueLease(params: {
     undefined;
 
   const url = `${INFER_BASE}${QUEUE_FINISH_PATH}`;
-  const body = JSON.stringify({
-    payload: JSON.stringify({
-      model_key: params.modelKey,
-      request_set_id: params.requestSetId,
-      user_id: auth.userId,
-      time_consumed: Math.max(0, Math.round(params.timeConsumedMs)),
-    }),
-    encodeVersion: "1",
+  // 原子：finish 与 chat 一样是 `?Encode=1`，体必须过自定义 Base64。
+  // 明文 JSON 实测返回 500 Internal Server Error，所以这里不能省 encodeRequestBody。
+  const wireBody = buildQueueFinishBody({
+    encodeRequestBody,
+    modelKey: params.modelKey,
+    requestSetId: params.requestSetId,
+    userId: auth.userId,
+    timeConsumedMs: params.timeConsumedMs,
   });
 
-  const headers = buildCosyHeaders(url, user, body, machineId).map(
+  const headers = buildCosyHeaders(url, user, wireBody, machineId).map(
     ([k, v]) => [k, k.toLowerCase() === "accept" ? "application/json" : v] as [string, string]
   );
   headers.push(["Content-Type", "application/json"]);
@@ -610,11 +613,14 @@ async function releaseQueueLease(params: {
     url,
     "POST",
     headers,
-    Buffer.from(body, "utf8"),
+    Buffer.from(wireBody, "utf8"),
     proxyUrl,
     params.signal
   );
-  await resp.text().catch(() => "");
+  const respBody = await resp.text().catch(() => "");
+  if (!resp.ok) {
+    throw new Error(`HTTP ${resp.status} ${respBody.slice(0, 200)}`);
+  }
 }
 
 /** 本 turn 内进入过排队的 requestSetId，用于 turn 结束时归还租约。 */
@@ -947,7 +953,9 @@ async function fingerprintFetch(input: any, init?: any): Promise<Response> {
         // 排队失败不能 throw：pi-ai 会把 fetch 抛的异常包成 "Connection error."，
         // 而该文本正好命中 pi 的可重试正则，会叠加一层全局重试把等待拖到数分钟。
         // 返回不命中重试特征的 400 文本，让错误原样透出且节奏只由本插件控制。
-        const msg = err?.message ?? String(err);
+        // HTTP 400 仍会被 pi 按正文匹配重试；原始 timeout/503 等只写诊断通道。
+        notifyStatus(`排队停止: ${err?.message ?? String(err)}`);
+        const msg = queueFailureReason(err);
         const maxWait = resolveMaxWaitMs();
         return upstreamBusyResponse(
           `Qoder 上游繁忙（10605）：排队未成功（${msg}）。` +
@@ -1018,17 +1026,16 @@ async function resolveCompletionsBase(): Promise<{ stream: any; streamSimple: an
 export default async function (pi: ExtensionAPI) {
   const base = await resolveCompletionsBase();
 
-  // TUI 环境下把重试提示送到界面上；不可用时 notifyStatus 会退回 stderr
-  try {
-    statusNotify = (message: string) => (pi as any).ui?.notify?.(message, "info");
-  } catch {}
-
-  // 排队状态走状态栏（比 notify 安静，且会随新帧原地刷新）
+  // ExtensionAPI 没有 ui；headless 的 ctx.ui 又是 no-op，调用成功不代表显示成功。
+  // 仅在确有 UI 时安装 sink，否则保留 notifyStatus 的 stderr 兜底。
   pi.on("session_start", async (_event, ctx) => {
-    queueStatusSink = (text) => ctx.ui.setStatus("qoder-queue", text);
+    const sinks = createQueueStatusSinks(ctx);
+    statusNotify = sinks.notify;
+    queueStatusSink = sinks.status;
   });
 
   pi.on("session_shutdown", async () => {
+    statusNotify = null;
     queueStatusSink = null;
   });
 

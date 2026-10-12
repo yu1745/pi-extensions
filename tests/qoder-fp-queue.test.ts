@@ -1,5 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert";
+import { isRetryableAssistantError } from "@earendil-works/pi-ai/compat";
+import { decodeRequestBody, encodeRequestBody } from "../extensions/qoder-fp/codec.ts";
 import {
   MAX_QUEUE_RECOVERIES,
   MAX_QUEUE_WAIT_DEFAULT_MS,
@@ -8,10 +10,15 @@ import {
   POLL_FAILURE_LIMIT,
   PROGRESS_MAX,
   PROGRESS_MIN,
+  QUEUE_FINISH_PATH,
+  QUEUE_STATUS_PATH,
   SERVER_DEFAULT_WAIT_S,
+  buildQueueFinishBody,
   clampPollInterval,
   computeQueueProgress,
   createQueueTelemetry,
+  createQueueStatusSinks,
+  queueFailureReason,
   decodeQueueError,
   formatQueueView,
   hasQueueSignal,
@@ -372,6 +379,103 @@ describe("qoder-fp queue: 等待循环（对齐官方 pXe）", () => {
     const queued = h.views.filter((v) => v.status === "queued");
     assert.ok(queued.length >= 2, `queueCount 变化应各自推帧，实际 ${queued.length}`);
     assert.ok(queued.some((v) => v.queueCount === 2));
+  });
+});
+
+describe("qoder-fp queue: 端点路径", () => {
+  // 回归：官方常量表里是不带 /algo 的签名路径，但真实出网 URL 必须带 /algo。
+  // 曾因直接照搬常量导致 queue/status 与 ask/finish 双双 404。
+  test("两个排队端点都必须带 /algo 前缀", () => {
+    assert.ok(
+      QUEUE_STATUS_PATH.startsWith("/algo/"),
+      `queue/status 需带 /algo（实际 ${QUEUE_STATUS_PATH}），否则上游 404`
+    );
+    assert.ok(
+      QUEUE_FINISH_PATH.startsWith("/algo/"),
+      `ask/finish 需带 /algo（实际 ${QUEUE_FINISH_PATH}），否则上游 404`
+    );
+    assert.ok(QUEUE_STATUS_PATH.includes("/api/v2/service/ask/queue/status"));
+    assert.ok(QUEUE_FINISH_PATH.includes("/api/v2/service/ask/finish"));
+    assert.ok(QUEUE_FINISH_PATH.includes("Encode=1"));
+  });
+});
+
+describe("qoder-fp queue: 租约归还请求体", () => {
+  // 回归：finish 端点带 `?Encode=1`，体必须过自定义 Base64。
+  // 曾因直接提交明文 JSON 而被上游 500（不是 400，很容易误认为服务端故障）。
+  test("必须过自定义 Base64 且可解回原始 JSON", () => {
+    const wire = buildQueueFinishBody({
+      encodeRequestBody: encodeRequestBody,
+      modelKey: "qfmodel",
+      requestSetId: "rs-abc",
+      userId: "u-1",
+      timeConsumedMs: 1500,
+    });
+
+    assert.notStrictEqual(wire, JSON.stringify({}), "必须不是明文 JSON");
+    assert.strictEqual(wire.length % 4, 0, "自定义 Base64 需对齐 4 字节边界");
+
+    const decoded = JSON.parse(decodeRequestBody(wire).toString("utf8"));
+    assert.strictEqual(decoded.encodeVersion, "1");
+    const inner = JSON.parse(decoded.payload);
+    assert.strictEqual(inner.model_key, "qfmodel");
+    assert.strictEqual(inner.request_set_id, "rs-abc");
+    assert.strictEqual(inner.user_id, "u-1");
+    assert.strictEqual(inner.time_consumed, 1500);
+  });
+
+  test("time_consumed 取整且不为负", () => {
+    const wire = buildQueueFinishBody({
+      encodeRequestBody,
+      modelKey: "qfmodel",
+      requestSetId: "rs-abc",
+      userId: "u-1",
+      timeConsumedMs: -42,
+    });
+    const inner = JSON.parse(JSON.parse(decodeRequestBody(wire).toString("utf8")).payload);
+    assert.strictEqual(inner.time_consumed, 0);
+  });
+});
+
+describe("qoder-fp queue: 终态原因", () => {
+  test("等待上限不能在助手正文回显 timeout，避免 pi 再次重试", () => {
+    const original = "400 Qoder 上游繁忙（10605）：排队未成功（model queue wait timeout）。";
+    assert.strictEqual(isRetryableAssistantError({ stopReason: "error", errorMessage: original } as any), true);
+    const reason = queueFailureReason(new Error("model queue wait timeout"));
+    assert.strictEqual(reason, "已达到排队等待上限");
+    assert.strictEqual(isRetryableAssistantError({ stopReason: "error", errorMessage: `400 Qoder 上游繁忙（10605）：排队未成功（${reason}）。` } as any), false);
+  });
+  test("传输错误和状态码只能写诊断通道，不能污染终态正文", () => {
+    for (const message of ["connection error", "503 service unavailable", "fetch failed", "socket hang up", "request timed out"]) {
+      assert.doesNotMatch(queueFailureReason(new Error(message)), /timeout|timed? out|connection|503|unavailable|fetch failed|socket/i);
+    }
+    assert.strictEqual(queueFailureReason(new Error("model queue status endpoint unavailable")), "排队状态端点不可用");
+  });
+});
+
+describe("qoder-fp queue: UI 通道", () => {
+  test("headless 即使存在 no-op UI 也必须保留 stderr 兜底", () => {
+    const sinks = createQueueStatusSinks({
+      hasUI: false,
+      ui: { notify() { assert.fail("不应调用"); }, setStatus() { assert.fail("不应调用"); } },
+    });
+    assert.strictEqual(sinks.notify, null);
+    assert.strictEqual(sinks.status, null);
+  });
+
+  test("有 UI 时使用上下文通知和状态栏，并可清空状态", () => {
+    const calls: unknown[] = [];
+    const sinks = createQueueStatusSinks({
+      hasUI: true,
+      ui: {
+        notify: (message, type) => { calls.push([message, type]); },
+        setStatus: (key, text) => { calls.push([key, text]); },
+      },
+    });
+    sinks.notify!("等待");
+    sinks.status!("排队");
+    sinks.status!(undefined);
+    assert.deepStrictEqual(calls, [["等待", "info"], ["qoder-queue", "排队"], ["qoder-queue", undefined]]);
   });
 });
 

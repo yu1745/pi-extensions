@@ -43,10 +43,18 @@ export const PROGRESS_MAX = 95;
 export const PROGRESS_MIN = 3;
 export const PROGRESS_STEP = 4;
 
-/** 队列状态轮询地址（官方 ES）。注意与 chat 不同：**不带** /algo 前缀。 */
-export const QUEUE_STATUS_PATH = "/api/v2/service/ask/queue/status";
-/** 租约归还地址（官方 kve）。 */
-export const QUEUE_FINISH_PATH = "/api/v2/service/ask/finish?Encode=1";
+/**
+ * 队列状态轮询出网地址。
+ *
+ * 官方常量 `ES` 写的是 `/api/v2/service/ask/queue/status`（不带头缀），但那是交给传输层
+ * `prepareRequest` 做签名的**剥壳路径**；真实出网 URL 会补上 `/algo` 前缀。
+ * 注意官方日志同样只记剥壳后的 `path=/api/v2/...`，所以照日志构造 URL 会错。
+ * 实测：不带 `/algo` 直接 404，带上才 200。
+ * `buildCosyHeaders` 会为签名去掉 `/algo`，两边保持一致。
+ */
+export const QUEUE_STATUS_PATH = "/algo/api/v2/service/ask/queue/status";
+/** 租约归还出网地址（官方常量 `kve`），同样必须带 `/algo`；实测不带前缀 404。 */
+export const QUEUE_FINISH_PATH = "/algo/api/v2/service/ask/finish?Encode=1";
 
 // ── 类型 ─────────────────────────────────────────────────────────────────────
 
@@ -581,6 +589,63 @@ function recordServerTimings(telemetry: QueueTelemetry | undefined, signal: Queu
   if (signal.waitTime !== undefined && Number.isFinite(signal.waitTime) && signal.waitTime >= 0) {
     telemetry.serverWaitTimeMs = Math.round(signal.waitTime * 1000);
   }
+}
+
+/**
+ * 构造 `POST /algo/api/v2/service/ask/finish?Encode=1` 的请求体。
+ *
+ * 两个易错点，都是实测踩出来的：
+ * 1. 端点必须带 `/algo` 前缀，否则 404；
+ * 2. 该端点带 `Encode=1`，体必须过自定义 Base64（与 chat 同一套）——
+ *    明文 JSON 实测返回 `500 Internal Server Error`，而非 400，
+ *    很容易被当成服务端偶发故障忽略掉。
+ *
+ * `encodeRequestBody` 由调用方注入，避免 queue.ts 依赖 codec。
+ */
+export function buildQueueFinishBody(params: {
+  encodeRequestBody: (plain: string) => string;
+  modelKey: string;
+  requestSetId: string;
+  userId: string;
+  timeConsumedMs: number;
+}): string {
+  const plain = JSON.stringify({
+    payload: JSON.stringify({
+      model_key: params.modelKey,
+      request_set_id: params.requestSetId,
+      user_id: params.userId,
+      time_consumed: Math.max(0, Math.round(params.timeConsumedMs)),
+    }),
+    encodeVersion: "1",
+  });
+  return params.encodeRequestBody(plain);
+}
+
+/** 终态正文不能回显原始传输错误：pi 按文本匹配 timeout/503 等并自动重试。 */
+export function queueFailureReason(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  if (/timeout|timed? out/i.test(message)) return "已达到排队等待上限";
+  if (/endpoint unavailable/i.test(message)) return "排队状态端点不可用";
+  if (/abort/i.test(message)) return "排队已取消";
+  return "排队状态查询失败";
+}
+
+/** print/json 模式的 UI 方法是 no-op，不能用“调用未抛错”判定 UI 可用。 */
+export function createQueueStatusSinks(ctx: {
+  hasUI: boolean;
+  ui: {
+    notify: (message: string, type: "info") => void;
+    setStatus: (key: string, text: string | undefined) => void;
+  };
+}): {
+  notify: ((message: string) => void) | null;
+  status: ((text: string | undefined) => void) | null;
+} {
+  if (!ctx.hasUI) return { notify: null, status: null };
+  return {
+    notify: (message) => ctx.ui.notify(message, "info"),
+    status: (text) => ctx.ui.setStatus("qoder-queue", text),
+  };
 }
 
 /** 把一帧排队状态渲染成一行状态栏文本。 */

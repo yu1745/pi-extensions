@@ -31,7 +31,8 @@ pi 原生 `/login` → 选 `qoder` → 二级选择：
 Qoder 的免费池（`qfmodel`，`queueType: "p3"`）实例紧张时，上游会直接拒绝请求并在 SSE 首个信封里给出
 **三层嵌套**的排队信号（外层 `403`、中层 `10605`、内层才是 `isQueued` / `retryAfterSeconds`）。
 这时**不是本地重试**，而是等服务端放行：客户端按服务端下发的 `retryAfterSeconds` 轮询
-`GET /api/v2/service/ask/queue/status`，直到 `isQueued === false` 才用**同一个 `request_set_id`** 重发。
+`GET /algo/api/v2/service/ask/queue/status`，直到 `isQueued === false` 才用**同一个 `request_set_id`** 重发。
+（官方常量/日志省略 `/algo`，那是签名路径，不是出网路径。）
 
 本插件按官方 CLI 1.1.69 的实现复刻了该算法（`queue.ts`）：
 
@@ -39,9 +40,17 @@ Qoder 的免费池（`qfmodel`，`queueType: "p3"`）实例紧张时，上游会
   连续轮询失败 3 次放弃、UI 心跳 30s（变化 ≥5s 或 ≥25% 提前刷新）。
 - 进度条公式与官方一致（`95` 封顶 / `3` 下限 / 兜底每轮 `+4`，只增不减），
   四档等待文案（`<1min` / `1min` / `Nmin` / `over 10min`）也照搬。
-- 排队过程显示在状态栏；turn 结束（正常/报错/中止）会 `POST /api/v2/service/ask/finish` 归还租约，
-  失败只告警，服务端 TTL 会兜底。
+- 排队过程在有 UI 时显示在状态栏；`pi -p` / JSON 模式写 stderr，前缀为 `[qoder-fp]`。
+  不能把 UI 的 no-op 方法当作通知已显示，否则 headless 会看起来静默挂死。
+- turn 结束（正常/报错/中止）会 `POST /algo/api/v2/service/ask/finish?Encode=1` 归还租约，
+  请求体使用与 chat 相同的自定义 Base64；失败只告警，服务端 TTL 会兜底。
+- 状态端点放行不保证下次 chat 一定有容量；chat 仍可再次返回 `10605`，继续排队。
+  免费池拥堵时数分钟等待是可能的；想限制等待可设置 `QODER_MODEL_QUEUE_MAX_WAIT_MS`。
+  独立生成 UUID 查询 `isQueued=false` 并不能证明某个真实 chat 的排队条目空闲。
 - 排队超时/失败返回**不带可重试特征**的 400 文本，避免 pi 叠加全局重试把等待拖到数分钟。
+  仅返回 400 不够：pi 也匹配正文中的 `timeout` / `503` / `connection error` 等，
+  所以原始错误只写诊断通道，助手终态正文使用中文原因。
+- 等待上限只覆盖排队轮询/等待，不是整个命令的墙钟上限（不含模型生成与归还租约）。
 
 > 还原过程与证据见 reverse-skill 案例 `20261012-180807-qoder-cli/report/model-queue-algorithm.md`。
 
