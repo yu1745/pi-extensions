@@ -648,6 +648,29 @@ export function createQueueStatusSinks(ctx: {
   };
 }
 
+/**
+ * 就地覆写一个头（不区分大小写），保持原有位置；不存在才追加。
+ *
+ * 存在的意义：`buildCosyHeaders` 已经带了 `Content-Type` / `Accept`，
+ * 若调用方再 `push` 一次就会发出**重复头**。上游对这种请求返回 500，
+ * 且看起来像服务端故障，很难归因。就地覆写能天然避免重复。
+ */
+export function setHeader(
+  headers: [string, string][],
+  name: string,
+  value: string
+): [string, string][] {
+  const lower = name.toLowerCase();
+  let found = false;
+  const out = headers.map((pair) => {
+    if (pair[0].toLowerCase() !== lower) return pair;
+    found = true;
+    return [pair[0], value] as [string, string];
+  });
+  if (!found) out.push([name, value]);
+  return out;
+}
+
 /** 把一帧排队状态渲染成一行状态栏文本。 */
 export function formatQueueView(view: QueueView): string {
   const filled = Math.max(0, Math.round((view.progress / 100) * 10));

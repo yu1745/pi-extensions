@@ -2,6 +2,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai/compat";
 import { decodeRequestBody, encodeRequestBody } from "../extensions/qoder-fp/codec.ts";
+import { buildCosyHeaders } from "../extensions/qoder-fp/cosy.ts";
 import {
   MAX_QUEUE_RECOVERIES,
   MAX_QUEUE_WAIT_DEFAULT_MS,
@@ -14,6 +15,7 @@ import {
   QUEUE_STATUS_PATH,
   SERVER_DEFAULT_WAIT_S,
   buildQueueFinishBody,
+  setHeader,
   clampPollInterval,
   computeQueueProgress,
   createQueueTelemetry,
@@ -476,6 +478,60 @@ describe("qoder-fp queue: UI 通道", () => {
     sinks.status!("排队");
     sinks.status!(undefined);
     assert.deepStrictEqual(calls, [["等待", "info"], ["qoder-queue", "排队"], ["qoder-queue", undefined]]);
+  });
+});
+
+describe("qoder-fp queue: 请求头不能重复", () => {
+  // 回归：buildCosyHeaders 已带 Content-Type / Accept。
+  // releaseQueueLease 曾再 push 一份 Content-Type，发重复头导致上游 500
+  // （看起来像服务端故障，实际是客户端重复头，极难归因）。
+  test("setHeader 就地覆写，不产生重复头", () => {
+    const base: [string, string][] = [
+      ["Accept", "text/event-stream"],
+      ["Content-Type", "application/json"],
+    ];
+    const out = setHeader(base, "content-type", "application/json");
+    assert.strictEqual(
+      out.filter(([k]) => k.toLowerCase() === "content-type").length,
+      1,
+      "Content-Type 必须只有一个"
+    );
+    assert.strictEqual(out.length, base.length, "覆写不应新增条目");
+  });
+
+  test("setHeader 保持原位置，不存在时才追加", () => {
+    const out = setHeader(
+      [
+        ["Accept", "text/event-stream"],
+        ["Content-Type", "application/json"],
+        ["Cosy-User", "u"],
+      ],
+      "Content-Type",
+      "application/json"
+    );
+    assert.deepStrictEqual(
+      out.map(([k]) => k),
+      ["Accept", "Content-Type", "Cosy-User"],
+      "位置应与原始头序一致"
+    );
+    const added = setHeader([["Accept", "a"]], "X-New", "v");
+    assert.strictEqual(added.length, 2);
+    assert.deepStrictEqual(added[1], ["X-New", "v"]);
+  });
+
+  test("真实 buildCosyHeaders 上覆写后无重复 Content-Type / Accept", () => {
+    const url =
+      "https://api1.qoder.sh/algo/api/v2/service/ask/finish?Encode=1";
+    const user = { uid: "u-1", token: "jt-x", name: "n", email: "e" };
+    const headers = setHeader(
+      setHeader(buildCosyHeaders(url, user, "body", "mid"), "accept", "application/json"),
+      "content-type",
+      "application/json"
+    );
+    const count = (name: string) =>
+      headers.filter(([k]) => k.toLowerCase() === name).length;
+    assert.strictEqual(count("content-type"), 1, "Content-Type 重复会让 finish 返回 500");
+    assert.strictEqual(count("accept"), 1);
   });
 });
 

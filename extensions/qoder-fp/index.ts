@@ -37,6 +37,7 @@ import {
   buildQueueFinishBody,
   createQueueTelemetry,
   createQueueStatusSinks,
+  setHeader,
   queueFailureReason,
   decodeQueueError,
   formatQueueView,
@@ -518,8 +519,10 @@ async function pollQueueStatus(
       : controller.signal;
 
     try {
-      const headers = buildCosyHeaders(url, current, "", machineId).map(
-        ([k, v]) => [k, k.toLowerCase() === "accept" ? "application/json" : v] as [string, string]
+      const headers = setHeader(
+        buildCosyHeaders(url, current, "", machineId),
+        "accept",
+        "application/json"
       );
       const resp = await rawRequest(url, "GET", headers, Buffer.alloc(0), proxyUrl, signal);
       const body = await resp.text().catch(() => "");
@@ -604,10 +607,13 @@ async function releaseQueueLease(params: {
     timeConsumedMs: params.timeConsumedMs,
   });
 
-  const headers = buildCosyHeaders(url, user, wireBody, machineId).map(
-    ([k, v]) => [k, k.toLowerCase() === "accept" ? "application/json" : v] as [string, string]
+  // 注意：buildCosyHeaders 已带 Content-Type / Accept，这里只能覆写，
+  // 不能再 push 一份 —— 重复头会让上游返回 500（伪装成服务端故障，极难归因）。
+  const headers = setHeader(
+    setHeader(buildCosyHeaders(url, user, wireBody, machineId), "accept", "application/json"),
+    "content-type",
+    "application/json"
   );
-  headers.push(["Content-Type", "application/json"]);
 
   const resp = await rawRequest(
     url,
