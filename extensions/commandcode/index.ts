@@ -82,7 +82,7 @@ function providerModelCost(id: string) {
       warnedUnpricedModels.add(id)
       console.warn(
         `[commandcode] no pricing for model "${id}" (last verified ${PRICING_LAST_VERIFIED}); ` +
-          `its usage will report $0. Update ${PRICING_FILE} from ${PRICING_SOURCE_URL}`,
+          `its usage will report $0. Update ${PRICING_FILE} from ${PRICING_SOURCE_URL}, then commit and push.`,
       )
     }
     return { ...ZERO_MODEL_COST, tiers: undefined }

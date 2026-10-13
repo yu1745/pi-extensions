@@ -30,6 +30,7 @@ export const MODEL_INPUT_MODALITIES: Readonly<Record<string, readonly CommandCod
   "gpt-5.6-luna": ["text", "image"],
   "gpt-5.6-sol": ["text", "image"],
   "gpt-5.6-terra": ["text", "image"],
+  "meta/muse-wonder-1.0": ["text", "image"],
   "meta/muse-spark-1.1": ["text", "image"],
   "meta/muse-spark-1.2": ["text", "image"],
   "meta/muse-spark-1.2-contributor": ["text", "image"],
