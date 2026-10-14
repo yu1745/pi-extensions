@@ -30,3 +30,31 @@ export {
 	fetchCodeBuddyQuota,
 	renderCodeBuddy,
 } from "./quota-footer/providers/codebuddy.ts";
+
+// Re-export River (Console balance) functions for tests/consumers
+export {
+	RIVER_KEEPALIVE_CHECK_MS,
+	RIVER_KEEPALIVE_MS,
+	RIVER_STORE_VERSION,
+	fetchRiver,
+	fetchRiverBalance,
+	jwtExpiryMs,
+	keepRiverSessionWarm,
+	mintRiverAccessToken,
+	parseRiverAccount,
+	persistRiverStore,
+	readRiverStore,
+	readRiverStoreFile,
+	readSetCookie,
+	renderRiver,
+	resolveRiverAuthConfig,
+	riverConsoleBase,
+	riverCredentialId,
+	riverKeepAliveDue,
+	riverKeepAliveEnabled,
+	riverKeepAliveMs,
+	riverLowThresholds,
+	riverStoreFile,
+	riverTtlFor,
+	seedRiverSession,
+} from "./quota-footer/providers/river.ts";

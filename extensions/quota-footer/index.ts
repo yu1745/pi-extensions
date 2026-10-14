@@ -5,6 +5,12 @@ import { SixelChartEntryComponent } from "./history/chart-component.ts";
 import { formatShortDateTime, generateSixelChart } from "./history/sixel.ts";
 import { getStorageKey, loadHistory, recordQuotaChange } from "./history/store.ts";
 import { CONFIGS } from "./providers/index.ts";
+import {
+	keepRiverSessionWarm,
+	RIVER_KEEPALIVE_CHECK_MS,
+	riverCredentialId,
+	seedRiverSession,
+} from "./providers/river.ts";
 import type { FetchResult, ProviderConfig, SixelChartEntryData } from "./types.ts";
 import { cacheKey, ERROR_RETRY_TTL_MS, formatReset, RATE_LIMIT_RETRY_TTL_MS, renderFailure } from "./utils.ts";
 
@@ -40,7 +46,15 @@ export async function ignoreDisposedSession(work: () => Promise<void> | void): P
 
 async function quotaApiKey(ctx: ExtensionContext, provider: string): Promise<string | undefined> {
 	const fallback = () => ctx.modelRegistry.getApiKeyForProvider(provider);
-	return provider === "commandcode" ? resolveCommandCodeDisplayKey(fallback) : fallback();
+	if (provider === "commandcode") return resolveCommandCodeDisplayKey(fallback);
+	// River's balance lives in the Console, not on the inference gateway: the
+	// `rv_t_…` key only authenticates completions and every /api route wants a
+	// WorkOS access token. What the footer tracks is therefore the stored Console
+	// session, and its identity (never the rotating token) is what the cache key
+	// and the "no login" state are built from. Returning undefined here is what
+	// makes a missing session read as `no login` instead of a broken fetch.
+	if (provider === "river") return riverCredentialId() ?? undefined;
+	return fallback();
 }
 
 // In-memory cache keyed by "provider:keyHash" so switching keys or providers
@@ -181,6 +195,23 @@ async function syncActivation(ctx: ExtensionContext): Promise<void> {
 	});
 }
 
+// ─── River session keep-alive ────────────────────────────────────────────────
+
+// WorkOS ends a session once the application's inactivity timeout passes without
+// a refresh, and this footer only polls the *active* provider — so a River
+// session would lapse from pure disuse while the user works in another model.
+// The store file is only touched once per check window, so the hot path stays a
+// timestamp comparison.
+let lastRiverKeepAliveCheck = 0;
+
+function nudgeRiverKeepAlive(): void {
+	const now = Date.now();
+	if (now - lastRiverKeepAliveCheck < RIVER_KEEPALIVE_CHECK_MS) return;
+	lastRiverKeepAliveCheck = now;
+	// Detached and self-contained: it must never throw into the event loop.
+	void keepRiverSessionWarm();
+}
+
 // ─── extension entry ─────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI): void {
@@ -222,6 +253,7 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		nudgeRiverKeepAlive();
 		await syncActivation(ctx);
 	});
 
@@ -235,6 +267,7 @@ export default function (pi: ExtensionAPI): void {
 	// After each tool call completes: nudge a refresh so the widget reflects
 	// spend. The TTL cache inside refresh() prevents flooding the API.
 	pi.on("tool_result", async (_event, ctx) => {
+		nudgeRiverKeepAlive();
 		await ignoreDisposedSession(async () => {
 			const provider = ctx.model?.provider;
 			const cfg = provider ? CONFIGS[provider] : undefined;
@@ -341,6 +374,41 @@ export default function (pi: ExtensionAPI): void {
 		description: "在聊天流中插入周额度随时间下降的 Sixel 高分辨率平滑折线图",
 		handler: async (_args, ctx) => {
 			await insertSixelChartEntry(ctx);
+		},
+	});
+
+	// River is the one provider whose credential is a *session* rather than a key:
+	// the Console mints a WorkOS access token from it and retires the session's
+	// previous refresh token on every exchange. Re-seeding is therefore a routine
+	// operation, not an error path — paste a fresh cookie value and it replaces the
+	// store atomically.
+	pi.registerCommand("river-session", {
+		description: "重新填入 River Console 会话（粘贴浏览器里的 wos-session cookie 值或 WorkOS refresh token），并立即验证",
+		handler: async (args, ctx) => {
+			const raw = String(args ?? "").trim();
+			if (!raw) {
+				ctx.ui.notify(
+					"用法：/river-session <wos-session cookie 值或 refresh token>\n" +
+						"cookie 可在浏览器 Console 的开发者工具 → Application → Cookies → wos-session 中复制。",
+					"warning",
+				);
+				return;
+			}
+			if (!seedRiverSession(raw)) {
+				ctx.ui.notify("River 会话写入失败：值为空或无法识别", "error");
+				return;
+			}
+			const id = riverCredentialId() ?? "river:console";
+			const key = cacheKey("river", id);
+			// Verify through the normal path so the footer renders the fresh balance.
+			await refresh(ctx, CONFIGS.river, id, key, epoch, true);
+			const outcome = cache.get(key)?.result.kind ?? "unavailable";
+			ctx.ui.notify(
+				outcome === "success"
+					? "River 会话已更新，余额已刷新"
+					: `River 会话已写入，但验证失败（${outcome}）——cookie 可能已过期，请重新登录 Console 后再复制。`,
+				outcome === "success" ? "info" : "error",
+			);
 		},
 	});
 

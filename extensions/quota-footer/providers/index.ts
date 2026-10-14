@@ -6,6 +6,7 @@ import { commandCodeProviderConfig } from "./commandcode.ts";
 import { deepseekProviderConfig } from "./deepseek.ts";
 import { glmProviderConfig } from "./glm.ts";
 import { minimaxProviderConfig } from "./minimax.ts";
+import { riverProviderConfig } from "./river.ts";
 
 export const CONFIGS: Record<string, ProviderConfig> = {
 	deepseek: deepseekProviderConfig,
@@ -15,6 +16,7 @@ export const CONFIGS: Record<string, ProviderConfig> = {
 	antigravity: antigravityProviderConfig,
 	commandcode: commandCodeProviderConfig,
 	codebuddy: codeBuddyProviderConfig,
+	river: riverProviderConfig,
 };
 
 export {
@@ -25,4 +27,5 @@ export {
 	deepseekProviderConfig,
 	glmProviderConfig,
 	minimaxProviderConfig,
+	riverProviderConfig,
 };
