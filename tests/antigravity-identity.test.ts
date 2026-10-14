@@ -4,6 +4,13 @@ import {
   antigravityRequestEnvelope,
   prepareAntigravityRequestIdentity,
 } from "../extensions/antigravity/utils/util.js";
+import {
+  ANTIGRAVITY_MODEL_ENUM,
+  ANTIGRAVITY_MODELS,
+  getAntigravityRequestModelId,
+  getMaxOutputTokens,
+  getThinkingConfig,
+} from "../extensions/antigravity/models/models.js";
 
 const context = (content: unknown[] = []) => ({ systemPrompt: "same", messages: content }) as any;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -169,4 +176,48 @@ test("retry envelope reuse preserves step labels", () => {
   });
   assert.notEqual(next.requestId, first.requestId);
   assert.equal(next.labels.request_id, `${identity.trajectoryId}-1`);
+});
+
+test("gemini-4-argon mirrors agy 1.3.5's tiered ids and family enum", () => {
+  assert.equal(getAntigravityRequestModelId("gemini-4-argon", "low"), "gemini-4-argon-low");
+  assert.equal(
+    getAntigravityRequestModelId("gemini-4-argon", "medium"),
+    "gemini-4-argon-medium",
+  );
+  assert.equal(getAntigravityRequestModelId("gemini-4-argon", undefined), "gemini-4-argon-low");
+
+  // fetchAvailableModels reports MODEL_PLACEHOLDER_M421 for the gated `*-disabled` id
+  // that a non-Ultra account receives; agy's tiered ids share that family enum.
+  assert.equal(ANTIGRAVITY_MODEL_ENUM["gemini-4-argon-disabled"], "MODEL_PLACEHOLDER_M421");
+  assert.equal(ANTIGRAVITY_MODEL_ENUM["gemini-4-argon-high"], "MODEL_PLACEHOLDER_M421");
+
+  const identity = prepareAntigravityRequestIdentity(context());
+  const envelope = antigravityRequestEnvelope("gemini-4-argon-high", {
+    isClaude: false,
+    sessionId: identity.sessionId,
+    trajectoryId: identity.trajectoryId,
+    callIndex: identity.callIndex,
+    step: 1,
+  });
+  assert.equal(envelope.labels.model_enum, "MODEL_PLACEHOLDER_M421");
+
+  // Low/medium/high reuse the Gemini Flash budget ramp.
+  assert.deepEqual(getThinkingConfig("gemini-4-argon", "low"), {
+    includeThoughts: true,
+    thinkingBudget: 1000,
+  });
+  assert.deepEqual(getThinkingConfig("gemini-4-argon", "medium"), {
+    includeThoughts: true,
+    thinkingBudget: 4000,
+  });
+  assert.deepEqual(getThinkingConfig("gemini-4-argon", "high"), {
+    includeThoughts: true,
+    thinkingBudget: -1,
+  });
+
+  const argon = ANTIGRAVITY_MODELS.find((entry) => entry.id === "gemini-4-argon");
+  assert.ok(argon, "gemini-4-argon must be selectable");
+  assert.equal(argon.maxTokens, 65536);
+  assert.equal(argon.contextWindow, 1048576);
+  assert.equal(getMaxOutputTokens("gemini-4-argon", "gemini-4-argon-high"), 65536);
 });

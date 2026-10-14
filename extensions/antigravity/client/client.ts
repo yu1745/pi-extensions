@@ -60,13 +60,13 @@ export function endpointCandidates(): string[] {
 }
 
 /**
- * Client identity published by agy 1.2.4. Captured verbatim from the CLI's own traffic:
- *   `antigravity/cli/1.2.4 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)`
+ * Client identity published by agy 1.3.5. Verified against the CLI's own traffic:
+ *   `antigravity/cli/1.3.5 (aidev_client; os_type=linux; arch=amd64; cl=998863838; auth_method=consumer)`
  * The CLI sends only User-Agent + Content-Type (+ auth); it has no X-Goog-Api-Client and
  * no Client-Metadata header, so this provider no longer fabricates them.
  */
-const DEFAULT_ANTIGRAVITY_CLI_VERSION = "1.2.4";
-const DEFAULT_ANTIGRAVITY_CL = "982146307";
+const DEFAULT_ANTIGRAVITY_CLI_VERSION = "1.3.5";
+const DEFAULT_ANTIGRAVITY_CL = "998863838";
 
 function platformOsType(): string {
   if (process.platform === "darwin") return "darwin";
@@ -257,6 +257,12 @@ function buildModelMatchRegex(requestedId: string): RegExp {
   if (req === "gemini-3.8-flash-low") return /gemini[- ]3\.8[- ]flash \(low\)/i;
   if (req === "gemini-3.8-flash-medium") return /gemini[- ]3\.8[- ]flash \(medium\)/i;
   if (req === "gemini-3.8-flash-high") return /gemini[- ]3\.8[- ]flash \(high\)/i;
+  // Gemini 4 Argon. agy 1.3.5 advertises the tiered ids; a non-Ultra account only sees
+  // the gated `gemini-4-argon-disabled` id, whose label carries no effort suffix.
+  if (req === "gemini-4-argon-low") return /gemini[- ]4[- ]argon \(low\)/i;
+  if (req === "gemini-4-argon-medium") return /gemini[- ]4[- ]argon \(medium\)/i;
+  if (req === "gemini-4-argon-high") return /gemini[- ]4[- ]argon \(high\)/i;
+  if (req === "gemini-4-argon") return /gemini[- ]4[- ]argon/i;
   if (req === "gemini-3.7-flash-low") return /gemini[- ]3\.7[- ]flash \(low\)/i;
   if (req === "gemini-3.7-flash-medium") return /gemini[- ]3\.7[- ]flash \(medium\)/i;
   if (req === "gemini-3.7-flash-high") return /gemini[- ]3\.7[- ]flash \(high\)/i;

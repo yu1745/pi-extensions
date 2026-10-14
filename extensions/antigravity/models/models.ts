@@ -9,7 +9,8 @@ export const PROVIDER_NAME = "Antigravity";
 /**
  * Public selectable model IDs → backend request model IDs by thinking effort.
  *
- * Catalog mirrors `agy models` (Antigravity CLI 1.2.4), which advertises:
+ * Catalog mirrors `agy models` (Antigravity CLI 1.3.5), which advertises:
+ * - Gemini 4 Argon (Low / Medium / High) — Ultra-only, currently server-disabled
  * - Gemini 3.8 Flash (Low / Medium / High)
  * - Gemini 3.7 Flash (Low / Medium / High)
  * - Gemini 3.6 Flash (Low / Medium / High)
@@ -22,6 +23,22 @@ export const PROVIDER_NAME = "Antigravity";
  * advertised by the backend for each model.
  */
 export const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
+  // Gemini 4 Argon. agy 1.3.5 statically advertises the tiered ids below (its own
+  // display table maps them to "Gemini 4 Argon (Low|Medium|High)"). The live
+  // fetchAvailableModels response for a non-Ultra account only carries a single gated
+  // `gemini-4-argon-disabled` entry (displayName "Gemini 4 Argon", model enum
+  // MODEL_PLACEHOLDER_M421), so these ids are what agy will send once unlocked.
+  "gemini-4-argon": {
+    off: "gemini-4-argon-low",
+    routing: {
+      minimal: "gemini-4-argon-low",
+      low: "gemini-4-argon-low",
+      medium: "gemini-4-argon-medium",
+      high: "gemini-4-argon-high",
+      xhigh: "gemini-4-argon-high",
+    },
+    defaultRequestId: "gemini-4-argon-low",
+  },
   "gemini-3.8-flash": {
     off: "gemini-3.8-flash-low",
     routing: {
@@ -107,6 +124,11 @@ export const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
  * Requesting more than these limits returns a 400 Bad Request from the API.
  */
 export const RUNTIME_MAX_OUTPUT_TOKENS: Record<string, number> = {
+  // Gemini 4 Argon: live fetchAvailableModels reports maxOutputTokens 65536.
+  "gemini-4-argon": 65536,
+  "gemini-4-argon-low": 65536,
+  "gemini-4-argon-medium": 65536,
+  "gemini-4-argon-high": 65536,
   "gemini-3.8-flash": 65536,
   "gemini-3.8-flash-low": 65536,
   "gemini-3.8-flash-medium": 65536,
@@ -281,6 +303,16 @@ const thinkingLevelMaps = {
 /** Same set as `agy models`, collapsed to public Pi model IDs. */
 export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
   {
+    id: "gemini-4-argon",
+    name: "Gemini 4 Argon (Antigravity)",
+    reasoning: true,
+    thinkingLevelMap: thinkingLevelMaps.lowMediumHigh,
+    input: ["text", "image"],
+    cost: costGeminiFlash,
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  },
+  {
     id: "gemini-3.8-flash",
     name: "Gemini 3.8 Flash (Antigravity)",
     reasoning: true,
@@ -421,11 +453,21 @@ export type ThinkingWire = {
 /**
  * Runtime model id → backend `labels.model_enum`.
  *
- * Captured from agy 1.2.4 `v1internal:streamGenerateContent` traffic for every model
- * `agy models` advertises. A runtime id that is absent here sends no `model_enum` rather
- * than a guessed routing value.
+ * Originally captured from agy 1.2.4 `v1internal:streamGenerateContent` traffic; the same
+ * enum name is also published per model as the `model` field of
+ * `v1internal:fetchAvailableModels`, which is where the Gemini 4 Argon value below comes
+ * from. A runtime id that is absent here sends no `model_enum` rather than a guessed
+ * routing value.
  */
 export const ANTIGRAVITY_MODEL_ENUM: Record<string, string> = {
+  // Gemini 4 Argon. fetchAvailableModels only exposes the gated id
+  // `gemini-4-argon-disabled` today and names its enum MODEL_PLACEHOLDER_M421; the tiered
+  // ids agy 1.3.5 advertises share that family enum.
+  "gemini-4-argon": "MODEL_PLACEHOLDER_M421",
+  "gemini-4-argon-low": "MODEL_PLACEHOLDER_M421",
+  "gemini-4-argon-medium": "MODEL_PLACEHOLDER_M421",
+  "gemini-4-argon-high": "MODEL_PLACEHOLDER_M421",
+  "gemini-4-argon-disabled": "MODEL_PLACEHOLDER_M421",
   "gemini-3.8-flash-low": "MODEL_PLACEHOLDER_M320",
   "gemini-3.8-flash-medium": "MODEL_PLACEHOLDER_M319",
   "gemini-3.8-flash-high": "MODEL_PLACEHOLDER_M318",
@@ -443,9 +485,11 @@ export const ANTIGRAVITY_MODEL_ENUM: Record<string, string> = {
 };
 
 /**
- * Thinking budgets captured from agy 1.2.4 traffic per runtime model. The CLI drives
- * Gemini 3.6/3.7/3.8 Flash and Gemini 3.1 Pro with `thinkingBudget` (not `thinkingLevel`);
- * `-1` means dynamic/unbounded. Claude and GPT-OSS get a fixed budget.
+ * Thinking budgets per runtime model. Verified against the `thinkingBudget` field that
+ * `v1internal:fetchAvailableModels` reports for each id (3.8 Flash low/medium/high =
+ * 1000/4000/-1), which matches what agy actually sends. The CLI drives Gemini 3.6/3.7/3.8
+ * Flash and Gemini 3.1 Pro with `thinkingBudget` (not `thinkingLevel`); `-1` means
+ * dynamic/unbounded. Claude and GPT-OSS get a fixed budget.
  */
 const GEMINI_FLASH_THINKING_BUDGET: Record<string, number> = {
   minimal: 1000,
@@ -460,6 +504,7 @@ export function getThinkingConfig(
   effort: string | undefined,
 ): ThinkingWire | undefined {
   if (
+    modelId === "gemini-4-argon" ||
     modelId === "gemini-3.8-flash" ||
     modelId === "gemini-3.7-flash" ||
     modelId === "gemini-3.6-flash"
