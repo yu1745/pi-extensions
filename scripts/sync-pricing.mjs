@@ -32,6 +32,28 @@ const MAX_UNEXPLAINED_GAPS = 5
 
 const checkOnly = process.argv.includes("--check")
 
+/**
+ * Pricing rows upstream publishes that the provider catalog does not serve.
+ *
+ * The catalog lists what `POST /provider/v1/chat/completions` accepts; a row
+ * outside it is either billed on another surface or retired. Both are fine, but
+ * they have to be *recorded here with a reason*, because a third kind — a real
+ * model we failed to map — looks exactly the same in the payload. Anything
+ * unregistered fails the run instead of being skipped quietly.
+ */
+const OFF_CATALOG_PRICING = {
+  "typesafe/jev": {
+    name: "Jev",
+    reason:
+      "decision model, billed on POST /provider/v1/systemone (or headless `cmd -p -m typesafe/jev`); " +
+      "never in /model, so it never enters the chat pricing path",
+  },
+  "claude-opus-4-6": {
+    name: "Claude Opus 4.6",
+    reason: "retired: absent from the catalog and from /models as of 2026-10-14",
+  },
+}
+
 /* ------------------------------------------------------------------ fetch -- */
 
 async function fetchCatalog() {
@@ -275,6 +297,10 @@ function renderTable({ verifiedOn, rows, freeIds, unpricedIds }) {
     "// is pi's request-wide input tier: the highest threshold exceeded by input +",
     "// cache reads + cache writes prices the whole request.",
     "//",
+    "// Scope: the ids the provider catalog serves on the chat/messages endpoints.",
+    "// Models billed on other surfaces (the decision API) are deliberately absent;",
+    "// see OFF_CATALOG_PRICING in scripts/sync-pricing.mjs.",
+    "//",
     `// Source:  ${PRICING_URL}`,
     `// Catalog: ${CATALOG_URL}`,
     `// Verified: ${verifiedOn}`,
@@ -371,10 +397,24 @@ function buildTable({ catalog, costRows, displayRows }) {
     unpricedIds.push(model.id)
   }
 
-  const skipped = costRows
-    .filter((row) => !catalogNames.has(normalizeName(row.name)))
-    .map((row) => row.id)
-    .sort()
+  // Rows upstream prices that no catalog id claims: the decision API, retired
+  // models, or a model we failed to map. Only the last kind is a problem, so
+  // every off-catalog row must be registered to be skipped.
+  const offCatalog = costRows.filter((row) => !catalogNames.has(normalizeName(row.name)))
+  const registered = new Map(
+    Object.entries(OFF_CATALOG_PRICING).map(([id, entry]) => [normalizeName(entry.name), { id, ...entry }]),
+  )
+  const known = []
+  const unexplained = []
+  for (const row of offCatalog) {
+    const entry = registered.get(normalizeName(row.name))
+    if (entry) known.push(`${row.id} — ${entry.reason}`)
+    else unexplained.push(`${row.id} (${row.name})`)
+  }
+  const seenNames = new Set(offCatalog.map((row) => normalizeName(row.name)))
+  const staleRegistry = [...registered]
+    .filter(([name]) => !seenNames.has(name))
+    .map(([, entry]) => `${entry.id} — no longer priced upstream; drop it from OFF_CATALOG_PRICING`)
 
   rows.sort((left, right) => {
     const a = left.id.toLowerCase()
@@ -386,7 +426,9 @@ function buildTable({ catalog, costRows, displayRows }) {
     rows,
     freeIds: freeIds.sort(),
     unpricedIds: unpricedIds.sort(),
-    skipped,
+    offCatalog: known.sort(),
+    unexplained: unexplained.sort(),
+    staleRegistry: staleRegistry.sort(),
     mismatches,
     zeroPriced: zeroPriced.sort(),
   }
@@ -410,16 +452,26 @@ async function main() {
   console.log(`pricing payload: ${costRows.length} cost rows, ${displayRows.length} display rows`)
   console.log(
     `table: ${built.rows.length} rows (${built.freeIds.length} free, ` +
-      `${built.unpricedIds.length} unpriced, ${built.skipped.length} skipped)`,
+      `${built.unpricedIds.length} unpriced, ${built.offCatalog.length} off-catalog)`,
   )
   console.log()
 
   report("added upstream", added)
   report("removed upstream", removed)
   report("catalog ids with no pricing row (fall back to $0 at runtime)", built.unpricedIds)
-  report("priced upstream but absent from the catalog (skipped)", built.skipped)
+  report("priced upstream, off the chat catalog (registered, not in the table)", built.offCatalog)
+  report("priced upstream, off the chat catalog, UNREGISTERED", built.unexplained)
+  report("OFF_CATALOG_PRICING entries upstream no longer prices", built.staleRegistry)
   report("tier bounds whose label disagrees with the payload", built.mismatches)
   report("priced at zero upstream, recorded as free", built.zeroPriced)
+
+  if (built.unexplained.length > 0 || built.staleRegistry.length > 0) {
+    // Abort before comparing or writing: the table would be built on a guess.
+    console.log("pricing table: not touched. Record the reason in OFF_CATALOG_PRICING")
+    console.log(`(${fileURLToPath(import.meta.url)}) or price the model, then re-run.`)
+    process.exitCode = 1
+    return
+  }
 
   if (built.unpricedIds.length > MAX_UNEXPLAINED_GAPS) {
     throw new Error(

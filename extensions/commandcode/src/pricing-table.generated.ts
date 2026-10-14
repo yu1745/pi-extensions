@@ -5,6 +5,10 @@
 // is pi's request-wide input tier: the highest threshold exceeded by input +
 // cache reads + cache writes prices the whole request.
 //
+// Scope: the ids the provider catalog serves on the chat/messages endpoints.
+// Models billed on other surfaces (the decision API) are deliberately absent;
+// see OFF_CATALOG_PRICING in scripts/sync-pricing.mjs.
+//
 // Source:  https://commandcode.ai/docs/resources/pricing-limits
 // Catalog: https://api.commandcode.ai/provider/v1/models
 // Verified: 2026-10-14
