@@ -1,89 +1,507 @@
 #!/usr/bin/env node
-// Refresh the Command Code pricing overlay from upstream.
+// Keep the Command Code pricing overlay in sync with upstream — automatically.
 //
-// This is deliberately a script, not a test. The Command Code catalog and
-// price list change without notice, so asserting "MODEL_COSTS equals the last
-// fetch" only produces red builds that have nothing to do with our code. This
-// script fetches the live catalog, diffs it against extensions/commandcode/
-// fixtures/commandcode-model-ids.json and against MODEL_COSTS, and reports what
-// a human (or an agent) needs to update by hand.
+// Both halves of the overlay are parsed, never typed by hand:
 //
-//   node scripts/sync-pricing.mjs            # report drift, refresh snapshots
-//   node scripts/sync-pricing.mjs --check    # report only, never write (CI)
+//   * the catalog (api.commandcode.ai/provider/v1/models) lists the ids we can
+//     be asked to price and the names to match them by;
+//   * the pricing page carries a React payload with per-token rates, context
+//     tiers, free flags and time-of-day rates. That payload — not the rendered
+//     table — is the source MODEL_COSTS is generated from.
 //
-// Exit code is always 0: drift is upstream's business, not a build failure.
+//   node scripts/sync-pricing.mjs            # rewrite the table + catalog snapshot
+//   node scripts/sync-pricing.mjs --check    # report drift, write nothing, exit 1
+//
+// The page is undocumented territory: a Next.js flight payload, not an API.
+// Every step is therefore guarded, so a shape change fails the run loudly
+// instead of quietly writing zeros over real prices.
 
 import { readFile, writeFile } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
 
 const CATALOG_URL = "https://api.commandcode.ai/provider/v1/models"
 const PRICING_URL = "https://commandcode.ai/docs/resources/pricing-limits"
-const FIXTURES = new URL("../extensions/commandcode/fixtures/", import.meta.url)
-const PRICING_FILE = new URL("../extensions/commandcode/src/pricing.ts", import.meta.url)
+const ROOT = new URL("../extensions/commandcode/", import.meta.url)
+const TABLE_FILE = new URL("src/pricing-table.generated.ts", ROOT)
+const IDS_SNAPSHOT = new URL("fixtures/commandcode-model-ids.json", ROOT)
+
+// Guards: refuse to write when upstream stops looking like the payload we parse.
+const MIN_COST_ROWS = 50
+const MIN_DISPLAY_ROWS = 50
+const MAX_UNEXPLAINED_GAPS = 5
 
 const checkOnly = process.argv.includes("--check")
 
-async function loadPricingModule() {
-  const { MODEL_COSTS, FREE_MODEL_IDS, PRICING_LAST_VERIFIED } = await import(
-    PRICING_FILE.href
-  )
-  return { MODEL_COSTS, FREE_MODEL_IDS, PRICING_LAST_VERIFIED }
-}
+/* ------------------------------------------------------------------ fetch -- */
 
 async function fetchCatalog() {
   const res = await fetch(CATALOG_URL)
   if (!res.ok) throw new Error(`${CATALOG_URL} responded ${res.status}`)
   const body = await res.json()
-  return body.data.map((model) => model.id)
+  if (!Array.isArray(body?.data)) throw new Error(`${CATALOG_URL} returned no data array`)
+  return body.data.map((model) => ({ id: model.id, name: model.name }))
 }
 
-async function main() {
-  const [{ MODEL_COSTS, FREE_MODEL_IDS, PRICING_LAST_VERIFIED }, liveIds] = await Promise.all([
-    loadPricingModule(),
-    fetchCatalog(),
-  ])
+async function fetchPricingRows() {
+  const res = await fetch(PRICING_URL, { headers: { "user-agent": "pi-commandcode-pricing-sync" } })
+  if (!res.ok) throw new Error(`${PRICING_URL} responded ${res.status}`)
 
-  const snapshotPath = new URL("commandcode-model-ids.json", FIXTURES)
-  const snapshot = JSON.parse(await readFile(snapshotPath, "utf-8"))
-  const previousIds = snapshot.modelIds
-  const liveSet = new Set(liveIds)
+  const payload = flightPayloadText(await res.text())
+  const arrays = objectArrays(payload)
 
-  const added = liveIds.filter((id) => !previousIds.includes(id)).sort()
-  const removed = previousIds.filter((id) => !liveSet.has(id)).sort()
-  const unpriced = liveIds.filter((id) => !(id in MODEL_COSTS)).sort()
-  const stale = Object.keys(MODEL_COSTS).filter((id) => !liveSet.has(id)).sort()
-  const undeclaredFree = Object.entries(MODEL_COSTS)
-    .filter(
-      ([, cost]) =>
-        cost.input === 0 && cost.output === 0 && cost.cacheRead === 0 && cost.cacheWrite === 0,
+  // The page ships two arrays: cost rows (per-token rates, tiers, peak/off-peak)
+  // and display rows (context windows, rendered labels, free/deal flags).
+  const costRows = arrays.find(
+    (rows) => rows.length > 0 && rows.every((row) => typeof row.inputCost === "number"),
+  )
+  const displayRows = arrays.find(
+    (rows) => rows.length > 0 && rows.every((row) => Array.isArray(row.tiers)),
+  )
+  if (!costRows) throw new Error("pricing payload: no array of rows carrying inputCost")
+  if (!displayRows) throw new Error("pricing payload: no array of rows carrying tiers")
+  if (costRows.length < MIN_COST_ROWS) {
+    throw new Error(`pricing payload: only ${costRows.length} cost rows (< ${MIN_COST_ROWS})`)
+  }
+  if (displayRows.length < MIN_DISPLAY_ROWS) {
+    throw new Error(`pricing payload: only ${displayRows.length} display rows (< ${MIN_DISPLAY_ROWS})`)
+  }
+  return { costRows, displayRows }
+}
+
+/* --------------------------------------------------------------- decoding -- */
+
+/**
+ * Index of the bracket closing the one at `openIndex`, string-aware.
+ * `text[openIndex]` is the opener itself, so the scan starts at depth 1.
+ */
+function matchingBracket(text, openIndex, open, close) {
+  let depth = 1
+  let inString = false
+  let escaped = false
+  for (let i = openIndex + 1; i < text.length; i++) {
+    const char = text[i]
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (char === "\\") {
+      escaped = true
+      continue
+    }
+    if (char === '"') {
+      inString = !inString
+      continue
+    }
+    if (inString) continue
+    if (char === open) depth++
+    else if (char === close && --depth === 0) return i
+  }
+  return -1
+}
+
+/**
+ * Concatenate the strings Next.js pushes into `self.__next_f`; that stream is
+ * where the React server payload — pricing data included — actually lives.
+ */
+function flightPayloadText(html) {
+  const marker = "self.__next_f.push("
+  let text = ""
+  let cursor = 0
+  for (;;) {
+    const at = html.indexOf(marker, cursor)
+    if (at === -1) break
+    const start = at + marker.length
+    const end = matchingBracket(html, start - 1, "(", ")")
+    if (end === -1) break
+    cursor = end + 1
+    let chunk
+    try {
+      chunk = JSON.parse(html.slice(start, end))
+    } catch {
+      continue
+    }
+    if (!Array.isArray(chunk)) continue
+    for (const part of chunk) if (typeof part === "string") text += part
+  }
+  if (!text) throw new Error("pricing page: no Next.js flight payload found")
+  return text
+}
+
+/** Every `[{ "id": ... }]` array in the payload, parsed. */
+function objectArrays(text) {
+  const marker = '[{"id":"'
+  const arrays = []
+  for (let at = text.indexOf(marker); at !== -1; at = text.indexOf(marker, at + 1)) {
+    const end = matchingBracket(text, at, "[", "]")
+    if (end === -1) continue
+    try {
+      const value = JSON.parse(text.slice(at, end + 1))
+      if (Array.isArray(value) && value.every((row) => row && typeof row.id === "string")) {
+        arrays.push(value)
+      }
+    } catch {
+      // Not a payload array we can use; keep scanning.
+    }
+    at = end
+  }
+  return arrays
+}
+
+/* -------------------------------------------------------------- transforming -- */
+
+const normalizeName = (name) => name.toLowerCase().replace(/[^a-z0-9]/g, "")
+
+function indexByName(rows, label) {
+  const index = new Map()
+  for (const row of rows) {
+    const key = normalizeName(row.name)
+    if (index.has(key)) throw new Error(`${label}: duplicate model name "${row.name}"`)
+    index.set(key, row)
+  }
+  return index
+}
+
+function positiveNumber(value, what) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${what}: expected a non-negative number, got ${JSON.stringify(value)}`)
+  }
+  return value
+}
+
+/** `inputCost`/`outputCost`/`cacheReadCost` (+ optional cache write) of a row or tier. */
+function ratesFrom(source, what, fallbackCacheWrite = 0) {
+  return {
+    input: positiveNumber(source.inputCost, `${what} inputCost`),
+    output: positiveNumber(source.outputCost, `${what} outputCost`),
+    cacheRead: positiveNumber(source.cacheReadCost, `${what} cacheReadCost`),
+    cacheWrite: positiveNumber(source.cacheWriteCost ?? fallbackCacheWrite, `${what} cacheWriteCost`),
+  }
+}
+
+/**
+ * One pricing row -> our cost shape.
+ *
+ * Upstream tiers carry the *upper* bound of each range (`maxContext`), while
+ * pi's `inputTokensAbove` is where a tier starts, so tier i+1's threshold is
+ * tier i's bound. The last upstream tier has no bound: it is the "and above"
+ * range. The base rates must equal the first tier, which the page repeats, so
+ * a divergence there means the shape moved.
+ */
+function costFromRow(row) {
+  const source = `pricing row "${row.id}"`
+  const base = ratesFrom(row, source)
+  const upstreamTiers = row.contextTiers ?? []
+  if (upstreamTiers.length > 0) {
+    const first = ratesFrom(upstreamTiers[0], `${source} first tier`)
+    for (const field of ["input", "output", "cacheRead", "cacheWrite"]) {
+      if (Math.abs(first[field] - base[field]) > 1e-9) {
+        throw new Error(`${source}: base ${field} ${base[field]} != first tier ${first[field]}`)
+      }
+    }
+  }
+
+  const tiers = []
+  for (let i = 1; i < upstreamTiers.length; i++) {
+    const threshold = upstreamTiers[i - 1].maxContext
+    if (typeof threshold !== "number" || !(threshold > 0)) {
+      throw new Error(`${source}: tier ${i} is missing a positive maxContext bound`)
+    }
+    tiers.push({
+      inputTokensAbove: threshold,
+      ...ratesFrom(upstreamTiers[i], `${source} tier ${i}`),
+    })
+  }
+
+  const cost = { ...base }
+  if (tiers.length > 0) cost.tiers = tiers
+  return cost
+}
+
+/** The rate the page renders for a free model: one tier, all zeros. */
+function isFreeRow(display) {
+  return (
+    display?.deal?.free === true ||
+    (Array.isArray(display?.tiers) && display.tiers.every((tier) => tier?.rates?.input === 0 && tier?.rates?.output === 0))
+  )
+}
+
+/** "> 272K" / "≤ 256K" -> 272000 / 256000, for cross-checking tier bounds. */
+function thresholdFromLabel(context) {
+  const match = /\d+(?:\.\d+)?\s*K/i.exec(context ?? "")
+  return match ? Math.round(Number(match[0].replace(/[^\d.]/g, "")) * 1000) : undefined
+}
+
+/* --------------------------------------------------------------- rendering -- */
+
+// Keep generated lines readable: a note that no longer fits goes on its own
+// line above the row instead of stretching it.
+const MAX_LINE = 100
+
+function withNote(line, note) {
+  if (!note) return line
+  return line.length + note.length + 6 <= MAX_LINE ? `${line}  // ${note}` : `  // ${note}\n${line}`
+}
+
+function renderCost(row) {
+  const inline = `{ input: ${String(row.cost.input)}, output: ${String(row.cost.output)}, ` +
+    `cacheRead: ${String(row.cost.cacheRead)}, cacheWrite: ${String(row.cost.cacheWrite)} }`
+  if (!row.cost.tiers) return withNote(`  ${JSON.stringify(row.id)}: ${inline},`, row.note)
+
+  const lines = [
+    `  ${JSON.stringify(row.id)}: {`,
+    `    input: ${String(row.cost.input)},`,
+    `    output: ${String(row.cost.output)},`,
+    `    cacheRead: ${String(row.cost.cacheRead)},`,
+    `    cacheWrite: ${String(row.cost.cacheWrite)},`,
+    "    tiers: [",
+  ]
+  for (const tier of row.cost.tiers) {
+    lines.push(
+      `      { inputTokensAbove: ${tier.inputTokensAbove}, input: ${String(tier.input)}, ` +
+        `output: ${String(tier.output)}, cacheRead: ${String(tier.cacheRead)}, ` +
+        `cacheWrite: ${String(tier.cacheWrite)} },`,
     )
-    .map(([id]) => id)
-    .filter((id) => !FREE_MODEL_IDS.has(id))
+  }
+  lines.push("    ],", "  },")
+  return withNote(lines.join("\n"), row.note)
+}
+
+function renderTable({ verifiedOn, rows, freeIds, unpricedIds }) {
+  const header = [
+    "// Generated by `pnpm pricing:sync`. Do not edit by hand.",
+    "//",
+    "// Rates are USD per million tokens, parsed from the pricing page's embedded",
+    "// payload and mapped onto the live catalog by model name. `inputTokensAbove`",
+    "// is pi's request-wide input tier: the highest threshold exceeded by input +",
+    "// cache reads + cache writes prices the whole request.",
+    "//",
+    `// Source:  ${PRICING_URL}`,
+    `// Catalog: ${CATALOG_URL}`,
+    `// Verified: ${verifiedOn}`,
+    "",
+    `export const PRICING_VERIFIED_ON = ${JSON.stringify(verifiedOn)}`,
+    "",
+    "/** Catalog ids the pricing page serves at no cost. */",
+    "export const GENERATED_FREE_MODEL_IDS: readonly string[] = " +
+      renderStringArray(freeIds),
+    "",
+    "/**",
+    " * Catalog ids upstream lists without a pricing row. They fall back to $0 at",
+    " * runtime and log a warning; the sync reports them so they get priced once",
+    " * upstream publishes rates.",
+    " */",
+    "export const GENERATED_UNPRICED_MODEL_IDS: readonly string[] = " +
+      renderStringArray(unpricedIds),
+    "",
+    "export const GENERATED_MODEL_COSTS = {",
+    rows.map(renderCost).join("\n"),
+    "} as const",
+    "",
+  ]
+  return header.join("\n")
+}
+
+function renderStringArray(values) {
+  if (values.length === 0) return "[]"
+  return `[\n${values.map((value) => `  ${JSON.stringify(value)},`).join("\n")}\n]`
+}
+
+/* ------------------------------------------------------------------- build -- */
+
+function buildTable({ catalog, costRows, displayRows }) {
+  const costsByName = indexByName(costRows, "pricing payload")
+  const displayByName = indexByName(displayRows, "pricing page")
+  const catalogNames = new Set(catalog.map((model) => normalizeName(model.name)))
+
+  const rows = []
+  const freeIds = []
+  const unpricedIds = []
+  const mismatches = []
+  const zeroPriced = []
+
+  for (const model of catalog) {
+    const key = normalizeName(model.name)
+    const costRow = costsByName.get(key)
+    if (costRow) {
+      const cost = costFromRow(costRow)
+      const allZero = [cost.input, cost.output, cost.cacheRead, cost.cacheWrite].every(
+        (rate) => rate === 0,
+      )
+      if (allZero) {
+        // Free is a claim about the model, so the zero row is recorded as one
+        // instead of quietly contradicting GENERATED_FREE_MODEL_IDS.
+        freeIds.push(model.id)
+        zeroPriced.push(model.id)
+      }
+
+      let note
+      if (costRow.timeOfDay) {
+        const { peak, windows } = costRow.timeOfDay
+        const peakRate = peak
+          ? ` (peak $${peak.inputCost}/$${peak.outputCost}${windows ? `, ${windows}` : ""})`
+          : ""
+        note = `off-peak rate; the page bills peak hours higher${peakRate}`
+      }
+      rows.push({ id: model.id, cost, note })
+
+      // The rendered table repeats the tier bounds as labels; if they stop
+      // agreeing with the payload, one of the two moved.
+      const display = displayByName.get(key)
+      const upstreamTiers = costRow.contextTiers ?? []
+      if (display && costRow.contextTiers && display.tiers.length === costRow.contextTiers.length) {
+        for (let i = 1; i < display.tiers.length; i++) {
+          const fromLabel = thresholdFromLabel(display.tiers[i - 1]?.context)
+          const fromPayload = upstreamTiers[i - 1]?.maxContext
+          if (fromLabel !== undefined && fromLabel !== fromPayload) {
+            mismatches.push(
+              `${model.id}: label bound ${fromLabel} != payload bound ${fromPayload}`,
+            )
+          }
+        }
+      }
+      continue
+    }
+
+    const display = displayByName.get(key)
+    if (isFreeRow(display)) {
+      freeIds.push(model.id)
+      rows.push({ id: model.id, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } })
+      continue
+    }
+    unpricedIds.push(model.id)
+  }
+
+  const skipped = costRows
+    .filter((row) => !catalogNames.has(normalizeName(row.name)))
+    .map((row) => row.id)
     .sort()
 
-  console.log(`catalog: ${liveIds.length} models (snapshot ${previousIds.length})`)
-  console.log(`MODEL_COSTS: ${Object.keys(MODEL_COSTS).length} entries`)
-  console.log(`pricing last verified: ${PRICING_LAST_VERIFIED}\nsource: ${PRICING_URL}\n`)
+  rows.sort((left, right) => {
+    const a = left.id.toLowerCase()
+    const b = right.id.toLowerCase()
+    return a < b ? -1 : a > b ? 1 : 0
+  })
 
-  report("added upstream (unpriced models warn at runtime)", added)
-  report("removed upstream (drop from MODEL_COSTS)", removed)
-  report("in catalog but missing from MODEL_COSTS", unpriced)
-  report("in MODEL_COSTS but no longer in the catalog", stale)
-  report("all-zero cost without a FREE_MODEL_IDS entry", undeclaredFree)
+  return {
+    rows,
+    freeIds: freeIds.sort(),
+    unpricedIds: unpricedIds.sort(),
+    skipped,
+    mismatches,
+    zeroPriced: zeroPriced.sort(),
+  }
+}
+
+/* -------------------------------------------------------------------- main -- */
+
+async function main() {
+  const [catalog, { costRows, displayRows }] = await Promise.all([
+    fetchCatalog(),
+    fetchPricingRows(),
+  ])
+  const built = buildTable({ catalog, costRows, displayRows })
+
+  const snapshot = await readSnapshot()
+  const liveIds = catalog.map((model) => model.id)
+  const added = liveIds.filter((id) => !snapshot.modelIds.includes(id)).sort()
+  const removed = snapshot.modelIds.filter((id) => !liveIds.includes(id)).sort()
+
+  console.log(`catalog: ${liveIds.length} models (snapshot ${snapshot.modelIds.length})`)
+  console.log(`pricing payload: ${costRows.length} cost rows, ${displayRows.length} display rows`)
+  console.log(
+    `table: ${built.rows.length} rows (${built.freeIds.length} free, ` +
+      `${built.unpricedIds.length} unpriced, ${built.skipped.length} skipped)`,
+  )
+  console.log()
+
+  report("added upstream", added)
+  report("removed upstream", removed)
+  report("catalog ids with no pricing row (fall back to $0 at runtime)", built.unpricedIds)
+  report("priced upstream but absent from the catalog (skipped)", built.skipped)
+  report("tier bounds whose label disagrees with the payload", built.mismatches)
+  report("priced at zero upstream, recorded as free", built.zeroPriced)
+
+  if (built.unpricedIds.length > MAX_UNEXPLAINED_GAPS) {
+    throw new Error(
+      `${built.unpricedIds.length} catalog ids without a pricing row (> ${MAX_UNEXPLAINED_GAPS}); ` +
+        "the page or the catalog has changed shape",
+    )
+  }
+
+  // Today's UTC date: the day we last reconciled the table with upstream.
+  const verifiedOn = new Date().toISOString().slice(0, 10)
+  const text = renderTable({ verifiedOn, ...built })
 
   if (checkOnly) {
-    console.log("\n--check: snapshots left untouched.")
+    const current = await readFile(TABLE_FILE, "utf8").catch(() => "")
+    // The verification date is what a sync stamps, not a price: excluding it
+    // keeps the check red for real drift instead of every new day.
+    if (withoutVerificationDate(current) === withoutVerificationDate(text)) {
+      const currentVerified = /PRICING_VERIFIED_ON = "([^"]+)"/.exec(current)?.[1] ?? "unknown"
+      console.log(`pricing table is up to date with upstream (verified ${currentVerified}).`)
+      return
+    }
+    const currentVerified = /PRICING_VERIFIED_ON = "([^"]+)"/.exec(current)?.[1] ?? "unknown"
+    console.log(`pricing table is stale (verified ${currentVerified}, upstream parsed ${verifiedOn}).`)
+    console.log()
+    const onDisk = rowSignatures(current)
+    const upstream = rowSignatures(text)
+    report(
+      "rows whose rates changed upstream",
+      [...upstream].filter(([id, value]) => onDisk.has(id) && onDisk.get(id) !== value).map(([id]) => id).sort(),
+    )
+    report("rows upstream added", [...upstream.keys()].filter((id) => !onDisk.has(id)).sort())
+    report("rows upstream dropped", [...onDisk.keys()].filter((id) => !upstream.has(id)).sort())
+    console.log("run `pnpm pricing:sync` and review the diff.")
+    process.exitCode = 1
     return
   }
 
-  snapshot.source = CATALOG_URL
-  snapshot.fetchedAt = new Date().toISOString()
-  snapshot.modelIds = [...liveIds].sort()
-  await writeFile(snapshotPath, `${JSON.stringify(snapshot, null, 2)}\n`)
-  console.log(`\nwrote ${fileURLToPath(snapshotPath)}`)
-  if (added.length || removed.length) {
-    console.log(`update the price rows in ${fileURLToPath(PRICING_FILE)} and bump PRICING_LAST_VERIFIED.`)
+  await writeFile(TABLE_FILE, text)
+  console.log(`wrote ${fileURLToPath(TABLE_FILE)}`)
+  await writeSnapshot(liveIds)
+  console.log(`wrote ${fileURLToPath(IDS_SNAPSHOT)}`)
+  console.log("\nreview `git diff` before committing: rates are upstream's, not ours.")
+}
+
+async function readSnapshot() {
+  try {
+    const snapshot = JSON.parse(await readFile(IDS_SNAPSHOT, "utf8"))
+    return { modelIds: Array.isArray(snapshot.modelIds) ? snapshot.modelIds : [] }
+  } catch {
+    return { modelIds: [] }
   }
+}
+
+async function writeSnapshot(modelIds) {
+  const snapshot = {
+    fetchedAt: new Date().toISOString(),
+    source: CATALOG_URL,
+    modelIds: [...modelIds].sort(),
+  }
+  await writeFile(IDS_SNAPSHOT, `${JSON.stringify(snapshot, null, 2)}\n`)
+}
+
+/** `id -> rendered row` for a generated table, whitespace-normalized. */
+function rowSignatures(text) {
+  const rows = new Map()
+  for (const match of text.matchAll(/^ {2}"([^"]+)": /gm)) {
+    const valueStart = match.index + match[0].length
+    const end =
+      text[valueStart] === "{"
+        ? matchingBracket(text, valueStart, "{", "}") + 1
+        : text.indexOf("\n", valueStart)
+    rows.set(match[1], text.slice(valueStart, end === -1 ? undefined : end).replace(/\s+/g, " "))
+  }
+  return rows
+}
+
+/** Drop the generated date so `--check` compares prices, not the calendar. */
+function withoutVerificationDate(text) {
+  return text
+    .split("\n")
+    .filter((line) => !/^\/\/ Verified: /.test(line) && !/^export const PRICING_VERIFIED_ON/.test(line))
+    .join("\n")
 }
 
 function report(label, items) {

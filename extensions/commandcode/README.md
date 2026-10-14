@@ -93,18 +93,20 @@ pnpm test
 
 `tests/commandcode-upstream/` contains 14 upstream unit suites with source import paths adjusted, plus the original fixtures/helpers. The command alias registration test allows the new alias. The abort test now waits for the first actual text event instead of racing a fixed timer, and the event collector clears its timeout. Upstream package-layout, CLI/live and GitHub metadata-check scripts are not blindly copied because their standalone package assumptions do not apply here. New tests exercise the real Pi CLI with an empty auth store, mock DeepSeek endpoints and verified rotation; separate minimal live tests use DeepSeek only.
 
-### Keeping `src/pricing.ts` current
+### Keeping the pricing table current
 
-`MODEL_COSTS` mirrors the Command Code catalog and price list, which change without notice. That is upstream data, so it is refreshed by a script rather than asserted by a test:
+`src/pricing-table.generated.ts` mirrors the Command Code catalog and price list, which change without notice. Both are parsed from upstream by one script:
 
 ```sh
-pnpm pricing:sync     # report drift, rewrite fixtures/commandcode-model-ids.json
-pnpm pricing:check    # report only, never write; always exits 0
+pnpm pricing:sync     # parse upstream, rewrite the table + fixtures/commandcode-model-ids.json
+pnpm pricing:check    # parse upstream, write nothing, exit 1 when the table is stale
 ```
 
-The script lists models added or removed upstream, catalog ids missing from `MODEL_COSTS`, stale rows, and all-zero costs missing from `FREE_MODEL_IDS`. New rows are added by hand to `src/pricing.ts`, together with a `PRICING_LAST_VERIFIED` bump; an unknown model logs a one-line warning naming the absolute path of that file.
+`sync-pricing.mjs` reads the live catalog for ids and names, then the pricing page's embedded Next.js payload for per-token rates, context tiers, free flags and peak/off-peak rates, maps the two by model name, and renders the table. `src/pricing.ts` keeps the types, the source URL, the runtime lookup and the hand-owned `TEMPORARY_PRICING` list, and re-exports the generated table; `PRICING_LAST_VERIFIED` is the day of the last sync.
 
-`tests/commandcode-upstream/test-pricing.ts` only asserts invariants we own (non-negative rates, explicit free-model declaration, well-formed tiers, and pinned rates for models that were previously mispriced). `fixtures/commandcode-pricing.json` and `fixtures/commandcode-model-ids.json` are sync-tool input, not test oracles.
+The page is a payload rather than an API, so every step is guarded: a missing array, fewer rows than expected, duplicate model names, a base rate that disagrees with the first context tier, or more than a handful of catalog ids without a price abort the run instead of writing zeros over real prices. The script reports models added or removed upstream, catalog ids with no pricing row (recorded as `GENERATED_UNPRICED_MODEL_IDS`), payload rows absent from the catalog, rows upstream prices at zero (recorded as free), and tier bounds whose rendered label disagrees with the payload.
+
+`tests/commandcode-upstream/test-pricing.ts` asserts invariants we own (non-negative rates, explicit free-model declaration, well-formed tiers, and pinned rates for models that were previously mispriced) plus one coverage check: every id in `fixtures/commandcode-model-ids.json` must be either priced or explicitly recorded as unpriced, so a model that appears upstream and is missing from the table fails the suite instead of only warning at runtime. That snapshot is sync output, not a price oracle.
 
 Never register this extension alongside `npm:pi-commandcode-provider`: both register the same provider and commands. Before switching, back up Pi settings, disable the old package registration, and enable this monorepo entry. Verify loading and a minimal request before removing the old installation. To roll back, disable the monorepo entry and restore the old package registration. Keep the old auth credentials untouched.
 

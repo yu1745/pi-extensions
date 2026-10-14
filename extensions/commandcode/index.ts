@@ -71,9 +71,9 @@ const nativeStream = streamNativeProvider as unknown as LocalStream
 // indistinguishable from a free request and breaks every cost display.
 const warnedUnpricedModels = new Set<string>()
 
-// Absolute path of the pricing table, so copying the warning alone is enough
-// to act on it.
-const PRICING_FILE = fileURLToPath(new URL("./src/pricing.ts", import.meta.url))
+// Absolute path of the generated pricing table, so copying the warning alone
+// is enough to act on it.
+const PRICING_FILE = fileURLToPath(new URL("./src/pricing-table.generated.ts", import.meta.url))
 
 function providerModelCost(id: string) {
   const cost = MODEL_COSTS[id]
@@ -82,7 +82,8 @@ function providerModelCost(id: string) {
       warnedUnpricedModels.add(id)
       console.warn(
         `[commandcode] no pricing for model "${id}" (last verified ${PRICING_LAST_VERIFIED}); ` +
-          `its usage will report $0. Update ${PRICING_FILE} from ${PRICING_SOURCE_URL}, then commit and push.`,
+          `its usage will report $0. Run \`pnpm pricing:sync\` to regenerate ${PRICING_FILE} ` +
+          `from ${PRICING_SOURCE_URL}, then commit and push.`,
       )
     }
     return { ...ZERO_MODEL_COST, tiers: undefined }

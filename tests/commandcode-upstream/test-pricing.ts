@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
 import { describe, it } from "node:test"
 
 import {
@@ -7,6 +8,7 @@ import {
   PRICING_LAST_VERIFIED,
   PRICING_SOURCE_URL,
   TEMPORARY_PRICING,
+  UNPRICED_MODEL_IDS,
 } from "../../extensions/commandcode/src/pricing.ts"
 
 function assertCost(
@@ -46,6 +48,30 @@ describe("MODEL_COSTS pricing overlay", () => {
         allZero,
         FREE_MODEL_IDS.has(modelId),
         `${modelId} free-model status should be explicit in FREE_MODEL_IDS`,
+      )
+    }
+  })
+
+  it("prices every catalog id the sync snapshot records", () => {
+    // `MODEL_COSTS` is generated together with this snapshot by
+    // `pnpm pricing:sync`, so a model that is listed for sale but has neither a
+    // price nor an explicit unpriced record means the table went stale — the
+    // runtime warning that used to be the only signal for this.
+    const snapshot = JSON.parse(
+      readFileSync(
+        new URL(
+          "../../extensions/commandcode/fixtures/commandcode-model-ids.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ) as { modelIds: string[] }
+
+    assert.ok(snapshot.modelIds.length > 0, "the catalog snapshot should not be empty")
+    for (const modelId of snapshot.modelIds) {
+      assert.ok(
+        MODEL_COSTS[modelId] !== undefined || UNPRICED_MODEL_IDS.has(modelId),
+        `${modelId} is in the catalog snapshot but has no price and no unpriced record; run \`pnpm pricing:sync\``,
       )
     }
   })
