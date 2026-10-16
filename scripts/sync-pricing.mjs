@@ -44,6 +44,10 @@ const checkOnly = process.argv.includes("--check")
 const OFF_CATALOG_PRICING = {
   "typesafe/jev": {
     name: "Jev",
+    // Upstream prices the decision model as a plain "Jev" row next to one row
+    // per release ("Jev 1.14.0"), so this entry owns the whole family instead
+    // of failing the run on every version bump.
+    match: /^Jev(?: \d+(?:\.\d+)*)?$/,
     reason:
       "decision model, billed on POST /provider/v1/systemone (or headless `cmd -p -m typesafe/jev`); " +
       "never in /model, so it never enters the chat pricing path",
@@ -401,20 +405,27 @@ function buildTable({ catalog, costRows, displayRows }) {
   // models, or a model we failed to map. Only the last kind is a problem, so
   // every off-catalog row must be registered to be skipped.
   const offCatalog = costRows.filter((row) => !catalogNames.has(normalizeName(row.name)))
-  const registered = new Map(
-    Object.entries(OFF_CATALOG_PRICING).map(([id, entry]) => [normalizeName(entry.name), { id, ...entry }]),
-  )
+  const registered = Object.entries(OFF_CATALOG_PRICING).map(([id, entry]) => ({ id, ...entry }))
+  // An entry matches by exact name, or by `match` when it owns a family of rows.
+  const findEntry = (name) =>
+    registered.find((entry) =>
+      entry.match ? entry.match.test(name.trim()) : normalizeName(entry.name) === normalizeName(name),
+    )
   const known = []
   const unexplained = []
+  const claimed = new Set()
   for (const row of offCatalog) {
-    const entry = registered.get(normalizeName(row.name))
-    if (entry) known.push(`${row.id} — ${entry.reason}`)
-    else unexplained.push(`${row.id} (${row.name})`)
+    const entry = findEntry(row.name)
+    if (!entry) {
+      unexplained.push(`${row.id} (${row.name})`)
+      continue
+    }
+    claimed.add(entry.id)
+    known.push(`${row.id} — ${entry.reason}`)
   }
-  const seenNames = new Set(offCatalog.map((row) => normalizeName(row.name)))
-  const staleRegistry = [...registered]
-    .filter(([name]) => !seenNames.has(name))
-    .map(([, entry]) => `${entry.id} — no longer priced upstream; drop it from OFF_CATALOG_PRICING`)
+  const staleRegistry = registered
+    .filter((entry) => !claimed.has(entry.id))
+    .map((entry) => `${entry.id} — no longer priced upstream; drop it from OFF_CATALOG_PRICING`)
 
   rows.sort((left, right) => {
     const a = left.id.toLowerCase()
