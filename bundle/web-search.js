@@ -4,7 +4,7 @@ import {
 
 // extensions/web-search/index.ts
 import { Type } from "typebox";
-import { appendFileSync as appendFileSync5 } from "node:fs";
+import { appendFileSync as appendFileSync6 } from "node:fs";
 
 // extensions/web-search/backend-config.ts
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
@@ -25,12 +25,12 @@ function readSettings() {
 __name(readSettings, "readSettings");
 function getWebSearchBackend() {
   const env = process.env.PI_WEB_SEARCH_BACKEND?.trim().toLowerCase();
-  if (env === "google" || env === "openai" || env === "deepseek" || env === "minimax" || env === "zai") {
+  if (env === "google" || env === "openai" || env === "deepseek" || env === "deepseek-json" || env === "minimax" || env === "zai") {
     return env;
   }
   const settings = readSettings();
   const val = settings[SETTINGS_KEY];
-  if (val === "google" || val === "openai" || val === "deepseek" || val === "minimax" || val === "zai") {
+  if (val === "google" || val === "openai" || val === "deepseek" || val === "deepseek-json" || val === "minimax" || val === "zai") {
     return val;
   }
   if (settings[LEGACY_KEY] === false) return "zai";
@@ -593,18 +593,112 @@ async function deepseekSearch(apiKey, query, signal) {
 }
 __name(deepseekSearch, "deepseekSearch");
 
-// extensions/web-search/minimax-search.ts
+// extensions/web-search/deepseek-json-search.ts
 import { appendFileSync as appendFileSync3 } from "node:fs";
 function weblog4(message) {
   try {
-    appendFileSync3("/tmp/pi-web-tools.log", `${(/* @__PURE__ */ new Date()).toISOString()} [web-search:minimax] ${message}
+    appendFileSync3("/tmp/pi-web-tools.log", `${(/* @__PURE__ */ new Date()).toISOString()} [web-search:deepseek-json] ${message}
 `);
   } catch {
   }
 }
 __name(weblog4, "weblog");
-var DEFAULT_MINIMAX_HOST = "https://api.minimaxi.com";
+var DEFAULT_BASE_URL2 = "https://api.deepseek.com/v1/tools";
+var DEFAULT_COUNT = 10;
 var MAX_OUTPUT_CHARS4 = 5e4;
+var MAX_CONTENT_CHARS = 4e3;
+function truncate2(text, limit) {
+  return text.length > limit ? text.slice(0, limit) + "..." : text;
+}
+__name(truncate2, "truncate");
+function formatMeta(item) {
+  const parts = [];
+  if (item.site_name) parts.push(item.site_name);
+  if (typeof item.rerank_score === "number") parts.push(`rerank ${item.rerank_score.toFixed(2)}`);
+  if (typeof item.authority === "number" && item.authority >= 0) parts.push(`authority ${item.authority}`);
+  if (item.date) parts.push(item.date);
+  return parts.join(" | ");
+}
+__name(formatMeta, "formatMeta");
+function formatDeepSeekJsonResults(results, query) {
+  if (results.length === 0) {
+    return `(No results returned for query: ${query})`;
+  }
+  const lines = [];
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    const title = r.title?.trim() || "(untitled)";
+    lines.push(`[${i + 1}] ${title}`);
+    if (r.url) lines.push(`    ${r.url}`);
+    const meta = formatMeta(r);
+    if (meta) lines.push(`    ${meta}`);
+    if (r.snippet?.trim()) lines.push(`    Snippet: ${r.snippet.trim()}`);
+    if (r.summary?.trim()) lines.push(`    Summary: ${r.summary.trim()}`);
+    if (r.content?.trim()) {
+      lines.push(`    Content: ${truncate2(r.content.trim(), MAX_CONTENT_CHARS)}`);
+    }
+    lines.push("");
+  }
+  return lines.join("\n").trim();
+}
+__name(formatDeepSeekJsonResults, "formatDeepSeekJsonResults");
+async function deepseekJsonSearch(apiKey, params, signal) {
+  const baseURL = (process.env.DEEPSEEK_SEARCH_JSON_BASE_URL?.trim() || DEFAULT_BASE_URL2).replace(/\/+$/, "");
+  const endpoint = `${baseURL}/search`;
+  const body = {
+    query: params.query,
+    count: params.count ?? DEFAULT_COUNT
+  };
+  if (params.need_content !== void 0) body.need_content = params.need_content;
+  if (params.ori_question?.trim()) body.ori_question = params.ori_question.trim();
+  if (params.localization?.trim()) body.localization = params.localization.trim();
+  weblog4(
+    `deepseekJsonSearch endpoint=${endpoint} query="${params.query.slice(0, 80)}" body=${JSON.stringify(body)}`
+  );
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      "content-type": "application/json",
+      accept: "application/json",
+      "user-agent": "pi-web-search/1.0 (deepseek-search-json)"
+    },
+    body: JSON.stringify(body),
+    signal
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const errJson = await res.json();
+      detail = typeof errJson.error === "string" ? errJson.error : errJson.error?.message ?? errJson.message ?? detail;
+    } catch {
+    }
+    const hint = res.status === 429 ? " (rate limited: 5 QPS per account, retry shortly)" : res.status === 402 ? " (insufficient balance)" : res.status === 401 ? " (missing or invalid API key)" : "";
+    throw new Error(`DeepSeek Search JSON API failed: ${detail}${hint}`);
+  }
+  const payload = await res.json();
+  const results = payload.results ?? [];
+  let text = formatDeepSeekJsonResults(results, params.query);
+  if (text.length > MAX_OUTPUT_CHARS4) {
+    text = text.slice(0, MAX_OUTPUT_CHARS4) + "\n\n[Output truncated at 50000 chars]";
+  }
+  weblog4(`deepseekJsonSearch done results=${results.length}`);
+  return { text, count: results.length, results };
+}
+__name(deepseekJsonSearch, "deepseekJsonSearch");
+
+// extensions/web-search/minimax-search.ts
+import { appendFileSync as appendFileSync4 } from "node:fs";
+function weblog5(message) {
+  try {
+    appendFileSync4("/tmp/pi-web-tools.log", `${(/* @__PURE__ */ new Date()).toISOString()} [web-search:minimax] ${message}
+`);
+  } catch {
+  }
+}
+__name(weblog5, "weblog");
+var DEFAULT_MINIMAX_HOST = "https://api.minimaxi.com";
+var MAX_OUTPUT_CHARS5 = 5e4;
 async function resolveMinimaxAuth(ctx) {
   let apiKey = process.env.MINIMAX_API_KEY?.trim();
   let apiHost = process.env.MINIMAX_API_HOST?.trim() || DEFAULT_MINIMAX_HOST;
@@ -629,7 +723,7 @@ async function resolveMinimaxAuth(ctx) {
 __name(resolveMinimaxAuth, "resolveMinimaxAuth");
 async function minimaxSearch(apiKey, apiHost, query, signal) {
   const url = `${apiHost}/v1/coding_plan/search`;
-  weblog4(`minimaxSearch calling url=${url} query="${query.slice(0, 80)}"`);
+  weblog5(`minimaxSearch calling url=${url} query="${query.slice(0, 80)}"`);
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -680,26 +774,26 @@ async function minimaxSearch(apiKey, apiHost, query, signal) {
   if (!text) {
     text = `(No results returned for query: ${query})`;
   }
-  if (text.length > MAX_OUTPUT_CHARS4) {
-    text = text.slice(0, MAX_OUTPUT_CHARS4) + "\n\n[Output truncated at 50000 chars]";
+  if (text.length > MAX_OUTPUT_CHARS5) {
+    text = text.slice(0, MAX_OUTPUT_CHARS5) + "\n\n[Output truncated at 50000 chars]";
   }
   return { text, count: organic.length };
 }
 __name(minimaxSearch, "minimaxSearch");
 
 // extensions/web-search/zai-search.ts
-import { appendFileSync as appendFileSync4 } from "node:fs";
-function weblog5(message) {
+import { appendFileSync as appendFileSync5 } from "node:fs";
+function weblog6(message) {
   try {
-    appendFileSync4("/tmp/pi-web-tools.log", `${(/* @__PURE__ */ new Date()).toISOString()} [pi-extensions] ${message}
+    appendFileSync5("/tmp/pi-web-tools.log", `${(/* @__PURE__ */ new Date()).toISOString()} [pi-extensions] ${message}
 `);
   } catch {
   }
 }
-__name(weblog5, "weblog");
+__name(weblog6, "weblog");
 var MCP_SEARCH_URL = "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp";
 var MAX_OUTPUT_BYTES = 5e4;
-var MAX_OUTPUT_CHARS5 = 8e4;
+var MAX_OUTPUT_CHARS6 = 8e4;
 async function resolveZaiApiKey(ctx) {
   const envKey = process.env.Z_AI_MCP_API_KEY;
   if (envKey) return envKey;
@@ -814,7 +908,7 @@ function formatSearchResults(results) {
 }
 __name(formatSearchResults, "formatSearchResults");
 function truncateOutput(text) {
-  if (text.length <= MAX_OUTPUT_CHARS5 && Buffer.byteLength(text, "utf8") <= MAX_OUTPUT_BYTES) {
+  if (text.length <= MAX_OUTPUT_CHARS6 && Buffer.byteLength(text, "utf8") <= MAX_OUTPUT_BYTES) {
     return text;
   }
   let truncated = "";
@@ -838,7 +932,7 @@ async function zaiSearch(apiKey, params, signal) {
   if (params.recency) args.search_recency_filter = params.recency;
   if (params.domain_filter) args.search_domain_filter = params.domain_filter;
   if (params.content_size) args.content_size = params.content_size;
-  weblog5(`zaiSearch query="${params.query.slice(0, 80)}"`);
+  weblog6(`zaiSearch query="${params.query.slice(0, 80)}"`);
   const result = await mcpCall(
     apiKey,
     "tools/call",
@@ -882,14 +976,14 @@ async function zaiSearch(apiKey, params, signal) {
 __name(zaiSearch, "zaiSearch");
 
 // extensions/web-search/index.ts
-function weblog6(message) {
+function weblog7(message) {
   try {
-    appendFileSync5("/tmp/pi-web-tools.log", `${(/* @__PURE__ */ new Date()).toISOString()} [web-search] ${message}
+    appendFileSync6("/tmp/pi-web-tools.log", `${(/* @__PURE__ */ new Date()).toISOString()} [web-search] ${message}
 `);
   } catch {
   }
 }
-__name(weblog6, "weblog");
+__name(weblog7, "weblog");
 function emitOutput(ctx, text, type = "info") {
   if (ctx.hasUI) {
     ctx.ui.notify(text, type);
@@ -902,7 +996,7 @@ __name(emitOutput, "emitOutput");
 function webSearchExtension(pi) {
   const currentBackend = getWebSearchBackend();
   pi.registerCommand("websearch.backend", {
-    description: "Select web_search backend (Google, OpenAI, DeepSeek, MiniMax, Z.AI) via interactive menu or argument.",
+    description: "Select web_search backend (Google, OpenAI, DeepSeek, DeepSeek JSON, MiniMax, Z.AI) via interactive menu or argument.",
     handler: /* @__PURE__ */ __name(async (args, ctx) => {
       const rawArg = (args || "").trim().toLowerCase();
       const active = getWebSearchBackend();
@@ -924,6 +1018,10 @@ function webSearchExtension(pi) {
         applySelection("deepseek");
         return;
       }
+      if (rawArg === "deepseek-json" || rawArg === "ds-json" || rawArg === "dsjson") {
+        applySelection("deepseek-json");
+        return;
+      }
       if (rawArg === "minimax" || rawArg === "mm") {
         applySelection("minimax");
         return;
@@ -937,6 +1035,7 @@ function webSearchExtension(pi) {
           `google   - Google (Antigravity Grounding / Gemini \u5B9E\u65F6\u68C0\u7D22)${active === "google" ? " (\u5F53\u524D\u751F\u6548)" : ""}`,
           `openai   - OpenAI (Codex Responses API / GPT-5.6 \u5B9E\u65F6\u68C0\u7D22)${active === "openai" ? " (\u5F53\u524D\u751F\u6548)" : ""}`,
           `deepseek - DeepSeek (Anthropic \u534F\u8BAE\u539F\u751F web_search \u5DE5\u5177)${active === "deepseek" ? " (\u5F53\u524D\u751F\u6548)" : ""}`,
+          `deepseek-json - DeepSeek \u7ED3\u6784\u5316\u68C0\u7D22 (/v1/tools/search\uFF0C\u65E0\u6A21\u578B\u8C03\u7528)${active === "deepseek-json" ? " (\u5F53\u524D\u751F\u6548)" : ""}`,
           `minimax  - MiniMax (Coding Plan \u5FEB\u901F\u4EE3\u7801/\u5DE5\u7A0B\u5B9E\u65F6\u68C0\u7D22)${active === "minimax" ? " (\u5F53\u524D\u751F\u6548)" : ""}`,
           `zai      - \u667A\u8C31 BigModel / Z.AI (\u5E26\u5730\u57DF/\u65F6\u6548\u539F\u751F\u53C2\u6570\u8FC7\u6EE4)${active === "zai" ? " (\u5F53\u524D\u751F\u6548)" : ""}`
         ];
@@ -948,6 +1047,7 @@ function webSearchExtension(pi) {
         let selected = "google";
         if (choice.startsWith("google")) selected = "google";
         else if (choice.startsWith("openai")) selected = "openai";
+        else if (choice.startsWith("deepseek-json")) selected = "deepseek-json";
         else if (choice.startsWith("deepseek")) selected = "deepseek";
         else if (choice.startsWith("minimax")) selected = "minimax";
         else if (choice.startsWith("zai")) selected = "zai";
@@ -957,7 +1057,7 @@ function webSearchExtension(pi) {
       emitOutput(
         ctx,
         `Current backend: ${active}
-Usage: /websearch.backend [google | openai | deepseek | minimax | zai]`
+Usage: /websearch.backend [google | openai | deepseek | deepseek-json | minimax | zai]`
       );
     }, "handler")
   });
@@ -979,7 +1079,7 @@ Usage: /websearch.backend [google | openai | deepseek | minimax | zai]`
           })
         }),
         async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-          weblog6(`Google search execute: query="${params.query.slice(0, 80)}"`);
+          weblog7(`Google search execute: query="${params.query.slice(0, 80)}"`);
           const creds = await resolveAntigravityToken(ctx);
           const answer = await googleGroundingSearch(
             creds.token,
@@ -1017,7 +1117,7 @@ Usage: /websearch.backend [google | openai | deepseek | minimax | zai]`
           })
         }),
         async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-          weblog6(`OpenAI search execute: query="${params.query.slice(0, 80)}"`);
+          weblog7(`OpenAI search execute: query="${params.query.slice(0, 80)}"`);
           const { token, accountId } = await resolveOpenAICodexAuth(ctx);
           const { text, count } = await openAiCodexSearch(token, accountId, params.query, signal);
           return {
@@ -1048,7 +1148,7 @@ Usage: /websearch.backend [google | openai | deepseek | minimax | zai]`
           })
         }),
         async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-          weblog6(`DeepSeek search execute: query="${params.query.slice(0, 80)}"`);
+          weblog7(`DeepSeek search execute: query="${params.query.slice(0, 80)}"`);
           const apiKey = await resolveDeepSeekApiKey(ctx);
           const { text, count } = await deepseekSearch(apiKey, params.query, signal);
           return {
@@ -1057,6 +1157,70 @@ Usage: /websearch.backend [google | openai | deepseek | minimax | zai]`
               query: params.query,
               source: "DeepSeek native web search",
               sourceCount: count
+            }
+          };
+        }
+      });
+      break;
+    }
+    // ── 3b. DeepSeek Search JSON (stateless /v1/tools/search)
+    case "deepseek-json": {
+      pi.registerTool({
+        name: "web_search",
+        label: "Web Search (DeepSeek JSON)",
+        description: "Search the web with the official DeepSeek Search JSON endpoint (/v1/tools/search). Returns structured, reranked results (title, url, date, authority, snippet, long summary) from a single stateless request: no model call, no token cost, nothing rewritten. Supports native search syntax: site:example.com, -site:example.com, -word, lang:zh,en, after:2025-01-01, before:2026-06-01, or an exact phrase wrapped in double quotes.",
+        promptSnippet: "Search the web for structured, source-rich results (DeepSeek JSON)",
+        promptGuidelines: [
+          "Use web_search when you want raw, structured results instead of a model-written answer: fresh news, official docs, or a list of sources to cite.",
+          "Search operators can be passed directly in the query: site:, -site:, -word, lang:zh,en, after:YYYY[-MM-DD], before:YYYY[-MM-DD], or an exact phrase wrapped in double quotes.",
+          "Read the long summary attached to each result (600-800 chars); set need_content to true when the page body itself is needed.",
+          "Weigh rerank_score (1.5 and above is good) and authority (3 and above is highly authoritative) when choosing which sources to trust.",
+          "Dates come from upstream indexing and can be imprecise; after:/before: bias recency rather than hard-filtering, so verify a date before asserting it."
+        ],
+        parameters: Type.Object({
+          query: Type.String({
+            description: "Search query (1-128 chars). Supports site:, -site:, -word, lang:zh,en, after:YYYY[-MM-DD], before:YYYY[-MM-DD], and exact phrases in double quotes."
+          }),
+          count: Type.Optional(
+            Type.Integer({
+              minimum: 1,
+              maximum: 50,
+              description: "Number of results to return (1-50, default 10). Does not affect billing."
+            })
+          ),
+          need_content: Type.Optional(
+            Type.Boolean({
+              description: "When true, also return the rendered page body (Markdown) for each result. Slower and much larger; default false."
+            })
+          ),
+          ori_question: Type.Optional(
+            Type.String({
+              description: "The original user question (1-128 chars), forwarded to improve search intent understanding."
+            })
+          )
+        }),
+        async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+          weblog7(
+            `DeepSeek Search JSON execute: query="${params.query.slice(0, 80)}" count=${params.count ?? 10} need_content=${params.need_content === true}`
+          );
+          const apiKey = await resolveDeepSeekApiKey(ctx);
+          const { text, count } = await deepseekJsonSearch(
+            apiKey,
+            {
+              query: params.query,
+              count: params.count,
+              need_content: params.need_content,
+              ori_question: params.ori_question
+            },
+            signal
+          );
+          return {
+            content: [{ type: "text", text }],
+            details: {
+              query: params.query,
+              source: "DeepSeek Search JSON (/v1/tools/search)",
+              sourceCount: count,
+              needContent: params.need_content === true
             }
           };
         }
@@ -1080,7 +1244,7 @@ Usage: /websearch.backend [google | openai | deepseek | minimax | zai]`
           })
         }),
         async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-          weblog6(`MiniMax search execute: query="${params.query.slice(0, 80)}"`);
+          weblog7(`MiniMax search execute: query="${params.query.slice(0, 80)}"`);
           const { apiKey, apiHost } = await resolveMinimaxAuth(ctx);
           const { text, count } = await minimaxSearch(apiKey, apiHost, params.query, signal);
           return {
@@ -1141,7 +1305,7 @@ Usage: /websearch.backend [google | openai | deepseek | minimax | zai]`
           )
         }),
         async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-          weblog6(`Z.AI search execute: query="${params.query.slice(0, 80)}"`);
+          weblog7(`Z.AI search execute: query="${params.query.slice(0, 80)}"`);
           const apiKey = await resolveZaiApiKey(ctx);
           const { text } = await zaiSearch(apiKey, params, signal);
           return {

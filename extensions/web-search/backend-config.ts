@@ -4,7 +4,8 @@
  * Persisted backend selection:
  * - "google": Google via Antigravity Grounding
  * - "openai": OpenAI via Codex Responses API
- * - "deepseek": DeepSeek native search via Anthropic-compatible API
+ * - "deepseek": DeepSeek native search via Anthropic-compatible API (model call, token-billed)
+ * - "deepseek-json": DeepSeek Search REST API (/v1/tools/search, stateless, per-request billed)
  * - "minimax": MiniMax Coding Plan search API
  * - "zai": 智谱 BigModel / Z.AI Web Search Prime
  *
@@ -16,7 +17,13 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type WebSearchBackend = "google" | "openai" | "deepseek" | "minimax" | "zai";
+export type WebSearchBackend =
+	| "google"
+	| "openai"
+	| "deepseek"
+	| "deepseek-json"
+	| "minimax"
+	| "zai";
 
 const SETTINGS_PATH = join(homedir(), ".pi", "agent", "settings.json");
 const SETTINGS_KEY = "webSearchBackend";
@@ -39,6 +46,7 @@ export function getWebSearchBackend(): WebSearchBackend {
     env === "google" ||
     env === "openai" ||
     env === "deepseek" ||
+    env === "deepseek-json" ||
     env === "minimax" ||
     env === "zai"
   ) {
@@ -51,6 +59,7 @@ export function getWebSearchBackend(): WebSearchBackend {
     val === "google" ||
     val === "openai" ||
     val === "deepseek" ||
+    val === "deepseek-json" ||
     val === "minimax" ||
     val === "zai"
   ) {

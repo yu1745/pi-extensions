@@ -5,6 +5,7 @@
  * - Google (Antigravity Grounding): Pure query, operator-aware, synthesized answers + verified source URLs
  * - OpenAI (Codex Responses API): Pure query, operator-aware, GPT-5.6 / web_search
  * - DeepSeek (Anthropic-compatible API): Pure query, deepseek-v4-flash native web_search
+ * - DeepSeek Search JSON: Pure query, structured results, native search syntax, no model call
  * - MiniMax (Coding Plan API): Fast technical keywords search, structured results
  * - Z.AI (BigModel): Native MCP schema with location, recency, and domain filters
  *
@@ -34,6 +35,7 @@ import {
   deepseekSearch,
   resolveDeepSeekApiKey,
 } from "./deepseek-search.js";
+import { deepseekJsonSearch } from "./deepseek-json-search.js";
 import {
   minimaxSearch,
   resolveMinimaxAuth,
@@ -71,7 +73,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 
   pi.registerCommand("websearch.backend", {
     description:
-      "Select web_search backend (Google, OpenAI, DeepSeek, MiniMax, Z.AI) via interactive menu or argument.",
+      "Select web_search backend (Google, OpenAI, DeepSeek, DeepSeek JSON, MiniMax, Z.AI) via interactive menu or argument.",
     handler: async (args, ctx) => {
       const rawArg = (args || "").trim().toLowerCase();
       const active = getWebSearchBackend();
@@ -97,6 +99,10 @@ export default function webSearchExtension(pi: ExtensionAPI) {
         applySelection("deepseek");
         return;
       }
+      if (rawArg === "deepseek-json" || rawArg === "ds-json" || rawArg === "dsjson") {
+        applySelection("deepseek-json");
+        return;
+      }
       if (rawArg === "minimax" || rawArg === "mm") {
         applySelection("minimax");
         return;
@@ -112,6 +118,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
           `google   - Google (Antigravity Grounding / Gemini 实时检索)${active === "google" ? " (当前生效)" : ""}`,
           `openai   - OpenAI (Codex Responses API / GPT-5.6 实时检索)${active === "openai" ? " (当前生效)" : ""}`,
           `deepseek - DeepSeek (Anthropic 协议原生 web_search 工具)${active === "deepseek" ? " (当前生效)" : ""}`,
+          `deepseek-json - DeepSeek 结构化检索 (/v1/tools/search，无模型调用)${active === "deepseek-json" ? " (当前生效)" : ""}`,
           `minimax  - MiniMax (Coding Plan 快速代码/工程实时检索)${active === "minimax" ? " (当前生效)" : ""}`,
           `zai      - 智谱 BigModel / Z.AI (带地域/时效原生参数过滤)${active === "zai" ? " (当前生效)" : ""}`,
         ];
@@ -126,6 +133,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
         let selected: WebSearchBackend = "google";
         if (choice.startsWith("google")) selected = "google";
         else if (choice.startsWith("openai")) selected = "openai";
+        else if (choice.startsWith("deepseek-json")) selected = "deepseek-json";
         else if (choice.startsWith("deepseek")) selected = "deepseek";
         else if (choice.startsWith("minimax")) selected = "minimax";
         else if (choice.startsWith("zai")) selected = "zai";
@@ -136,7 +144,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 
       emitOutput(
         ctx,
-        `Current backend: ${active}\nUsage: /websearch.backend [google | openai | deepseek | minimax | zai]`,
+        `Current backend: ${active}\nUsage: /websearch.backend [google | openai | deepseek | deepseek-json | minimax | zai]`,
       );
     },
   });
@@ -248,6 +256,79 @@ export default function webSearchExtension(pi: ExtensionAPI) {
               query: params.query,
               source: "DeepSeek native web search",
               sourceCount: count,
+            },
+          };
+        },
+      });
+      break;
+    }
+
+    // ── 3b. DeepSeek Search JSON (stateless /v1/tools/search)
+    case "deepseek-json": {
+      pi.registerTool({
+        name: "web_search",
+        label: "Web Search (DeepSeek JSON)",
+        description:
+          "Search the web with the official DeepSeek Search JSON endpoint (/v1/tools/search). " +
+          "Returns structured, reranked results (title, url, date, authority, snippet, long summary) " +
+          "from a single stateless request: no model call, no token cost, nothing rewritten. " +
+          "Supports native search syntax: site:example.com, -site:example.com, -word, lang:zh,en, " +
+          "after:2025-01-01, before:2026-06-01, or an exact phrase wrapped in double quotes.",
+        promptSnippet: "Search the web for structured, source-rich results (DeepSeek JSON)",
+        promptGuidelines: [
+          "Use web_search when you want raw, structured results instead of a model-written answer: fresh news, official docs, or a list of sources to cite.",
+          "Search operators can be passed directly in the query: site:, -site:, -word, lang:zh,en, after:YYYY[-MM-DD], before:YYYY[-MM-DD], or an exact phrase wrapped in double quotes.",
+          "Read the long summary attached to each result (600-800 chars); set need_content to true when the page body itself is needed.",
+          "Weigh rerank_score (1.5 and above is good) and authority (3 and above is highly authoritative) when choosing which sources to trust.",
+          "Dates come from upstream indexing and can be imprecise; after:/before: bias recency rather than hard-filtering, so verify a date before asserting it.",
+        ],
+        parameters: Type.Object({
+          query: Type.String({
+            description:
+              "Search query (1-128 chars). Supports site:, -site:, -word, lang:zh,en, after:YYYY[-MM-DD], before:YYYY[-MM-DD], and exact phrases in double quotes.",
+          }),
+          count: Type.Optional(
+            Type.Integer({
+              minimum: 1,
+              maximum: 50,
+              description: "Number of results to return (1-50, default 10). Does not affect billing.",
+            }),
+          ),
+          need_content: Type.Optional(
+            Type.Boolean({
+              description:
+                "When true, also return the rendered page body (Markdown) for each result. Slower and much larger; default false.",
+            }),
+          ),
+          ori_question: Type.Optional(
+            Type.String({
+              description:
+                "The original user question (1-128 chars), forwarded to improve search intent understanding.",
+            }),
+          ),
+        }),
+        async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+          weblog(
+            `DeepSeek Search JSON execute: query="${params.query.slice(0, 80)}" count=${params.count ?? 10} need_content=${params.need_content === true}`,
+          );
+          const apiKey = await resolveDeepSeekApiKey(ctx);
+          const { text, count } = await deepseekJsonSearch(
+            apiKey,
+            {
+              query: params.query,
+              count: params.count,
+              need_content: params.need_content,
+              ori_question: params.ori_question,
+            },
+            signal,
+          );
+          return {
+            content: [{ type: "text", text }],
+            details: {
+              query: params.query,
+              source: "DeepSeek Search JSON (/v1/tools/search)",
+              sourceCount: count,
+              needContent: params.need_content === true,
             },
           };
         },
