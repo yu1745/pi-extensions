@@ -1,0 +1,226 @@
+# Raw output of: deepseek-json vs zai web_search comparison (2026-10-17)
+# 17 cross-domain cases x 2 backends + 5 foreign-targeted cases x 3 backend settings
+# harness calls extensions/web-search/{deepseek-json-search,zai-search}.ts directly (reads ~/.pi/agent/auth.json)
+#   -> measures backend behaviour only; bypasses Pi core credential resolution
+# single sample per case, 1200ms spacing, DeepSeek QPS limit 5/account
+
+=== per-case ===
+# case domain backend ok ms n uniqHosts govHosts scholarHosts cnShare cjkRatio avgContent chars hostHit termHit
+C1  tech-doc-en  ds-json  true  540ms  10  9  0  0  0.2  0.16  2322  25563  0/1  1/1
+      hosts: aws.amazon.com, raw.githubusercontent.com, postgresql.fastware.com, github.com, global.fujitsu, postgresql.dbms.tw, pgpedia.postgresql.ac.cn, developer.aliyun.com
+      top:   Logical replication improvements in Amazon RDS for Post //  // Logical replication of generated columns
+      withDate=8/10 rerankMean=2 authorityMean=3
+C1  tech-doc-en  zai  true  1342ms  10  8  0  0  0  0  159  3114  1/1  1/1
+      hosts: postgresql.org, aws.amazon.com, pgedge.com, pgpedia.info, neon.com, bytebase.com, xata.io, news.ycombinator.com
+      top:   PostgreSQL 18.0 Release Notes // PostgreSQL 18 Released! // Logical replication improvements in Amazon RDS for
+C2  tech-doc-en  ds-json  true  1080ms  10  6  0  0  0  0  2036  23273  1/2  1/1
+      hosts: build.opensuse.org, github.com, dependabot.ecosyste.ms, patchwork.yoctoproject.org, lists.openembedded.org, data.safetycli.com
+      top:   File python-httpx.changes of Package python-httpx // httpx/CHANGELOG.md at master · cclauss/httpx - Skip to  // ksbk/drkusse#6: build(deps): update httpx requirement f
+      withDate=4/10 rerankMean=2.01 authorityMean=3
+C2  tech-doc-en  zai  true  1376ms  10  7  0  0  0  0  170  3026  2/2  1/1
+      hosts: github.com, python-httpx.org, docs.authlib.org, reddit.com, lists.fedorahosted.org, pypi.org, archlinux.org
+      top:   CHANGELOG.md - encode/httpx // HTTPX // Releases · encode/httpx
+C3  tech-doc-en  ds-json  true  680ms  10  6  0  0  0  0.09  3181  34564  1/1  1/1
+      hosts: kubernetes.io, v1-36.docs.kubernetes.io, raw.githubusercontent.com, opensource.googleblog.com, main--kubernetes-io-main-staging.netlify.app, github.com
+      top:   Kubernetes v1.34: Of Wind & Will (O' WaW) // 쿠버네티스 v1.34: 바람과 의지 (O' WaW) // Kubernetes v1.34：风与意志（O' WaW）
+      withDate=9/10 rerankMean=2.1 authorityMean=3.3
+C3  tech-doc-en  zai  true  1354ms  10  10  0  0  0  0  155  3325  1/1  1/1
+      hosts: kubernetes.io, cloudsmith.com, reddit.com, palark.com, fairwinds.com, scaleops.com, github.com, aws.amazon.com
+      top:   Kubernetes v1.34: Of Wind & Will (O' WaW) // Kubernetes 1.34 – What you need to know // Kubernetes 1.34 Release
+C4  debug-zh  ds-json  true  520ms  10  8  0  0  0.1  0.09  2278  25460  0/0  1/1
+      hosts: claudeatlas.com, github.com, users.rust-lang.org, skillsmp.com, blog.csdn.net, dev.to, nieta-zjj.github.io, devcheolu.com
+      top:   rc-axum — Claude Skill | ClaudeAtlas // Compatibility issue between axum 0.7.5 and tower-http 0 // [Axum] from_fn_with_state does not compile - help - The
+      withDate=10/10 rerankMean=0.84 authorityMean=2
+C4  debug-zh  zai  true  1587ms  9  9  0  0  0  0.17  135  2522  0/0  1/1
+      hosts: reddit.com, github.com, docs.rs, youerning.top, yuxuetr.com, tokio.rs, oneuptime.com, docs.sentry.io
+      top:   Rust/Axum: 实现中间件栈时出现类型不匹配错误 // axum/axum/CHANGELOG.md at main - tokio-rs // axum::middleware - Rust
+C5  debug-zh  ds-json  true  591ms  10  7  0  0  0.2  0.04  1649  19024  0/0  1/1
+      hosts: github.com, stackoverflow.com, cloud.tencent.com.cn, ctu-mrs.github.io, raw.githubusercontent.com, learn.microsoft.com, cloud.tencent.cn
+      top:   fix(release): Simplify Dockerfile for GoReleaser cross- // Fix: Add QEMU and buildx setup for ARM64 Docker builds  // Docker multiplatform image - Asked
+      withDate=7/10 rerankMean=1.98 authorityMean=3.1
+C5  debug-zh  zai  true  2242ms  9  8  0  0  0.11  0.05  148  3076  0/0  1/1
+      hosts: manabpokhrel7.medium.com, forums.docker.com, reddit.com, blog.csdn.net, stackoverflow.com, codemia.io, oneuptime.com, baeldung.com
+      top:   Solving the “exec format error”: Why You Must Build Mul // buildx not solving "exec /bin/sh: exec format error" pr // Can't get arm64 image4 to build : r/docker
+C6  academic-en  ds-json  true  361ms  10  6  0  1  0.1  0  3499  38223  0/1  1/1
+      hosts: semanticscholar.org, arxiv-org.ezproxy.obspm.fr, raw.githubusercontent.com, huggingface.co, aclanthology.org, sinoxiv.napstic.cn
+      top:   [PDF] SpecMoE: A Fast and Efficient Mixture-of-Experts  // [PDF] DART: Diffusion-Inspired Speculative Decoding for // Figure 10 from TreeFlash: Parallel AR-Approximation for
+      withDate=8/10 rerankMean=2.11 authorityMean=3.2
+C6  academic-en  zai  true  1571ms  9  4  0  3  0  0  171  2783  1/1  1/1
+      hosts: arxiv.org, dl.acm.org, semanticscholar.org, aarnphm.xyz
+      top:   Speculative Speculative Decoding // SWIFT: On-the-Fly Self-Speculative Decoding for LLM // Fast Inference from Transformers via Speculative Decodi
+C7  academic-en  ds-json  true  346ms  10  8  1  2  0.1  0.04  3006  32924  1/2  1/1
+      hosts: nejm.org, eurekalert.org, health-app.people.cn, uptodate.com, ovid.com, pubmed.ncbi.nlm.nih.gov, news.gmj.ge, vidal.fr
+      top:   Lonvoguran Ziclumeran — In Vivo CRISPR Gene Editing in  // In Vivo CRISPR Gene Editing in Hereditary Angioedema |  // World first: First phase 3 trial of in vivo CRISPR ther
+      withDate=9/10 rerankMean=2.26 authorityMean=3.7
+C7  academic-en  zai  true  1877ms  9  5  0  1  0  0  178  3234  1/2  1/1
+      hosts: nejm.org, news-medical.net, medicalxpress.com, med.upenn.edu, linkedin.com
+      top:   Patient-Specific In Vivo Gene Editing to Treat a Rare // Phase 1 Trial of CRISPR-Cas9 Gene Editing Targeting // CRISPR-Cas9 In Vivo Gene Editing of KLKB1 for
+C8  academic-en  ds-json  true  669ms  10  2  0  2  0  0  3049  32993  1/1  1/1
+      hosts: ar5iv.labs.arxiv.org, arxiv.org
+      top:   Scaling Beyond Masked Diffusion Language Models - Scali // Discrete Diffusion Models: A Unified Framework from Tok // Scaling up Masked Diffusion Models on Text - Scaling up
+      withDate=4/10 rerankMean=1.82 authorityMean=3.5
+C8  academic-en  zai  true  1571ms  10  2  0  2  0  0  180  3144  1/1  1/1
+      hosts: blog.arxiv.org, arxiv.org
+      top:   News from arXiv – News and updates from arxiv.org // DuplexSLA: A Full-Duplex Spoken Language Model with // [2502.14499] MLGym: A New Framework and Benchmark
+C9  finance-en  ds-json  true  317ms  10  9  2  0  0.1  0.06  1369  16126  1/1  1/1
+      hosts: bls.gov, 5paisa.com, democrats-budget.house.gov, istoedinheiro.com.br, m.markets.com, 163.com, giacatloi.vn, tradegatebsx.com
+      top:   Consumer Price Index News Release // Consumer Price Index Summary // US Inflation Rises to 3.7%: What Does It Mean for India
+      withDate=10/10 rerankMean=2.18 authorityMean=3.1
+C9  finance-en  zai  true  1369ms  8  2  1  0  0  0  162  2590  1/1  1/1
+      hosts: bls.gov, facebook.com
+      top:   Consumer Price Index - September 2026 // CPI Home : U.S. Bureau of Labor Statistics // 12-month percentage change, Consumer Price Index,
+C10  finance-en  ds-json  true  781ms  10  10  0  0  0.1  0.05  980  12889  0/1  1/1
+      hosts: money.kompas.com, admiralmarkets.com, opovo.com.br, tradingeconomics.com, global.econoday.com, webnewslt1.pobo.net.cn, hfm.com, raisin.com
+      top:   The Fed Masih Pertimbangkan Kenaikan Suku Bunga hingga  // Fed Rate Decision October 2026: Hike or Hold on 28 Oct? // Maioria no Fed vê novo aumento de juros como provável e
+      withDate=9/10 rerankMean=1.53 authorityMean=3
+C10  finance-en  zai  true  2892ms  8  6  1  0  0  0  150  2517  1/1  1/1
+      hosts: federalreserve.gov, economics.td.com, cmelitegroup.com, streetstats.finance, americascreditunions.org, schwab.com
+      top:   Federal Reserve issues FOMC statement // The Fed - Meeting calendars and information // U.S. FOMC Meeting (September 15-16, 2026) - TD Economic
+C11  finance-en  ds-json  true  320ms  10  8  0  0  0.2  0.08  712  9496  0/0  1/1
+      hosts: tradingeconomics.com, en.infomaxai.com, slv.news.einfomax.co.kr, marketscreener.com, zawya.com, finance.eastmoney.com, 163.com, m.21jingji.com
+      top:   US Treasury Yields Tick Higher, but Post Weekly Decline // [New York Bond Market]Treasuries Mixed as Oil Surge, PD // US Treasuries Weaken Despite Wash's Dovish Remarks - Pr
+      withDate=10/10 rerankMean=2.17 authorityMean=2.9
+C11  finance-en  zai  true  1774ms  9  7  1  0  0  0  148  2858  0/0  1/1
+      hosts: cnbc.com, fred.stlouisfed.org, home.treasury.gov, tradingeconomics.com, macrotrends.net, finance.yahoo.com, wsj.com
+      top:   US10Y: U.S. 10 Year Treasury - Stock Price, Quote and N // Market Yield on U.S. Treasury Securities at 10-Year Con // Daily Treasury Par Yield Curve Rates
+C12  news-en  ds-json  true  312ms  10  9  0  1  0.1  0.01  1526  17876  0/1  1/1
+      hosts: aps.org, yna.co.kr, 163.com, springernature.com, vietnam.vn, news.sbs.co.kr, gdnonline.com, ndtv.com
+      top:   American Physical Society congratulates the winner of t // [2보] 노벨물리학상 '뉴트리노 관측' 프란시스 할전 단독수상 | 연합뉴스 // 新华社快讯：1名科学家获得2026年诺贝尔物理学奖
+      withDate=10/10 rerankMean=2.32 authorityMean=3.4
+C12  news-en  zai  true  2560ms  8  4  1  0  0  0  167  2667  1/1  1/1
+      hosts: nobelprize.org, facebook.com, reuters.com, research-and-innovation.ec.europa.eu
+      top:   Press release: Nobel Prize in Physics 2026 // Nobel Prize in Physics // Nobel Prize in Physics 2026
+C13  news-en  ds-json  true  490ms  10  9  0  0  0.1  0.1  1472  16978  1/1  1/1
+      hosts: help.openai.com, newsws.kbs.co.kr, openai.com, yna.co.kr, benchlm.ai, blockchain.news, dime.jp, itsdw.cn
+      top:   ChatGPT release notes | OpenAI Help Center // ChatGPT — Թողարկման նշումներ | OpenAI Help Center - Cha // 오픈AI·앤트로픽 같은 날 새 모델…핵심 경쟁력은 ‘이것’
+      withDate=9/10 rerankMean=2.23 authorityMean=3.2
+C13  news-en  zai  true  2125ms  9  7  0  0  0  0  156  2817  1/1  1/1
+      hosts: openai.com, help.openai.com, reuters.com, community.openai.com, releasebot.io, facebook.com, hidekazu-konishi.com
+      top:   DevDay 2026 Recap // Model Release Notes | OpenAI Help Center // OpenAI News
+C14  news-en  ds-json  true  470ms  10  9  1  0  0  0.06  2895  31906  0/1  1/1
+      hosts: edb.gov.sg, f.aa.com.tr, thenews.com.pk, blockchain.news, infotech.com, eu.36kr.com, fortune.com, ithome.com
+      top:   Anthropic opens Singapore office and signs MOU with the // Claude'un "keşfettiği" buluş üzerinde yıllardır çalışan // Anthropic to add official US voting information to Clau
+      withDate=10/10 rerankMean=2.22 authorityMean=3.2
+C14  news-en  zai  true  1461ms  10  8  0  0  0  0  154  3231  1/1  1/1
+      hosts: anthropic.com, releasebot.io, linas.substack.com, blurbrahlab.medium.com, reuters.com, x.com, local-ai-zone.github.io, the-ai-corner.com
+      top:   2026 Usage Policy update // Anthropic Release Notes - October 2026 Latest Updates // Anthropic's Transparency Hub
+C15  policy-zh  ds-json  true  508ms  10  8  6  0  0.9  0.99  1211  14180  1/1  1/1
+      hosts: 180.168.250.141, 12366.chinatax.gov.cn, anhui.chinatax.gov.cn, gov.cn, shanghai.chinatax.gov.cn, news.cnr.cn, chongzuo.gov.cn, fgk.mof.gov.cn
+      top:   购买新能源汽车的车辆购置税 // 符合哪些条件的新能源汽车可享受减免车辆购置税优惠？ // 12366咨询热点问题解答（2026年7月）
+      withDate=9/10 rerankMean=2.27 authorityMean=4
+C15  policy-zh  zai  true  1282ms  9  8  4  0  0.89  1  101  2204  1/1  1/1
+      hosts: fgk.chinatax.gov.cn, szs.mof.gov.cn, shanghaiinvest.com, tianjin.chinatax.gov.cn, hunan.gov.cn, baike.taxrefund.com.cn, ce.cn, zhihu.com
+      top:   中华人民共和国工业和信息化部财政部税务总局关于2026 // 关于延续和优化新能源汽车车辆购置税减免政策的公告 // 关于调整节能汽车、新能源汽车车船税优惠政策的公告 - 税政司
+C16  policy-zh  ds-json  true  724ms  10  8  1  0  0.8  0.99  1184  13896  1/2  1/1
+      hosts: news.cnr.cn, cn.chinagate.cn, ybj.km.gov.cn, cs.cnpharm.com, bk.cnpharm.com, hrlib.ciic-cloud.cn, camdi.cn, toutiao.com
+      top:   国家医保局发布2026年国家医保目录调整工作方案 // 2026年医保商保“双目录”调整方案“划重点” // 2026年医保目录调整，建立药品竞价“红黄标”预警机制
+      withDate=10/10 rerankMean=2.21 authorityMean=3.3
+C16  policy-zh  zai  true  1940ms  9  4  3  0  0.78  0.95  101  2098  2/2  1/1
+      hosts: nhsa.gov.cn, policy.mofcom.gov.cn, healthcarechn.com, who.int
+      top:   生育保险和工伤保险药品目录及商保创新药目录调整初步 // 生育保险和工伤保险药品目录及商业健康保险创新 // 国家医疗保障局医保动态2026年药品目录调整工作方案解读
+C17  policy-zh  ds-json  true  1154ms  10  8  7  0  0.9  1  1472  17044  2/2  1/1
+      hosts: big5.www.gov.cn, stcn.com, ndrc.gov.cn, gov.cn, beijing.gov.cn, fgw.hubei.gov.cn, bigdata.sic.gov.cn, gxt.hebei.gov.cn
+      top:   國家發展改革委、財政部印發《關於2026年實施大規模設備更新和消費品以舊換新政策的通知》 // 1.3万亿“国家长钱”到位！超长期特别国债今年发行收官 // 关于2026年实施大规模设备更新和消费品以旧换新政策的通知
+      withDate=10/10 rerankMean=2.49 authorityMean=4
+C17  policy-zh  zai  true  2957ms  7  4  1  0  1  1  98  2047  2/2  1/1
+      hosts: ndrc.gov.cn, finance.sina.com.cn, baike.baidu.com, sohu.com
+      top:   关于2026年实施大规模设备更新和消费品以旧换新政策的 // 财政部印发《关于2026年实施大规模设备更新和消费品 // 【商务部等7部门关于提质增效实施2026年消费品以旧换新
+F1  foreign-eu  ds-json  true  635ms  10  8  0  0  0  0  3323  35684  1/2  1/1
+      hosts: ai-eu-act.eu, artificialintelligenceact.eu, dastra.eu, orrick.com, compyl.com, rtr.at, web.legalgeek.app, recht.nulegal.eu
+      top:   EU AI Act Fines: 3-Tier Penalty Breakdown // EU Artificial Intelligence Act // AI Act : les sanctions en cas de non-conformité
+      withDate=9/10 rerankMean=1.68 authorityMean=3.1
+F1  foreign-eu  zai  true  1868ms  10  9  1  0  0  0  166  3258  2/2  1/1
+      hosts: artificialintelligenceact.eu, ai-act-service-desk.ec.europa.eu, intelligence.dlapiper.com, euaiact.com, compyl.com, holisticai.com, aiexponent.com, euai.app
+      top:   Article 99: Penalties | EU Artificial Intelligence Act // AI Act Service Desk - Article 99: Penalties - European  // Enforcement / fines in the European Union - AI Laws of
+F1  foreign-eu  zai-us  true  3627ms  9  8  1  0  0  0  161  2799  2/2  1/1
+      hosts: artificialintelligenceact.eu, ai-act-service-desk.ec.europa.eu, intelligence.dlapiper.com, euaiact.com, compyl.com, holisticai.com, aiexponent.com, euai.app
+      top:   Article 99: Penalties | EU Artificial Intelligence Act // AI Act Service Desk - Article 99: Penalties - European  // Enforcement / fines in the European Union - AI Laws of
+F2  foreign-us  ds-json  true  496ms  10  10  0  0  0.1  0.03  3254  35453  0/1  1/1
+      hosts: practicalneurology.com, ajmc.com, business.optum.com, pharmexec.com, pharmacytimes.com, dermatologytimes.com, specialtypharmacycontinuum.com, in.marketscreener.com
+      top:   FDA Approves Zilbrysq Autoinjector for Self-Administrat // FDA Approves Once-Monthly Subcutaneous Olanzapine for S // RxNews - October 16, 2026
+      withDate=10/10 rerankMean=2.04 authorityMean=3
+F2  foreign-us  zai  true  1880ms  9  5  1  0  0  0  158  2935  1/1  1/1
+      hosts: fda.gov, prnewswire.com, drugs.com, oncologynewscentral.com, ajmc.com
+      top:   Novel Drug Approvals for 2026 // Press Announcements // What's New Related to Drugs
+F2  foreign-us  zai-us  true  8470ms  10  6  1  0  0  0  144  3194  1/1  1/1
+      hosts: fda.gov, drugs.com, empr.com, facebook.com, hcplive.com, prnewswire.com
+      top:   Press Announcements // Novel Drug Approvals for 2026 // What's New Related to Drugs
+F3  foreign-uk  ds-json  true  377ms  10  9  0  0  0  0  3098  33475  0/1  1/1
+      hosts: litrg.org.uk, icaew.com, tinytax.co.uk, nibusinessinfo.co.uk, markeluk.com, moneysavingexpert.com, osome.com, taxsummaries.pwc.com
+      top:   Tax return deadlines // TAXguide 02/26: Deadlines and dates 2026 - ICAEW // Self Assessment Deadlines: Key Dates Explained | TinyTa
+      withDate=8/10 rerankMean=2.03 authorityMean=3.1
+F3  foreign-uk  zai  true  1507ms  9  8  1  0  0  0  157  2963  1/1  1/1
+      hosts: gov.uk, xero.com, theprivateoffice.com, litrg.org.uk, gosimpletax.com, acenteus-cca.com, facebook.com, sterlingandwells.com
+      top:   Self Assessment tax returns: Deadlines // Self Assessment deadlines: when to register, file and p // Check if you need to send a Self Assessment tax return
+F3  foreign-uk  zai-us  true  1994ms  9  8  1  0  0  0  154  2938  1/1  1/1
+      hosts: gov.uk, xero.com, theprivateoffice.com, gosimpletax.com, litrg.org.uk, acenteus-cca.com, sterlingandwells.com, facebook.com
+      top:   Self Assessment tax returns: Deadlines // Self Assessment deadlines: when to register, file and p // Check if you need to send a Self Assessment tax return
+F4  foreign-x  ds-json  true  243ms  0  0  0  0  0  0  0  79  0/2  0/1
+      hosts: 
+      top:   
+      withDate=0/0 rerankMean=0 authorityMean=0
+F4  foreign-x  zai  true  1500ms  7  7  5  0  0  0  160  2435  1/2  0/1
+      hosts: merriam-webster.com, home.treasury.gov, fsapartners.ed.gov, x.com, pm.gov.au, sec.gov, fhfa.gov
+      top:   ANNOUNCEMENT Definition & Meaning // Treasury Announces Increased Sizes of Nominal Long- // Guidance on FVT/GE Data Reporting, STATS Early
+F4  foreign-x  zai-us  true  4923ms  10  1  0  0  0  0  126  2524  1/2  1/1
+      hosts: x.com
+      top:   Brad Groux - What I brought home from OpenAI DevDay // Everything OpenAI announced at DevDay 2026 // The Neuron
+F5  foreign-jp  ds-json  true  387ms  10  9  0  0  0.3  0.6  1300  15031  1/1  1/1
+      hosts: nikkei.com, 163.com, cmegroup.econoday.com, finance.sina.com.cn, boj.or.jp, ivswww.smd-am.co.jp, txbiz.tv-tokyo.co.jp, news.qq.com
+      top:   日銀、1.0%への利上げ決定 国債買い入れ減額は27年4月以降停止 - 日本経済新聞 // 日本央行决议罕见上演十年来最大分歧：多达三位反对票官员支持加息！ - 日本央行决议罕见上演十年来最大分歧：多达 // Econoday Economic Report: Japan
+      withDate=10/10 rerankMean=2.22 authorityMean=3
+F5  foreign-jp  zai  true  2250ms  8  7  0  0  0  0.97  93  1825  1/1  1/1
+      hosts: boj.or.jp, dlri.co.jp, smd-am.co.jp, daiwa-am.co.jp, treasurenet.jp, oanda.jp, tokiomarineam.co.jp
+      top:   金融政策決定会合の運営 // 日銀金融政策決定会合（2026年9月） ～3カ月で追加利上げ // 2026年3月日銀政策会合プレビュー～今回の注目点を整理する
+F5  foreign-jp  zai-us  true  6162ms  10  7  0  0  0  0.8  80  2134  1/1  1/1
+      hosts: boj.or.jp, mri.co.jp, tokiomarineam.co.jp, note.com, dtmdigest.org, murc.jp, project.nikkeibp.co.jp
+      top:   金融政策決定会合の運営 // 日本：日銀金融政策決定会合（2026年6月15-16日） // 金融市場調節方針に関する公表文 2026年
+
+=== capability probes (same session) ===
+
+[zai MCP tools/list] 5 params advertised: search_query, search_domain_filter, search_recency_filter, content_size, location
+zai domain_filter=www.postgresql.org   -> hosts: productplan.com, announcekit.app, releasenotes.io, reddit.com, ...  hit 0.00
+zai domain_filter=arxiv.org            -> hosts: productplan.com, announcekit.app, releasenotes.io, reddit.com, ...  hit 0.00
+zai domain_filter(control, no filter)  -> hosts: postgresql.org, bytebase.com, pgpedia.info, medium.com, neon.com  (identical to filtered runs)
+  => search_domain_filter is accepted by the server but has NO effect
+zai content_size=medium -> n=9  avgContentLen=155 max=172
+zai content_size=high   -> n=9  avgContentLen=155 max=172   (identical)
+  => content_size has NO effect; every item is truncated to ~100-170 chars
+zai recency=oneWeek  q='OpenAI news October 2026' -> n=7   (works, but drops most results)
+zai recency=oneWeek  q='postgres 18 logical replication' -> n=9, hosts tapoueh.org/docs.aws.amazon.com/daily.dev
+zai recency=oneMonth q='OpenAI news October 2026' -> n=10, hosts joshuagans.substack.com/openai.com/wsj.com
+zai count=20 (unsupported arg) -> n=8, silently ignored (fixed 7-10 results)
+zai query 'site:postgresql.org release notes' -> all postgresql subdomains (site: operator works in query text)
+zai default location=cn per MCP schema; location=us -> identical host set on non-GFW queries, latency x3
+
+ds-json query 'site:postgresql.org release notes new features' -> postgresql.org, commitfest.postgresql.org (n=10)
+ds-json query 'site:arxiv.org speculative decoding'           -> ar5iv.labs.arxiv.org, export.arxiv.org (n=10)
+ds-json query '... -site:github.com'  -> github.com removed  (works)
+ds-json query '... lang:zh'           -> CN/TW hosts         (works)
+ds-json query '... after:2026-01-01'  -> recency biased      (works)
+ds-json query '... "logical replication"' -> exact phrase   (works)
+ds-json count=3  -> n=3  chars=15612  withBody=0
+ds-json count=25 -> n=25 chars=50035  TRUNCATED: only 16 items rendered in text (50k cap)
+ds-json count=5 need_content=true -> n=5 chars=41236 withBody=5
+
+[GFW-hosted target reachability] query 'site:<host> latest news', 10 requested
+host              deepseek-json   zai
+x.com             0               10
+youtube.com       0               10
+reddit.com        0               7
+medium.com        0               10
+quora.com         0               10
+linkedin.com      2               10
+instagram.com     5               2
+google.com        10              10
+pypi.org          10              9
+techcrunch.com    10              10
+reuters.com       10              10
+bloomberg.com     10              9
+wsj.com           10              10
+nytimes.com       10              8
+  => deepseek-json cannot reach GFW-hosted sites and returns an EMPTY array (HTTP 200, no error, not billed)
+
+[billing, from vendor docs, not measured]
+DeepSeek Search: CNY 5 / 1000 successful requests; only HTTP 200 with non-empty results[] is billed
+Z.AI Web Search Prime: included in GLM Coding Plan quota (Lite 100 / Pro 1000 / Max 4000 per month)

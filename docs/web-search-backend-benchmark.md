@@ -8,6 +8,8 @@
 `resolveStoredOAuth()` 自动续期（`@earendil-works/pi-ai` 的 `auth/resolve.js`，剩余有效期不足 5 分钟即加锁刷新并落盘），
 本 harness 不具备该行为。
 
+> **注（2026-10-17）**：本报告中关于 retriever（minimax / zai）的部分已有更新版对比，对象是新增的 `deepseek-json` 后端与 `zai`，含 GFW 站点可达性与 `location:us` 验证，见 [deepseek-json-vs-zai-2026-10-17.md](deepseek-json-vs-zai-2026-10-17.md)。本文的 synthesizer（deepseek / google / openai）结论仍然有效。
+
 原始逐例数据见 [`benchmarks/2026-10-06-web-search-backend-run.txt`](benchmarks/2026-10-06-web-search-backend-run.txt)。
 
 ## 规模
