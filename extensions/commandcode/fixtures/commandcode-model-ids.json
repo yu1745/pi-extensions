@@ -1,5 +1,5 @@
 {
-  "fetchedAt": "2026-10-16T17:07:50.463Z",
+  "fetchedAt": "2026-10-17T01:37:58.892Z",
   "source": "https://api.commandcode.ai/provider/v1/models",
   "modelIds": [
     "MiniMaxAI/MiniMax-M2.5",
@@ -69,6 +69,7 @@
     "nvidia/nemotron-3-ultra-550b-a55b",
     "nvidia/nemotron-3.5-super-vl",
     "poolside/laguna-s-2.1-free",
+    "reflection/beam:free",
     "sakana/fugu-ultra",
     "stealth/cat-jam:free",
     "stealth/glyph-cluster:free",

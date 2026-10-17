@@ -11,13 +11,14 @@
 //
 // Source:  https://commandcode.ai/docs/resources/pricing-limits
 // Catalog: https://api.commandcode.ai/provider/v1/models
-// Verified: 2026-10-16
+// Verified: 2026-10-17
 
-export const PRICING_VERIFIED_ON = "2026-10-16"
+export const PRICING_VERIFIED_ON = "2026-10-17"
 
 /** Catalog ids the pricing page serves at no cost. */
 export const GENERATED_FREE_MODEL_IDS: readonly string[] = [
   "poolside/laguna-s-2.1-free",
+  "reflection/beam:free",
   "stealth/cat-jam:free",
   "stealth/glyph-cluster:free",
 ]
@@ -191,6 +192,7 @@ export const GENERATED_MODEL_COSTS = {
   "Qwen/Qwen3.8-Max-0902": { input: 2, output: 6, cacheRead: 0.25, cacheWrite: 0 },
   "Qwen/Qwen3.8-Max-Prime": { input: 4, output: 12, cacheRead: 0.5, cacheWrite: 5 },
   "Qwen/Qwen3.8-Omni-Flash": { input: 0.15, output: 0.47, cacheRead: 0.016, cacheWrite: 0 },
+  "reflection/beam:free": { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   "sakana/fugu-ultra": { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
   "stealth/cat-jam:free": { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   "stealth/glyph-cluster:free": { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
