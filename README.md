@@ -38,6 +38,7 @@ pi install git:github.com/yu1745/pi-extensions
 | `deepseek-time-pricing` | `extensions/deepseek-time-pricing.ts` | DeepSeek 分时定价：按消息时间戳重算 `usage.cost`，成本统计跟随高峰/空闲价；`/deepseek-pricing` 查看当前档位。provider `deepseek` 匹配 `deepseek-flash`、`deepseek-v4[.x]-flash*` 与 `deepseek-v4[.x]-pro`（CNY 价目，原样写入 `usage.cost`，不经过美元）；provider `commandcode` 匹配 `deepseek/deepseek-v4[.x]-pro` 与 `deepseek/deepseek-v4[.x]-flash`（含 `-vision-exp`，USD 价目直用）；平价模型 `deepseek/deepseek-v4-flash-fast` 不参与分时；`tests/deepseek-time-pricing.test.ts` 覆盖各档位与边界 |
 | `clear-new-alias` | `extensions/clear-new-alias.ts` | Clears the new-version alias notice |
 | `codebuddy` | `extensions/codebuddy-fp/` | CodeBuddy (Tencent) provider with official-CLI fingerprint simulation and a toggleable disguise level (`/codebuddy-fp on|off`, default off): full mode sends byte-identical round-1 headers/system/tools, off mode sends Pi's own prompt and tools only. OAuth login (`/codebuddy-login`), CLI credential import (`/codebuddy-import`), token auto-refresh, aligned telemetry (config/accounts/report/traces) with zero git-repo leakage |
+| `codebuddy-fallback` | `extensions/codebuddy-fallback/` | CodeBuddy 的 DeepSeek V4.1 Flash 一旦不可用（429 / 配额 / 5xx / 网络 / 模型下架，用户 Esc 中断与上下文溢出除外）就在 `turn_end` 边界切到 DeepSeek 官方的 `deepseek-flash` 原地重发（`context_edit` 剔除失败消息 + `continue: true`），并在后台每 5 分钟 `ping` 一次 CodeBuddy，恢复后自动切回并还原 thinking level；`/codebuddy-fallback on\|off\|status\|probe\|restore`，持久化在 `settings.json` 的 `codebuddyFallback`（默认开），`CODEBUDDY_FALLBACK` 环境变量优先 |
 
 <details>
 <summary><strong>Shadowed</strong> (code in repo, not activated)</summary>
@@ -48,7 +49,7 @@ pi install git:github.com/yu1745/pi-extensions
 
 </details>
 
-> **27 extensions, one package.** Previously separate repos (`pi-web-reader-spa`) are merged here — uninstall the standalone packages before installing this one to avoid duplicate tool registration.
+> **28 extensions, one package.** Previously separate repos (`pi-web-reader-spa`) are merged here — uninstall the standalone packages before installing this one to avoid duplicate tool registration.
 > pi-smart-compact is provided separately by the fork `git:github.com/yu1745/pi-smart-compact` (upstream + `allowUnverifiedApply`).>
 > The `subagent` extension was **removed** in favor of [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents) (install with `pi install npm:@tintinweb/pi-subagents`).
 

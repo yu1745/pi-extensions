@@ -57,6 +57,7 @@
 			"extensions/siliconflow.ts",
 			"extensions/commandcode/index.ts",
 			"extensions/codebuddy-fp/index.ts",
+			"extensions/codebuddy-fallback/index.ts",
 			"extensions/qoder-fp/index.ts",
 			"extensions/tokenspeed.ts",
 			"extensions/tool-duration.ts",
