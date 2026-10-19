@@ -177,14 +177,67 @@ function objectArrays(text) {
 
 const normalizeName = (name) => name.toLowerCase().replace(/[^a-z0-9]/g, "")
 
-function indexByName(rows, label) {
-  const index = new Map()
+/** A row id minus any provider prefix, so `minimax/foo` meets upstream's `foo`. */
+const normalizeId = (id) => normalizeName(id.slice(id.lastIndexOf("/") + 1))
+
+/**
+ * Whether an id names the no-cost variant of a model (`:free`, `-free`).
+ * Upstream ships such a twin next to the paid row under the same display name,
+ * so two ids can share a name while meaning very different prices.
+ */
+const isFreeVariantId = (id) => /free$/.test(normalizeId(id))
+
+/**
+ * Index pricing rows so a catalog model can be matched to them.
+ *
+ * A display name is not an identity: upstream lists a paid model and its
+ * `:free` twin — two catalog ids — under one name, so "MiniMax M3.1 Flash
+ * Preview" alone cannot say which of the two rows prices which of the two ids.
+ * Every key therefore keeps all of its claimants, and `resolve` narrows an
+ * ambiguous name by id before failing loudly.
+ */
+function indexRows(rows, label) {
+  const byName = new Map()
+  const byId = new Map()
+  const push = (map, key, row) => map.set(key, [...(map.get(key) ?? []), row])
   for (const row of rows) {
-    const key = normalizeName(row.name)
-    if (index.has(key)) throw new Error(`${label}: duplicate model name "${row.name}"`)
-    index.set(key, row)
+    push(byName, normalizeName(row.name), row)
+    push(byId, normalizeId(row.id), row)
   }
-  return index
+
+  return {
+    /**
+     * The row pricing `model`, or undefined when upstream lists none.
+     *
+     * The id wins: a `:free` twin shares its paid sibling's display name, so
+     * the name alone would price the free id at the paid rate. Names are the
+     * fallback for the many rows where catalog and page disagree on the id
+     * (`MiniMaxAI/MiniMax-M3` vs `minimax-m3`).
+     */
+    resolve(model) {
+      const sameId = byId.get(normalizeId(model.id)) ?? []
+      if (sameId.length === 1) return sameId[0]
+      if (sameId.length > 1) {
+        throw new Error(
+          `${label}: id "${model.id}" matches ${sameId.length} rows ` +
+            `(${sameId.map((row) => row.id).join(", ")})`,
+        )
+      }
+      const named = byName.get(normalizeName(model.name)) ?? []
+      // Only rows of the same kind may stand in for each other: falling back
+      // from `foo:free` to the paid `foo` row would bill a free model at list
+      // price (and vice versa), which is worse than reporting it unpriced.
+      const sameKind = named.filter((row) => isFreeVariantId(row.id) === isFreeVariantId(model.id))
+      if (sameKind.length === 1) return sameKind[0]
+      if (sameKind.length > 1) {
+        throw new Error(
+          `${label}: "${model.name}" names ${sameKind.length} rows ` +
+            `(${sameKind.map((row) => row.id).join(", ")}) and the id "${model.id}" picks none of them`,
+        )
+      }
+      return undefined
+    },
+  }
 }
 
 function positiveNumber(value, what) {
@@ -339,9 +392,8 @@ function renderStringArray(values) {
 /* ------------------------------------------------------------------- build -- */
 
 function buildTable({ catalog, costRows, displayRows }) {
-  const costsByName = indexByName(costRows, "pricing payload")
-  const displayByName = indexByName(displayRows, "pricing page")
-  const catalogNames = new Set(catalog.map((model) => normalizeName(model.name)))
+  const pricing = indexRows(costRows, "pricing payload")
+  const display = indexRows(displayRows, "pricing page")
 
   const rows = []
   const freeIds = []
@@ -350,8 +402,7 @@ function buildTable({ catalog, costRows, displayRows }) {
   const zeroPriced = []
 
   for (const model of catalog) {
-    const key = normalizeName(model.name)
-    const costRow = costsByName.get(key)
+    const costRow = pricing.resolve(model)
     if (costRow) {
       const cost = costFromRow(costRow)
       const allZero = [cost.input, cost.output, cost.cacheRead, cost.cacheWrite].every(
@@ -376,11 +427,11 @@ function buildTable({ catalog, costRows, displayRows }) {
 
       // The rendered table repeats the tier bounds as labels; if they stop
       // agreeing with the payload, one of the two moved.
-      const display = displayByName.get(key)
+      const page = display.resolve(model)
       const upstreamTiers = costRow.contextTiers ?? []
-      if (display && costRow.contextTiers && display.tiers.length === costRow.contextTiers.length) {
-        for (let i = 1; i < display.tiers.length; i++) {
-          const fromLabel = thresholdFromLabel(display.tiers[i - 1]?.context)
+      if (page && costRow.contextTiers && page.tiers.length === costRow.contextTiers.length) {
+        for (let i = 1; i < page.tiers.length; i++) {
+          const fromLabel = thresholdFromLabel(page.tiers[i - 1]?.context)
           const fromPayload = upstreamTiers[i - 1]?.maxContext
           if (fromLabel !== undefined && fromLabel !== fromPayload) {
             mismatches.push(
@@ -392,8 +443,7 @@ function buildTable({ catalog, costRows, displayRows }) {
       continue
     }
 
-    const display = displayByName.get(key)
-    if (isFreeRow(display)) {
+    if (isFreeRow(display.resolve(model))) {
       freeIds.push(model.id)
       rows.push({ id: model.id, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } })
       continue
@@ -403,8 +453,10 @@ function buildTable({ catalog, costRows, displayRows }) {
 
   // Rows upstream prices that no catalog id claims: the decision API, retired
   // models, or a model we failed to map. Only the last kind is a problem, so
-  // every off-catalog row must be registered to be skipped.
-  const offCatalog = costRows.filter((row) => !catalogNames.has(normalizeName(row.name)))
+  // every off-catalog row must be registered to be skipped. A row a catalog
+  // model resolved to is served by definition, so it can never show up here.
+  const claimedRows = new Set(catalog.map((model) => pricing.resolve(model)).filter(Boolean))
+  const offCatalog = costRows.filter((row) => !claimedRows.has(row))
   const registered = Object.entries(OFF_CATALOG_PRICING).map(([id, entry]) => ({ id, ...entry }))
   // An entry matches by exact name, or by `match` when it owns a family of rows.
   const findEntry = (name) =>
