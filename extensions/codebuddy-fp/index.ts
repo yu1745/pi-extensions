@@ -631,7 +631,8 @@ function modelsFromConfig(cfg: any): Model2[] {
       samplingParams: m.temperature != null ? { temperature: m.temperature } : undefined,
       thinkingLevelMap: piThinkingLevelMap(efforts, m.reasoning?.canDisableThinking, defaultEffort),
       defaultEffort,
-      effortCandidates: efforts?.length ? efforts : [defaultEffort],
+      // 官方没声明 supportedEfforts 时留空：探测时按常用档位全测一遍，才能发现哑档
+      effortCandidates: efforts?.length ? efforts : [],
       canDisableThinking: !!m.reasoning?.canDisableThinking,
       compat: {
         supportsStore: false,
@@ -1695,9 +1696,8 @@ export default async function (pi: ExtensionAPI) {
         return;
       }
       const upstreamId: string = m.upstreamId;
-      const candidates: string[] = Array.isArray(m.effortCandidates) && m.effortCandidates.length
-        ? m.effortCandidates
-        : [m.defaultEffort || "high"];
+      const declared: string[] = Array.isArray(m.effortCandidates) ? m.effortCandidates : [];
+      const candidates: string[] = declared.length ? declared : ["low", "medium", "high", "max"];
 
       if (args.trim() === "--probe") {
         ctx.ui.notify(`正在实测 ${upstreamId} 各档位的思考量（每个档 2 次）…`, "info");
