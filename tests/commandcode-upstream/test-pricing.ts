@@ -189,27 +189,27 @@ describe("MODEL_COSTS pricing overlay", () => {
   })
 
   it("prices a paid model and its :free twin independently", () => {
-    // Upstream lists both ids under one display name ("MiniMax M3.1 Flash
-    // Preview"), so matching by name alone priced the free twin at the paid
-    // rate — or, when the duplicate name aborted the sync, priced neither.
-    assertCost("minimax/minimax-m3.1-flash-preview", {
+    // Upstream lists both ids under one display name ("MiniMax M3.1 Flash"),
+    // so matching by name alone priced the free twin at the paid rate — or,
+    // when the duplicate name aborted the sync, priced neither.
+    assertCost("minimax/minimax-m3.1-flash", {
       input: 0.15,
       output: 0.6,
       cacheRead: 0.015,
       cacheWrite: 0,
     })
-    assertCost("minimax/minimax-m3.1-flash-preview:free", {
+    assertCost("minimax/minimax-m3.1-flash:free", {
       input: 0,
       output: 0,
       cacheRead: 0,
       cacheWrite: 0,
     })
     assert.ok(
-      FREE_MODEL_IDS.has("minimax/minimax-m3.1-flash-preview:free"),
+      FREE_MODEL_IDS.has("minimax/minimax-m3.1-flash:free"),
       "the :free twin should be declared free",
     )
     assert.ok(
-      !FREE_MODEL_IDS.has("minimax/minimax-m3.1-flash-preview"),
+      !FREE_MODEL_IDS.has("minimax/minimax-m3.1-flash"),
       "the paid twin should never be declared free",
     )
   })
