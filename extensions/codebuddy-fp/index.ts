@@ -328,33 +328,17 @@ async function rawRequest(urlStr: string, method: string, headerPairs: [string, 
 const FALLBACK_EFFORTS: Record<string, string[]> = {
   "deepseek": ["low", "high", "max"],
 };
-/** 严格映射：只有官方 supportedEfforts 声明的档位可选（pi 语义 null=隐藏该档），
- *  不做就近降档——medium 未声明就不可选，避免把 xhigh 悄悄变成 max。
- *  off 仅在 canDisableThinking 时映射为 "none"（官方关闭思考的取值）。 */
-function strictThinkingLevelMap(supported: string[], canDisableThinking?: boolean): Record<string, string | null> {
-  const has = (l: string) => supported.includes(l);
-  return {
-    off: canDisableThinking ? "none" : null,
-    minimal: null,
-    low: has("low") ? "low" : null,
-    medium: has("medium") ? "medium" : null,
-    high: has("high") ? "high" : null,
-    xhigh: has("xhigh") ? "xhigh" : null,
-    max: has("max") ? "max" : null,
-  };
-}
-
 /**
- * 构造 pi 的档位→上游 effort 映射。
+ * 构造 pi 档位→上游 reasoning_effort 的映射（pi 语义：null=隐藏该档）。
  *
- * - 官方声明了 supportedEfforts：严格 1:1 映射（medium 未声明就不可选，
- *   避免把 xhigh 悄悄变成 max）。
+ * - 官方声明了 supportedEfforts：严格 1:1，不做就近降档——medium 未声明就不可选，
+ *   避免把 xhigh 悄悄变成 max。
  * - 官方没声明 supportedEfforts（只给了一个 defaultEffort/effort，如 hy3 / kimi-k3-1 /
- *   glm-4.x / minimax-*）：按同名档位走（上游多数认同名档），
- *   实测不生效的档位由 refineThinkingLevelMap 换成真会思考的档。
- *   旧实现这里返回 undefined，于是 pi 把自己的档位名（minimal/medium/high）原样发给上游，
- *   上游对部分档位不认 → 该档位彻底不思考（实测 hy3 的 medium、glm-5.3 的 low/high）。
- * - 官方允许关思考（canDisableThinking）时 off → "none"，否则 off 隐藏（上游关不掉）。
+ *   glm-4.x / minimax-*）：按同名档位走，minimal 落到官方默认档、xhigh 落到 max。
+ *   旧实现这里返回 undefined，于是 pi 把自己的档位名（minimal/xhigh…）原样发给上游，
+ *   上游不认 → 该档位形同虚设。
+ * - off 仅在 canDisableThinking 时映射为 "none"（官方关闭思考的取值），
+ *   否则隐藏该档（上游根本关不掉思考）。
  */
 export function piThinkingLevelMap(
   supported?: string[],
@@ -362,239 +346,23 @@ export function piThinkingLevelMap(
   canonical?: string,
 ): Record<string, string | null> | undefined {
   const off: string | null = canDisableThinking ? "none" : null;
-  if (supported?.length) return strictThinkingLevelMap(supported, canDisableThinking);
+  if (supported?.length) {
+    const has = (l: string) => supported.includes(l);
+    return {
+      off,
+      minimal: null,
+      low: has("low") ? "low" : null,
+      medium: has("medium") ? "medium" : null,
+      high: has("high") ? "high" : null,
+      xhigh: has("xhigh") ? "xhigh" : null,
+      max: has("max") ? "max" : null,
+    };
+  }
   if (canonical) {
-    // 官方没声明档位表：先按同名档位走（上游多数认同名档），实测不生效的再由 refine 修正。
     return { off, minimal: canonical, low: "low", medium: "medium", high: "high", xhigh: "max", max: "max" };
   }
   return undefined;
 }
-
-/**
- * 用实测结果修正档位映射：某个上游档位实测一次思考都没产生时，
- * 把它换成一个「真的会思考」的档（优先官方默认档，其次思考量最大的档）。
- * 只修正「哑档」，有思考的档位保持原样（档位强弱语义不能被抹平）。
- */
-export function refineThinkingLevelMap(
-  base: Record<string, string | null>,
-  levels: EffortLevels,
-  canonical?: string,
-): Record<string, string | null> {
-  const measured = Object.entries(levels).filter(([, tokens]) => tokens > 0);
-  const best = measured.reduce((m, [, t]) => Math.max(m, t), 0);
-  // 哑档判定：完全没思考，或思考量不到最优档的 10%（几乎等于没思考）
-  const dead = (effort: string): boolean => {
-    const tokens = levels[effort];
-    if (tokens === undefined) return false; // 没测过，不动
-    if (tokens <= 0) return true;
-    return best > 0 && tokens < best * 0.1;
-  };
-  const working = measured.sort((a, b) => b[1] - a[1]).map(([effort]) => effort);
-  const fallback = (canonical && !dead(canonical)) ? canonical : working[0];
-  const out: Record<string, string | null> = {};
-  for (const [level, effort] of Object.entries(base)) {
-    if (effort === null) {
-      out[level] = null;
-      continue;
-    }
-    out[level] = dead(effort) ? (fallback ?? effort) : effort;
-  }
-  return out;
-}
-// ── 思考档位实测（诊断用）───────────────────────────────────────────────────
-// 上游认全部 reasoning_effort 档位，差别在「模型自己想多少」。实测 2026-10-22：
-//   glm-5.3            low/high → 常常 0 个思考 token，max → 200~800
-//   deepseek-v4.1-flash low → 50~100，high → 100~200，max → 300~600
-//   工具轮（模型直接调工具）→ 经常一个思考 token 都不产生
-// 所以「思考选项没用」的观感主要来自模型行为，不是档位没传出去。
-// 这里按模型实测各档的思考 token 量并落盘，供 /codebuddy-effort 展示与建议。
-
-/** 探测结果：模型 id → 各 effort 档实测到的思考 token 量 + 哑档修正表（+ 探测时间）。 */
-export type EffortLevels = Record<string, number>;
-export type EffortEntry = {
-  levels: EffortLevels;
-  /** 上游 effort → 实际生效的上游 effort（哑档被替换后的结果）。 */
-  refined: Record<string, string>;
-  at: number;
-};
-export type EffortTable = Record<string, EffortEntry>;
-
-function effortCacheFile(): string {
-  try {
-    return path.join(getAgentDir(), "extensions", "codebuddy-fp", "effort-cache.json");
-  } catch {
-    return path.join(os.homedir(), ".pi/agent/extensions/codebuddy-fp/effort-cache.json");
-  }
-}
-
-function loadEffortTable(): EffortTable {
-  try { return JSON.parse(fs.readFileSync(effortCacheFile(), "utf8")); } catch { return {}; }
-}
-
-function saveEffortTable(table: EffortTable): void {
-  try {
-    const f = effortCacheFile();
-    fs.mkdirSync(path.dirname(f), { recursive: true });
-    fs.writeFileSync(f, JSON.stringify(table, null, 2));
-  } catch {}
-}
-
-/** 进程内的探测结果（落盘缓存的内存副本）。 */
-let effortTable: EffortTable = loadEffortTable();
-/** 正在探测中的模型，避免并发重复探测。 */
-const effortProbing = new Set<string>();
-
-/** 探测用提示词：要能稳定诱发一小段思考，否则量到的只是「模型懒得想」。 */
-const PROBE_PROMPT = "计算 17×23，并简要说明计算过程。";
-
-/** 发一次最小 chat 请求，返回这次实际产生的思考 token 数（-1 表示请求失败）。 */
-async function probeEffortOnce(upstreamId: string, effort: string): Promise<number> {
-  const auth = await getValidAuth();
-  const body = Buffer.from(JSON.stringify({
-    model: upstreamId,
-    messages: [{ role: "user", content: PROBE_PROMPT }],
-    stream: true,
-    stream_options: { include_usage: true },
-    max_tokens: 2048,
-    temperature: 1,
-    reasoning_effort: effort,
-  }), "utf8");
-  const gz = gzipSync(body);
-  const headers: Record<string, string> = {
-    ...buildFingerprintHeaders(auth),
-    "Content-Encoding": "gzip",
-    "Content-Length": String(gz.length),
-  };
-  const res = await globalThis.fetch(`${BASE}/v2/chat/completions`, { method: "POST", headers, body: gz });
-  if (!res.ok) return -1;
-  const text = await res.text();
-  let chars = 0;
-  let tokens = 0;
-  for (const line of text.split("\n")) {
-    if (!line.startsWith("data: ")) continue;
-    try {
-      const j = JSON.parse(line.slice(6));
-      const det = j?.usage?.completion_tokens_details;
-      if (typeof det?.reasoning_tokens === "number") tokens = det.reasoning_tokens;
-      const rc = j?.choices?.[0]?.delta?.reasoning_content;
-      if (typeof rc === "string") chars += rc.length;
-    } catch {}
-  }
-  // usage 没给 reasoning_tokens 时退回按流出的字符数估算
-  return tokens > 0 ? tokens : chars;
-}
-
-/** 同一档测两次，取较大值（模型可能这次不想想，取大值更能代表该档的能力）。 */
-async function probeEffortLevel(upstreamId: string, effort: string): Promise<number> {
-  let best = 0;
-  for (let i = 0; i < 2; i++) {
-    try {
-      const v = await probeEffortOnce(upstreamId, effort);
-      if (v > best) best = v;
-    } catch {}
-  }
-  return best;
-}
-
-/**
- * 实测一个模型各档位的思考量，落盘缓存。
- * 候选档位：官方 supportedEfforts；没有就用官方 defaultEffort/effort。
- */
-export async function probeModelEfforts(
-  upstreamId: string,
-  candidates: string[],
-  canonical?: string,
-): Promise<EffortLevels | null> {
-  if (!upstreamId || effortProbing.has(upstreamId)) return null;
-  const uniq = [...new Set(candidates.filter(Boolean))];
-  if (!uniq.length) return null;
-  effortProbing.add(upstreamId);
-  try {
-    const levels: EffortLevels = {};
-    for (const effort of uniq) levels[effort] = await probeEffortLevel(upstreamId, effort);
-    // 哑档修正：实测没思考（或思考量几乎为 0）的档位换成真会思考的档
-    const base: Record<string, string | null> = { minimal: canonical ?? null };
-    for (const effort of uniq) base[effort] = effort;
-    const refinedMap = refineThinkingLevelMap(base, levels, canonical);
-    const refined: Record<string, string> = {};
-    for (const [level, effort] of Object.entries(refinedMap)) {
-      if (effort) refined[level] = effort;
-    }
-    effortTable[upstreamId] = { levels, refined, at: Date.now() };
-    saveEffortTable(effortTable);
-    return levels;
-  } catch {
-    return null;
-  } finally {
-    effortProbing.delete(upstreamId);
-  }
-}
-
-/** 把实测到的各档思考量排成可读的一行，并给出建议档位。 */
-export function formatEffortLevels(upstreamId: string, levels: EffortLevels): string {
-  const entries = Object.entries(levels).sort((a, b) => b[1] - a[1]);
-  if (!entries.length) return upstreamId + "：没有实测数据";
-  const lines = entries.map(([effort, tokens]) => `  ${effort}: ${tokens} 思考 token`).join("\n");
-  const best = entries[0];
-  const dead = entries.filter(([, t]) => t === 0).map(([e]) => e);
-  const hint = dead.length
-    ? `\n注意：${dead.join(", ")} 档实测一次思考都没产生（模型自己选择不思考，不是档位没传出去）`
-    : "";
-  return `${upstreamId} 各档实测思考量：\n${lines}\n思考最多的档位：${best[0]}${hint}`;
-}
-
-/** 模型对象表：upstreamId → 已注册的模型对象。 */
-const modelObjects = new Map<string, any>();
-
-/** 取模型实测到的各档思考量（未实测过则 undefined）。 */
-export function effortLevelsFor(upstreamId: string | undefined): EffortLevels | undefined {
-  if (!upstreamId) return undefined;
-  const entry = effortTable[upstreamId];
-  return entry?.levels ? entry.levels : undefined;
-}
-
-/**
- * 安排一次思考档位实测（后台跑，不阻塞请求）。
- * 只做诊断：把「哪个档真的会让模型思考」量化出来，供 /codebuddy-effort 展示。
- */
-export function scheduleEffortProbe(modelObj: any): void {
-  const upstreamId: string | undefined = modelObj?.upstreamId;
-  if (!upstreamId) return;
-  if (modelObj?.reasoning === false) return; // 不支持思考的模型（官方 default 等）不用测
-  if (effortTable[upstreamId]?.levels) return; // 已实测过
-  if (effortProbing.has(upstreamId)) return;
-  const declared: string[] = Array.isArray(modelObj.effortCandidates) && modelObj.effortCandidates.length
-    ? modelObj.effortCandidates
-    : [];
-  // 官方没声明档位表时，把常用档都测一遍（上游可能只认其中一部分）
-  const candidates = declared.length ? declared : ["low", "medium", "high", "max"];
-  void probeModelEfforts(upstreamId, candidates, modelObj.defaultEffort).then((levels) => {
-    if (!levels) return;
-    const base = piThinkingLevelMap(declared, modelObj.canDisableThinking, modelObj.defaultEffort);
-    if (!base) return;
-    modelObj.thinkingLevelMap = refineThinkingLevelMap(base, levels, modelObj.defaultEffort);
-  });
-}
-
-/**
- * 把 pi 传来的 effort 解析成出网用的 reasoning_effort。
- *
- * - "none" 是显式关闭思考，原样透传。
- * - pi 给了档位就原样用（上游认全部档位：实测 glm-5.3 的 low/high/max 都会思考，
- *   差别只在模型自己想多少；deepseek-v4.1-flash 同理）。
- * - pi 没给（模型关不掉思考、思考档被隐藏）时用该模型的官方默认档，
- *   而不是硬编码 "high"——官方默认档才是上游真正认的值。
- */
-export function resolveEffort(
-  requested: string | undefined,
-  canonical?: string,
-  refined?: Record<string, string>,
-): string {
-  if (requested === "none") return "none";
-  if (requested) return refined?.[requested] ?? requested;
-  return canonical || "high";
-}
-
 /** "x0.03 credits" → " (x0.03)"；积分制不分输入/输出/缓存，只展示倍率，cost 留零 */
 function rateSuffix(credits?: string): string {
   const m = /^(x[\d.]+)/.exec(String(credits ?? "").trim());
@@ -605,6 +373,19 @@ function rateSuffix(credits?: string): string {
 const RATE_ID_RE = /\s*\(x[\d.]+\)$/;
 function stripRateId(id: string): string {
   return id.replace(RATE_ID_RE, "");
+}
+
+/**
+ * 出网 reasoning_effort 的最终取值。
+ * - "none" 是显式关闭思考，原样透传。
+ * - pi 给了档位就原样用（上游认这些档位；差别只在模型自己想多少）。
+ * - pi 没给（模型关不掉思考、思考档被隐藏）时用该模型的官方默认档——
+ *   官方默认档才是上游真正认的值，不能硬编码 high。
+ */
+export function resolveEffort(requested: string | undefined, canonical?: string): string {
+  if (requested === "none") return "none";
+  if (requested) return requested;
+  return canonical || "high";
 }
 
 function modelsFromConfig(cfg: any): Model2[] {
@@ -631,9 +412,6 @@ function modelsFromConfig(cfg: any): Model2[] {
       samplingParams: m.temperature != null ? { temperature: m.temperature } : undefined,
       thinkingLevelMap: piThinkingLevelMap(efforts, m.reasoning?.canDisableThinking, defaultEffort),
       defaultEffort,
-      // 官方没声明 supportedEfforts 时留空：探测时按常用档位全测一遍，才能发现哑档
-      effortCandidates: efforts?.length ? efforts : [],
-      canDisableThinking: !!m.reasoning?.canDisableThinking,
       compat: {
         supportsStore: false,
         supportsDeveloperRole: false,
@@ -642,7 +420,6 @@ function modelsFromConfig(cfg: any): Model2[] {
       },
     });
   }
-  for (const m of out) if (m.upstreamId) modelObjects.set(m.upstreamId, m);
   return out;
 }
 type Model2 = {
@@ -650,8 +427,6 @@ type Model2 = {
   reasoning: boolean; input: string[]; cost: Record<string, number>;
   contextWindow: number; maxTokens: number; samplingParams?: Record<string, unknown>;
   thinkingLevelMap?: Record<string, string | null>; defaultEffort?: string; upstreamId?: string;
-  /** 官方声明的候选 effort（探测用）；canDisableThinking：官方是否允许关闭思考。 */
-  effortCandidates?: string[]; canDisableThinking?: boolean;
   compat: Record<string, unknown>;
 };
 
@@ -712,13 +487,9 @@ export function shapeChatBody(p: any, model: any, disguise: boolean): any {
     max_tokens: model.maxTokens, // 官方 CLI 固定发模型 max_tokens，不随上下文余量缩水
     stream: p.stream,
     stream_options: p.stream_options ?? { include_usage: true },
-    // 档位→上游 effort：pi 给了就按实测修正表换算（哑档换成真会思考的档）；
-    // 没档位时用该模型的官方默认档。
-    reasoning_effort: resolveEffort(
-      p.reasoning_effort,
-      model?.defaultEffort,
-      effortTable[model?.upstreamId ?? ""]?.refined,
-    ),
+    // 档位→上游 effort：pi 给了就原样用（上游认这些档位）；
+    // pi 没给（模型关不掉思考、思考档被隐藏）时用该模型的官方默认档，而不是硬编码 high。
+    reasoning_effort: resolveEffort(p.reasoning_effort, model?.defaultEffort),
     verbosity: p.verbosity ?? "high",
     reasoning_summary: p.reasoning_summary ?? "auto",
   };
@@ -1329,8 +1100,6 @@ export default async function (pi: ExtensionAPI) {
         // CLI 的（完整指纹对齐），第 2 轮起发 pi 真实工具与提示词。
         // off 档（默认）：一律发 pi 原样的提示词与工具，不做任何替换。
         const disguise = beginChatRound();
-        // 该模型还没探测过 → 后台实探一次可用 effort 档（下一轮开始档位就准了）
-        scheduleEffortProbe(model);
         const out = shapeChatBody(p, model, disguise);
         if (process.env.CODEBUDDY_DEBUG_BODY) {
           try { require("node:fs").appendFileSync(process.env.CODEBUDDY_DEBUG_BODY,
@@ -1528,12 +1297,6 @@ export default async function (pi: ExtensionAPI) {
     },
   });
 
-  // 兜底静态表同样登记进 modelObjects（动态表在 modelsFromConfig 里已登记）
-  for (const m of (dynamicModels ?? provider.getModels?.() ?? []) as any[]) {
-    const upstreamId = (m as any)?.upstreamId;
-    if (upstreamId) modelObjects.set(upstreamId, m);
-  }
-
   pi.registerProvider(provider as any);
 
   // ── 伪装开关：footer 状态条 + /codebuddy-fp 命令 ────────────────────────
@@ -1680,58 +1443,6 @@ export default async function (pi: ExtensionAPI) {
     },
   });
 
-  // ── /codebuddy-effort：实测「各思考档位到底会不会思考、思考多少」──────────
-  pi.registerCommand("codebuddy-effort", {
-    description: "查看/实测 CodeBuddy 模型各思考档位上游实际的思考量（--probe 实测当前模型）",
-    getArgumentCompletions: (prefix: string) => {
-      const items = [
-        { value: "--probe", label: "--probe —— 实测当前模型各档位的思考 token 量" },
-      ].filter((i) => i.value.startsWith(prefix));
-      return items.length > 0 ? items : null;
-    },
-    handler: async (args: string, ctx: any) => {
-      const m: any = (ctx as any)?.model;
-      if (m?.provider !== "codebuddy" || !m?.upstreamId) {
-        ctx.ui.notify("当前不是 codebuddy 模型", "error");
-        return;
-      }
-      const upstreamId: string = m.upstreamId;
-      const declared: string[] = Array.isArray(m.effortCandidates) ? m.effortCandidates : [];
-      const candidates: string[] = declared.length ? declared : ["low", "medium", "high", "max"];
-
-      if (args.trim() === "--probe") {
-        ctx.ui.notify(`正在实测 ${upstreamId} 各档位的思考量（每个档 2 次）…`, "info");
-        const levels = await probeModelEfforts(upstreamId, candidates, m.defaultEffort);
-        if (levels) {
-          const base = piThinkingLevelMap(
-            Array.isArray(m.effortCandidates) ? m.effortCandidates : undefined,
-            m.canDisableThinking,
-            m.defaultEffort,
-          );
-          if (base) m.thinkingLevelMap = refineThinkingLevelMap(base, levels, m.defaultEffort);
-        }
-        ctx.ui.notify(
-          levels ? formatEffortLevels(upstreamId, levels) : `${upstreamId} 实测失败`,
-          levels ? "success" : "error",
-        );
-        return;
-      }
-
-      const entry = effortTable[upstreamId];
-      if (entry) {
-        ctx.ui.notify(formatEffortLevels(upstreamId, entry.levels), "info");
-        return;
-      }
-      const all = Object.entries(effortTable)
-        .map(([id, v]) => `  ${id}: ${Object.entries(v.levels).map(([e, n]) => `${e}=${n}`).join(", ")}`)
-        .join("\n");
-      ctx.ui.notify(
-        `${upstreamId} 尚未实测（/codebuddy-effort --probe）\n\n已实测模型：\n${all || "  （无）"}`,
-        "info",
-      );
-    },
-  });
-
   pi.on("session_start", async (_event, ctx) => {
     // 新会话 / 重载 / 恢复：请求计数归零，"首轮"重新从本会话第一轮算起
     resetChatRound();
@@ -1744,8 +1455,6 @@ export default async function (pi: ExtensionAPI) {
 
   pi.on("model_select", async (_event, ctx) => {
     renderFingerprintStatus(ctx);
-    const m: any = (ctx as any)?.model;
-    if (m?.provider === "codebuddy") scheduleEffortProbe(m);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {

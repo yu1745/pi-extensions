@@ -40,31 +40,22 @@ pi 原生 `/login` → 选 `codebuddy` → 二级选择：
 
 ## 思考档位（thinking level）
 
-pi 的 `/thinking` 档位会映射成出网的 `reasoning_effort`：
+pi 的 `/thinking` 档位映射成出网的 `reasoning_effort`：
 
 | pi 档位 | 出网 reasoning_effort |
 |---|---|
-| off | `none`（仅当官方 `canDisableThinking`，否则该档隐藏——上游根本关不掉） |
-| low / medium / high / max | 同名档位（官方声明 `supportedEfforts` 时严格 1:1） |
+| off | `none`（仅当官方 `canDisableThinking`；否则该档隐藏——上游根本关不掉思考） |
+| low / medium / high / max | 同名档位（官方声明 `supportedEfforts` 时严格 1:1，未声明的档位不可选） |
+| minimal | 官方默认档（`defaultEffort`/`effort`） |
+| xhigh | `max`（模型没声明 `xhigh` 时） |
 
-**上游认的档位 ≠ 官方 config 声明的档位。** 实测（2026-10-22，copilot.tencent.com，思考 token 量）：
+官方没声明 `supportedEfforts` 的模型（hy3 / kimi-k3-1 / glm-4.x / minimax-* 等）：
+旧实现返回 undefined，pi 会把 `minimal`/`xhigh` 这类 pi 自己的档位名原样发给上游，
+上游不认 → 该档位形同虚设；现在按同名档位走，minimal 落到官方默认档。
 
-| 模型 | low | medium | high | max |
-|---|---|---|---|---|
-| deepseek-v4.1-flash | 54~80 | — | ~100~200 | 300~600 |
-| kimi-k3-1 | 72 | 74 | 123 | 176 |
-| hy3 | 159 | **0** | 118 | 143 |
-| glm-5.3 | **0** | — | **10** | 234 |
+pi 没给档位时（模型关不掉思考、思考档被隐藏）用该模型的官方默认档，而不是硬编码 `high`。
 
-- **哑档**：上游对某些档位直接不产思考（hy3 的 medium、glm-5.3 的 low/high），
-  用户选了 thinking，模型就是零思考——表现为「思考选项没用」。
-- 扩展在**后台实测**每个档位的思考量（每档 2 次，结果落盘在
-  `<agent-dir>/extensions/codebuddy-fp/effort-cache.json`），
-  把哑档自动换成一个真的会思考的档（思考量 < 最优档 10% 也算哑档）；
-  有思考的档位保持原样，不抹平档位强弱语义。
-- `/codebuddy-effort` 查看当前模型的实测结果；`/codebuddy-effort --probe` 立即重测。
-
-**「一直不思考」不全是插件的问题**：上游模型在**工具轮**（直接调工具）经常一个思考
+**注意：档位传对了 ≠ 一定看得到思考。** 上游模型在工具轮（直接调工具）经常一个思考
 token 都不产生（同一模型走 river 网关也一样），低档位本身思考也少；
 另外 pi 的 `hideThinkingBlock` 为 true 时思考块默认不显示（Ctrl+T 切换）。
 
