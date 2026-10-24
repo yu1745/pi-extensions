@@ -32,6 +32,7 @@ import { gzipSync } from "node:zlib";
 import { randomBytes } from "node:crypto";
 import { createProvider } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { registerCreditUsage } from "./credit.ts";
 import {
   getCodebuddyFingerprint,
   isFingerprintEnvForced,
@@ -1083,6 +1084,7 @@ async function resolveCompletionsBase(): Promise<{ stream: any; streamSimple: an
 // ── 扩展主体 ─────────────────────────────────────────────────────────────────
 
 export default async function (pi: ExtensionAPI) {
+  registerCreditUsage(pi);
   // Resolve the pi-ai entry that this install actually provides (see above).
   const base = await resolveCompletionsBase();
   // onPayload：1) 补官方 CLI 独有字段 verbosity/reasoning_summary；
