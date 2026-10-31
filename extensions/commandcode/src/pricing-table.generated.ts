@@ -11,14 +11,13 @@
 //
 // Source:  https://commandcode.ai/docs/resources/pricing-limits
 // Catalog: https://api.commandcode.ai/provider/v1/models
-// Verified: 2026-10-22
+// Verified: 2026-10-31
 
-export const PRICING_VERIFIED_ON = "2026-10-22"
+export const PRICING_VERIFIED_ON = "2026-10-31"
 
 /** Catalog ids the pricing page serves at no cost. */
 export const GENERATED_FREE_MODEL_IDS: readonly string[] = [
-  "minimax/minimax-m3.1-flash:free",
-  "ornith/ornith-1.5-122b:free",
+  "inclusionai/ling-3.1-flash-1019:free",
   "poolside/laguna-s-2.1-free",
   "reflection/beam:free",
   "stealth/glyph-cluster:free",
@@ -136,7 +135,17 @@ export const GENERATED_MODEL_COSTS = {
       { inputTokensAbove: 272000, input: 4, output: 15, cacheRead: 0.2, cacheWrite: 5 },
     ],
   },
+  "gpt-6.1-terra": {
+    input: 1,
+    output: 5,
+    cacheRead: 0.05,
+    cacheWrite: 1.25,
+    tiers: [
+      { inputTokensAbove: 272000, input: 2, output: 7.5, cacheRead: 0.1, cacheWrite: 2.5 },
+    ],
+  },
   "inclusionai/ling-3.1-flash": { input: 0.3, output: 0.9, cacheRead: 0.06, cacheWrite: 0 },
+  "inclusionai/ling-3.1-flash-1019:free": { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   "meituan/LongCat-2.0": { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 },
   "meta/muse-spark-1.1": { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
   "meta/muse-spark-1.2": { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
@@ -146,7 +155,6 @@ export const GENERATED_MODEL_COSTS = {
   "meta/muse-spark-open": { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
   "meta/muse-wonder-1.0": { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 0 },
   "minimax/minimax-m3.1-flash": { input: 0.15, output: 0.6, cacheRead: 0.015, cacheWrite: 0 },
-  "minimax/minimax-m3.1-flash:free": { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   "MiniMaxAI/MiniMax-M2.5": { input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0 },
   "MiniMaxAI/MiniMax-M2.7": { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 },
   "MiniMaxAI/MiniMax-M3": { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 },
@@ -156,10 +164,10 @@ export const GENERATED_MODEL_COSTS = {
   "moonshotai/Kimi-K2.7-Code": { input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 },
   "moonshotai/Kimi-K2.7-Code-Highspeed": { input: 1.9, output: 8, cacheRead: 0.38, cacheWrite: 0 },
   "moonshotai/Kimi-K3": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
+  "moonshotai/Kimi-K3.1-Pro": { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 0 },
   "nvidia/nemotron-3-ultra-550b-a55b": { input: 0.6, output: 2.4, cacheRead: 0.12, cacheWrite: 0 },
   "nvidia/nemotron-3.5-super-vl": { input: 0.2, output: 0.5, cacheRead: 0.04, cacheWrite: 0 },
   "ornith/ornith-1.5-122b": { input: 0.16, output: 0.64, cacheRead: 0.02, cacheWrite: 0 },
-  "ornith/ornith-1.5-122b:free": { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   "poolside/laguna-s-2.1-free": { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   "Qwen/Qwen3.6-Max-Preview": { input: 1.3, output: 7.8, cacheRead: 0.26, cacheWrite: 1.63 },
   "Qwen/Qwen3.6-Plus": {
@@ -226,8 +234,6 @@ export const GENERATED_MODEL_COSTS = {
       { inputTokensAbove: 200000, input: 4, output: 12, cacheRead: 1, cacheWrite: 0 },
     ],
   },
-  "xiaomi/mimo-v2.5": { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
-  "xiaomi/mimo-v2.5-pro": { input: 0.435, output: 0.87, cacheRead: 0.0036, cacheWrite: 0 },
   "xiaomi/mimo-v2.6-flash": { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
   "xiaomi/mimo-v2.6-pro": { input: 0.435, output: 0.87, cacheRead: 0.0036, cacheWrite: 0 },
   "xiaomi/mimo-v2.6-pro-ultraspeed": { input: 4.35, output: 8.7, cacheRead: 0.036, cacheWrite: 0 },

@@ -120,7 +120,7 @@ describe("MODEL_COSTS pricing overlay", () => {
       cacheRead: 0.003,
       cacheWrite: 0,
     })
-    assertCost("xiaomi/mimo-v2.5-pro", {
+    assertCost("xiaomi/mimo-v2.6-pro", {
       input: 0.435,
       output: 0.87,
       cacheRead: 0.0036,
@@ -189,27 +189,27 @@ describe("MODEL_COSTS pricing overlay", () => {
   })
 
   it("prices a paid model and its :free twin independently", () => {
-    // Upstream lists both ids under one display name ("MiniMax M3.1 Flash"),
+    // Upstream lists both ids under one display name ("Ling 3.1 Flash"),
     // so matching by name alone priced the free twin at the paid rate — or,
     // when the duplicate name aborted the sync, priced neither.
-    assertCost("minimax/minimax-m3.1-flash", {
-      input: 0.15,
-      output: 0.6,
-      cacheRead: 0.015,
+    assertCost("inclusionai/ling-3.1-flash", {
+      input: 0.3,
+      output: 0.9,
+      cacheRead: 0.06,
       cacheWrite: 0,
     })
-    assertCost("minimax/minimax-m3.1-flash:free", {
+    assertCost("inclusionai/ling-3.1-flash-1019:free", {
       input: 0,
       output: 0,
       cacheRead: 0,
       cacheWrite: 0,
     })
     assert.ok(
-      FREE_MODEL_IDS.has("minimax/minimax-m3.1-flash:free"),
+      FREE_MODEL_IDS.has("inclusionai/ling-3.1-flash-1019:free"),
       "the :free twin should be declared free",
     )
     assert.ok(
-      !FREE_MODEL_IDS.has("minimax/minimax-m3.1-flash"),
+      !FREE_MODEL_IDS.has("inclusionai/ling-3.1-flash"),
       "the paid twin should never be declared free",
     )
   })
