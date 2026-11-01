@@ -64,7 +64,6 @@
 			"extensions/web-reader/index.ts",
 			"extensions/working-bell.ts",
 			"bundle/web-search.js",
-			"extensions/filter-image-reader.ts",
 			"bundle/antigravity.js",
 			"extensions/subagents-cost.ts",
 			"extensions/deepseek-time-pricing.ts",

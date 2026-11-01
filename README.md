@@ -28,7 +28,6 @@ pi install git:github.com/yu1745/pi-extensions
 | `compact-threshold` | `extensions/compact-threshold.ts` | `/compact-threshold 70` lowers the auto-compact trigger for the current session only; reset on `/new`, `/resume`, `/fork` |
 | `chinese-bang-bash` | `extensions/chinese-bang-bash.ts` | Full-width `！` / `！！` trigger Bash mode: keys colour on press, and submission converts them to `!` / `!!` for the native handler |
 | `smart-ctrl-c` | `extensions/smart-ctrl-c.ts` | Ctrl+C behaviour patch for the TUI editor (interrupt, then clear input on second press) |
-| `filter-image-reader` | `extensions/filter-image-reader.ts` | When the active model already has vision, steers it to `read` instead of the `image-reader` subagent, and filters that subagent out of the Agent tool description |
 | `subagents-cost` | `extensions/subagents-cost.ts` | `/subagents-cost` interactive overlay with per-subagent cost/usage breakdown, aggregated across billing entries, sortable by cost or spawn order |
 | `codex-cost` | `extensions/codex-cost.ts` | `/codex-cost` syncs OpenAI Codex quota and the daily cross-device spend ledger |
 | `working-bell` | `extensions/working-bell.ts` | Working bell + title status |
