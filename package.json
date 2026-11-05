@@ -67,6 +67,7 @@
 			"bundle/antigravity.js",
 			"extensions/subagents-cost.ts",
 			"extensions/deepseek-time-pricing.ts",
+			"extensions/opengateway/index.ts",
 			"extensions/codex-cost.ts",
 			"extensions/chinese-bang-bash.ts",
 			"extensions/smart-ctrl-c.ts",
