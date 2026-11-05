@@ -11,15 +11,14 @@
 //
 // Source:  https://commandcode.ai/docs/resources/pricing-limits
 // Catalog: https://api.commandcode.ai/provider/v1/models
-// Verified: 2026-10-31
+// Verified: 2026-11-05
 
-export const PRICING_VERIFIED_ON = "2026-10-31"
+export const PRICING_VERIFIED_ON = "2026-11-05"
 
 /** Catalog ids the pricing page serves at no cost. */
 export const GENERATED_FREE_MODEL_IDS: readonly string[] = [
-  "inclusionai/ling-3.1-flash-1019:free",
-  "poolside/laguna-s-2.1-free",
   "reflection/beam:free",
+  "stealth/crouton-alpha",
   "stealth/glyph-cluster:free",
 ]
 
@@ -145,7 +144,7 @@ export const GENERATED_MODEL_COSTS = {
     ],
   },
   "inclusionai/ling-3.1-flash": { input: 0.3, output: 0.9, cacheRead: 0.06, cacheWrite: 0 },
-  "inclusionai/ling-3.1-flash-1019:free": { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  "inclusionai/ling-3.1-flash-1019": { input: 0.3, output: 0.9, cacheRead: 0.06, cacheWrite: 0 },
   "meituan/LongCat-2.0": { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 },
   "meta/muse-spark-1.1": { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
   "meta/muse-spark-1.2": { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
@@ -168,7 +167,6 @@ export const GENERATED_MODEL_COSTS = {
   "nvidia/nemotron-3-ultra-550b-a55b": { input: 0.6, output: 2.4, cacheRead: 0.12, cacheWrite: 0 },
   "nvidia/nemotron-3.5-super-vl": { input: 0.2, output: 0.5, cacheRead: 0.04, cacheWrite: 0 },
   "ornith/ornith-1.5-122b": { input: 0.16, output: 0.64, cacheRead: 0.02, cacheWrite: 0 },
-  "poolside/laguna-s-2.1-free": { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   "Qwen/Qwen3.6-Max-Preview": { input: 1.3, output: 7.8, cacheRead: 0.26, cacheWrite: 1.63 },
   "Qwen/Qwen3.6-Plus": {
     input: 0.5,
@@ -207,6 +205,7 @@ export const GENERATED_MODEL_COSTS = {
   "Qwen/Qwen3.8-Omni-Flash": { input: 0.15, output: 0.47, cacheRead: 0.016, cacheWrite: 0 },
   "reflection/beam:free": { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   "sakana/fugu-ultra": { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
+  "stealth/crouton-alpha": { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   "stealth/glyph-cluster:free": { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   "stepfun/Step-3.5-Flash": { input: 0.09, output: 0.3, cacheRead: 0.02, cacheWrite: 0 },
   "stepfun/Step-3.7-Flash": { input: 0.2, output: 1.15, cacheRead: 0.04, cacheWrite: 0 },

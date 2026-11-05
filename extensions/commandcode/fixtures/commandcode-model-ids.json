@@ -1,5 +1,5 @@
 {
-  "fetchedAt": "2026-10-31T18:33:04.696Z",
+  "fetchedAt": "2026-11-05T18:32:36.651Z",
   "source": "https://api.commandcode.ai/provider/v1/models",
   "modelIds": [
     "MiniMaxAI/MiniMax-M2.5",
@@ -53,7 +53,7 @@
     "gpt-6.1-sol",
     "gpt-6.1-terra",
     "inclusionai/ling-3.1-flash",
-    "inclusionai/ling-3.1-flash-1019:free",
+    "inclusionai/ling-3.1-flash-1019",
     "meituan/LongCat-2.0",
     "meta/muse-spark-1.1",
     "meta/muse-spark-1.2",
@@ -73,9 +73,9 @@
     "nvidia/nemotron-3-ultra-550b-a55b",
     "nvidia/nemotron-3.5-super-vl",
     "ornith/ornith-1.5-122b",
-    "poolside/laguna-s-2.1-free",
     "reflection/beam:free",
     "sakana/fugu-ultra",
+    "stealth/crouton-alpha",
     "stealth/glyph-cluster:free",
     "stepfun/Step-3.5-Flash",
     "stepfun/Step-3.7-Flash",
