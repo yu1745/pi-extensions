@@ -1,92 +1,93 @@
 {
-	"name": "@yu1745/pi-extensions",
-	"version": "0.1.0",
-	"description": "Monorepo of yu1745's pi extensions: web search/reader, vision, provider quota footers, and UX tweaks.",
-	"type": "module",
-	"license": "MIT",
-	"author": "yu1745",
-	"packageManager": "pnpm@11.20.0",
-	"files": [
-		"extensions",
-		"bundle"
-	],
-	"scripts": {
-		"build:extensions": "node scripts/build-extensions.mjs",
-		"check:bundles": "node scripts/build-extensions.mjs --check",
-		"test:bundles": "node --test tests/startup-bundles.test.mjs",
-		"test": "node scripts/run-tests.mjs",
-		"test:commandcode": "node --experimental-transform-types --test --test-concurrency=4 tests/commandcode-*.test.ts tests/commandcode-upstream/test-*.ts",
-		"typecheck:commandcode": "tsc -p extensions/commandcode/tsconfig.json",
-		"pricing:sync": "node scripts/sync-pricing.mjs",
-		"pricing:check": "node scripts/sync-pricing.mjs --check"
-	},
-	"dependencies": {
-		"@huggingface/tokenizers": "^0.2.0",
-		"linkedom": "^0.18.13",
-		"playwright": "1.61.0",
-		"undici": "^8.10.1"
-	},
-	"devDependencies": {
-		"@earendil-works/pi-ai": "1.0.0",
-		"@earendil-works/pi-coding-agent": "1.0.0",
-		"@earendil-works/pi-tui": "1.0.0",
-		"@types/node": "^25.9.1",
-		"esbuild": "0.28.2",
-		"jiti": "2.7.0",
-		"typebox": "1.1.38",
-		"typescript": "^6.0.3"
-	},
-	"peerDependencies": {
-		"@earendil-works/pi-ai": "*",
-		"@earendil-works/pi-coding-agent": "*",
-		"@earendil-works/pi-tui": "*",
-		"typebox": "*"
-	},
-	"pi": {
-		"extensions": [
-			"extensions/clear-new-alias.ts",
-			"extensions/codex-timer.ts",
-			"extensions/compact-threshold.ts",
-			"extensions/status-footer.ts",
-			"extensions/inject-resume.ts",
-			"extensions/openai-codex-fast.ts",
-			"extensions/context-window.ts",
-			"extensions/append.ts",
-			"extensions/quota-footer.ts",
-			"extensions/image-view/index.ts",
-			"extensions/siliconflow.ts",
-			"extensions/commandcode/index.ts",
-			"extensions/codebuddy-fp/index.ts",
-			"extensions/codebuddy-fallback/index.ts",
-			"extensions/qoder-fp/index.ts",
-			"extensions/tokenspeed.ts",
-			"extensions/tool-duration.ts",
-			"extensions/web-reader/index.ts",
-			"extensions/working-bell.ts",
-			"bundle/web-search.js",
-			"bundle/antigravity.js",
-			"extensions/subagents-cost.ts",
-			"extensions/deepseek-time-pricing.ts",
-			"extensions/opengateway/index.ts",
-			"extensions/codex-cost.ts",
-			"extensions/chinese-bang-bash.ts",
-			"extensions/smart-ctrl-c.ts",
-			"extensions/served-model.ts"
-		]
-	},
-	"keywords": [
-		"pi-package",
-		"pi",
-		"pi-extension",
-		"zai",
-		"web-search",
-		"vision",
-		"web-reader",
-		"web-reader-local",
-		"playwright"
-	],
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/yu1745/pi-extensions.git"
-	}
+  "name": "@yu1745/pi-extensions",
+  "version": "0.1.0",
+  "description": "Monorepo of yu1745's pi extensions: web search/reader, vision, provider quota footers, and UX tweaks.",
+  "type": "module",
+  "license": "MIT",
+  "author": "yu1745",
+  "packageManager": "pnpm@11.20.0",
+  "files": [
+    "extensions",
+    "bundle"
+  ],
+  "scripts": {
+    "build:extensions": "node scripts/build-extensions.mjs",
+    "check:bundles": "node scripts/build-extensions.mjs --check",
+    "test:bundles": "node --test tests/startup-bundles.test.mjs",
+    "test": "node scripts/run-tests.mjs",
+    "test:commandcode": "node --experimental-transform-types --test --test-concurrency=4 tests/commandcode-*.test.ts tests/commandcode-upstream/test-*.ts",
+    "typecheck:commandcode": "tsc -p extensions/commandcode/tsconfig.json",
+    "pricing:sync": "node scripts/sync-pricing.mjs",
+    "pricing:check": "node scripts/sync-pricing.mjs --check"
+  },
+  "dependencies": {
+    "@huggingface/tokenizers": "^0.2.0",
+    "linkedom": "^0.18.13",
+    "playwright": "1.61.0",
+    "undici": "^8.10.1"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-coding-agent": "1.0.0",
+    "@earendil-works/pi-tui": "1.0.0",
+    "@types/node": "^25.9.1",
+    "esbuild": "0.28.2",
+    "jiti": "2.7.0",
+    "typebox": "1.1.38",
+    "typescript": "^6.0.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "extensions/clear-new-alias.ts",
+      "extensions/codex-timer.ts",
+      "extensions/compact-threshold.ts",
+      "extensions/status-footer.ts",
+      "extensions/inject-resume.ts",
+      "extensions/openai-codex-fast.ts",
+      "extensions/context-window.ts",
+      "extensions/append.ts",
+      "extensions/quota-footer.ts",
+      "extensions/image-view/index.ts",
+      "extensions/siliconflow.ts",
+      "extensions/commandcode/index.ts",
+      "extensions/codebuddy-fp/index.ts",
+      "extensions/codebuddy-fallback/index.ts",
+      "extensions/qoder-fp/index.ts",
+      "extensions/tokenspeed.ts",
+      "extensions/tool-duration.ts",
+      "extensions/web-reader/index.ts",
+      "extensions/working-bell.ts",
+      "bundle/web-search.js",
+      "bundle/antigravity.js",
+      "extensions/subagents-cost.ts",
+      "extensions/deepseek-time-pricing.ts",
+      "extensions/opengateway/index.ts",
+      "extensions/codex-cost.ts",
+      "extensions/chinese-bang-bash.ts",
+      "extensions/smart-ctrl-c.ts",
+      "extensions/served-model.ts",
+      "extensions/gemini-web-app/index.ts"
+    ]
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "zai",
+    "web-search",
+    "vision",
+    "web-reader",
+    "web-reader-local",
+    "playwright"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yu1745/pi-extensions.git"
+  }
 }
