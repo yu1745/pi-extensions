@@ -11,6 +11,7 @@ pi install git:github.com/yu1745/pi-extensions
 | Extension | Path | What it does |
 |---|---|---|
 | `antigravity` | `extensions/antigravity/` | Antigravity provider (`/login antigravity`) with OAuth login + automatic token refresh, plus `/antigravity.usage`, `/antigravity.models`, `/antigravity.doctor` |
+| `thinking-translate` | `extensions/thinking-translate/` | 思考内容自动翻译：英文占比超过阈值的 thinking 才用便宜模型翻成中文，译文只走 `registerMarkdownTransformer` 顶在显示层（上下文不变）。默认关闭，快捷键开/关（`ctrl+k` 被内置 `tui.editor.deleteToLineEnd` 占为保留键，实际回退 `alt+k`）；译文块顶部带主题色标记（默认行内代码 `🀄 译`，紫色）便于分辨；译文缓存在会话 jsonl 旁边的 `<session>.thinking-translate.txt`（jsonl 格式），续会话后历史思考仍是中文；`/thinking-translate on\|off\|status`，见 [README](extensions/thinking-translate/README.md) |
 | `served_model` | `extensions/served-model.ts` | Captures the backend-served model (`response.model`) for `openai-responses` / `openai-codex-responses` / `azure-openai-responses` via a `registerApiProvider` override, stamps it onto `AssistantMessage.responseModel`, and shows a warning line only on genuine substitution (dated snapshots / effort suffixes are ignored) |
 | `qoder` | `extensions/qoder-fp/` | Qoder provider with full CLI fingerprint simulation (24 ordered Cosy headers, RSA-1024 + AES-128-CBC signed `Authorization`, custom Base64 body alphabet); `/login qoder` via standard device flow, or `/qoder-import` |
 | `web_reader` | `extensions/web-reader/` | Anti-WAF web reader with Playwright + stealth + ARIA extraction + Jev semantic load verification |
@@ -49,7 +50,7 @@ pi install git:github.com/yu1745/pi-extensions
 
 </details>
 
-> **28 extensions, one package.** Previously separate repos (`pi-web-reader-spa`) are merged here — uninstall the standalone packages before installing this one to avoid duplicate tool registration.
+> **29 extensions, one package.** Previously separate repos (`pi-web-reader-spa`) are merged here — uninstall the standalone packages before installing this one to avoid duplicate tool registration.
 > pi-smart-compact is provided separately by the fork `git:github.com/yu1745/pi-smart-compact` (upstream + `allowUnverifiedApply`).>
 > The `subagent` extension was **removed** in favor of [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents) (install with `pi install npm:@tintinweb/pi-subagents`).
 

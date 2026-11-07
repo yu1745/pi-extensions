@@ -72,6 +72,7 @@
       "extensions/chinese-bang-bash.ts",
       "extensions/smart-ctrl-c.ts",
       "extensions/served-model.ts",
+      "extensions/thinking-translate/index.ts",
       "extensions/gemini-web-app/index.ts"
     ]
   },
